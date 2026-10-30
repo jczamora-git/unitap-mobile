@@ -1,0 +1,135 @@
+/* UniTap Living Interface — Color System, Semantic Palette & Typography Tokens */
+
+:root {
+  --ion-font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+
+  /* Primary Brand Accent (Aurora Mint) */
+  --ion-color-primary: #159A74;
+  --ion-color-primary-rgb: 21, 154, 116;
+  --ion-color-primary-contrast: #ffffff;
+  --ion-color-primary-contrast-rgb: 255, 255, 255;
+  --ion-color-primary-shade: #118161;
+  --ion-color-primary-tint: #70F3CF;
+
+  /* Secondary Accent (Soft Violet) */
+  --ion-color-secondary: #8B85F6;
+  --ion-color-secondary-rgb: 139, 133, 246;
+  --ion-color-secondary-contrast: #ffffff;
+  --ion-color-secondary-shade: #746de3;
+  --ion-color-secondary-tint: #a6a2f8;
+
+  /* Success (Aurora Mint / Emerald) */
+  --ion-color-success: #159A74;
+  --ion-color-success-rgb: 21, 154, 116;
+  --ion-color-success-contrast: #ffffff;
+  --ion-color-success-shade: #118161;
+  --ion-color-success-tint: #70F3CF;
+
+  /* Warning (Warm Peach / Amber) */
+  --ion-color-warning: #D99522;
+  --ion-color-warning-rgb: 217, 149, 34;
+  --ion-color-warning-contrast: #ffffff;
+  --ion-color-warning-shade: #B87B17;
+  --ion-color-warning-tint: #FFB78F;
+
+  /* Danger (Subdued Crimson) */
+  --ion-color-danger: #DC4B4B;
+  --ion-color-danger-rgb: 220, 75, 75;
+  --ion-color-danger-contrast: #ffffff;
+  --ion-color-danger-shade: #BD3A3A;
+  --ion-color-danger-tint: #E46868;
+
+  /* Brand Accents */
+  --aurora-mint: #70F3CF;
+  --aurora-mint-rgb: 112, 243, 207;
+  --aurora-sky: #65BFFF;
+  --aurora-sky-rgb: 101, 191, 255;
+  --aurora-violet: #8B85F6;
+  --aurora-violet-rgb: 139, 133, 246;
+  --aurora-peach: #FFB78F;
+  --aurora-peach-rgb: 255, 183, 143;
+
+  /* Light Theme Surfaces & Text (Living Interface) */
+  --app-bg: #F7F8FA;
+  --app-bg-elevated: #FFFFFF;
+  --app-surface: #FFFFFF;
+  --app-surface-subtle: #F0F2F5;
+  --app-surface-elevated: #FFFFFF;
+  --app-border: #E8EBEF;
+  --app-border-subtle: #F2F4F7;
+  --app-text-primary: #17191D;
+  --app-text-secondary: #89919D;
+  --app-text-muted: #9CA3AF;
+  
+  --app-accent-mint: #0E8560;
+  --app-accent-soft: rgba(112, 243, 207, 0.16);
+  --app-accent-glow: rgba(112, 243, 207, 0.25);
+
+  /* Hero Surfaces */
+  --app-fintech-hero-bg: #15181F;
+  --app-fintech-hero-text: #F8F9FB;
+  --app-fintech-hero-sub: #89919D;
+  --app-fintech-hero-border: rgba(255, 255, 255, 0.09);
+
+  /* Radii */
+  --app-card-radius: 20px;
+  --app-pill-radius: 9999px;
+  --app-input-radius: 12px;
+  --app-btn-radius: 12px;
+  --app-icon-radius: 12px;
+
+  /* Shadows */
+  --app-shadow-card: 0 4px 18px rgba(0, 0, 0, 0.04), 0 1px 3px rgba(0, 0, 0, 0.02);
+  --app-shadow-nav: 0 12px 36px rgba(0, 0, 0, 0.08);
+  --app-shadow-modal: 0 24px 48px rgba(0, 0, 0, 0.12);
+
+  /* Ionic Overrides */
+  --ion-background-color: var(--app-bg);
+  --ion-text-color: var(--app-text-primary);
+  --ion-item-background: var(--app-surface);
+  --ion-border-color: var(--app-border);
+}
+
+/* Dark Theme (Living Interface Graphite & Charcoal) */
+@media (prefers-color-scheme: dark) {
+  :root {
+    --ion-color-primary: #70F3CF;
+    --ion-color-primary-rgb: 112, 243, 207;
+    --ion-color-primary-contrast: #0C1A16;
+    --ion-color-primary-contrast-rgb: 12, 26, 22;
+    --ion-color-primary-shade: #5CD5B2;
+    --ion-color-primary-tint: #8EF6DA;
+
+    --ion-color-success: #70F3CF;
+    --ion-color-warning: #FFB78F;
+    --ion-color-danger: #E85D5D;
+
+    --app-bg: #111318;
+    --app-bg-elevated: #181B21;
+    --app-surface: #1B1E24;
+    --app-surface-subtle: #242831;
+    --app-surface-elevated: #242831;
+    --app-border: rgba(255, 255, 255, 0.08);
+    --app-border-subtle: rgba(255, 255, 255, 0.05);
+    --app-text-primary: #F8F9FB;
+    --app-text-secondary: #89919D;
+    --app-text-muted: #6B7280;
+
+    --app-accent-mint: #70F3CF;
+    --app-accent-soft: rgba(112, 243, 207, 0.14);
+    --app-accent-glow: rgba(112, 243, 207, 0.28);
+
+    --app-fintech-hero-bg: #181B22;
+    --app-fintech-hero-text: #F8F9FB;
+    --app-fintech-hero-sub: #89919D;
+    --app-fintech-hero-border: rgba(255, 255, 255, 0.1);
+
+    --app-shadow-card: 0 6px 20px rgba(0, 0, 0, 0.35);
+    --app-shadow-nav: 0 14px 40px rgba(0, 0, 0, 0.6);
+
+    --ion-background-color: var(--app-bg);
+    --ion-text-color: var(--app-text-primary);
+    --ion-item-background: var(--app-surface);
+    --ion-border-color: var(--app-border);
+  }
+}

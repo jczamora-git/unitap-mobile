@@ -1,0 +1,365 @@
+/* UniTap Premium Aurora — Gradient Tokens, Surface Layering & Luminous Depth */
+
+:root {
+  /* Signature Aurora Gradients */
+  --aurora-gradient-primary: linear-gradient(135deg, rgba(16, 32, 36, 0.95) 0%, rgba(20, 26, 48, 0.96) 55%, rgba(32, 22, 42, 0.97) 100%);
+  --aurora-gradient-cool: linear-gradient(135deg, rgba(18, 28, 48, 0.95) 0%, rgba(25, 24, 46, 0.95) 60%, rgba(30, 20, 42, 0.97) 100%);
+  --aurora-gradient-warm: linear-gradient(135deg, rgba(38, 25, 28, 0.95) 0%, rgba(30, 24, 44, 0.95) 60%, rgba(20, 26, 45, 0.97) 100%);
+  --aurora-gradient-mint: linear-gradient(135deg, rgba(12, 34, 30, 0.95) 0%, rgba(18, 28, 36, 0.95) 50%, rgba(18, 22, 28, 0.98) 100%);
+
+  /* Light Theme Glow & Atmosphere */
+  --aurora-light-primary: linear-gradient(135deg, #18222E 0%, #171E34 60%, #1F192C 100%);
+}
+
+/* ========================================================
+   PREMIUM AURORA CARD STYLING & DEPTH
+   ======================================================== */
+.aurora-card {
+  position: relative;
+  overflow: hidden;
+  border-radius: var(--app-card-radius);
+  background: var(--aurora-gradient-primary);
+  color: #FFFFFF;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-top: 1px solid rgba(255, 255, 255, 0.22);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.25), inset 0 1px 0 rgba(255, 255, 255, 0.12);
+  transition: transform 0.2s cubic-bezier(0.16, 1, 0.3, 1), box-shadow 0.2s ease;
+}
+
+/* Atmospheric Multi-layer Radial Glows */
+.aurora-card::before {
+  content: '';
+  position: absolute;
+  top: -30%;
+  left: -20%;
+  width: 140%;
+  height: 140%;
+  pointer-events: none;
+  background:
+    radial-gradient(circle at 18% 22%, rgba(112, 243, 207, 0.22) 0%, transparent 42%),
+    radial-gradient(circle at 82% 78%, rgba(139, 133, 246, 0.25) 0%, transparent 48%),
+    radial-gradient(circle at 74% 20%, rgba(101, 191, 255, 0.20) 0%, transparent 44%),
+    radial-gradient(circle at 20% 85%, rgba(255, 183, 143, 0.12) 0%, transparent 40%);
+  opacity: 0.95;
+  z-index: 0;
+}
+
+/* Subtle Geometric / NFC Wave Light Watermark */
+.aurora-card::after {
+  content: '';
+  position: absolute;
+  right: -24px;
+  bottom: -24px;
+  width: 160px;
+  height: 160px;
+  border-radius: 50%;
+  border: 1px dashed rgba(255, 255, 255, 0.08);
+  box-shadow: 
+    0 0 0 20px rgba(255, 255, 255, 0.03),
+    0 0 0 42px rgba(255, 255, 255, 0.02);
+  pointer-events: none;
+  z-index: 0;
+}
+
+.aurora-card > * {
+  position: relative;
+  z-index: 1;
+}
+
+/* Card Variants */
+.aurora-card.aurora-variant-cool {
+  background: var(--aurora-gradient-cool);
+}
+.aurora-card.aurora-variant-cool::before {
+  background:
+    radial-gradient(circle at 25% 25%, rgba(101, 191, 255, 0.25) 0%, transparent 45%),
+    radial-gradient(circle at 80% 75%, rgba(139, 133, 246, 0.28) 0%, transparent 50%);
+}
+
+.aurora-card.aurora-variant-warm {
+  background: var(--aurora-gradient-warm);
+}
+.aurora-card.aurora-variant-warm::before {
+  background:
+    radial-gradient(circle at 20% 30%, rgba(255, 183, 143, 0.22) 0%, transparent 45%),
+    radial-gradient(circle at 80% 75%, rgba(139, 133, 246, 0.22) 0%, transparent 48%);
+}
+
+.aurora-card.aurora-variant-mint {
+  background: var(--aurora-gradient-mint);
+}
+.aurora-card.aurora-variant-mint::before {
+  background:
+    radial-gradient(circle at 18% 25%, rgba(112, 243, 207, 0.26) 0%, transparent 44%),
+    radial-gradient(circle at 80% 75%, rgba(16, 185, 129, 0.20) 0%, transparent 48%);
+}
+
+/* Card Header & Content Typography */
+.aurora-card .hero-overline {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--aurora-mint);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.aurora-card .hero-title {
+  font-size: 20px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  color: #FFFFFF;
+  margin: 4px 0 2px 0;
+  line-height: 1.2;
+}
+
+.aurora-card .hero-sub {
+  font-size: 13px;
+  color: rgba(255, 255, 255, 0.72);
+  margin: 0;
+}
+
+.aurora-card .hero-balance {
+  font-size: 32px;
+  font-weight: 750;
+  letter-spacing: -0.03em;
+  color: #FFFFFF;
+  line-height: 1.1;
+  margin: 8px 0;
+  text-shadow: 0 2px 10px rgba(0, 0, 0, 0.25);
+}
+
+/* ========================================================
+   LUMINOUS NFC SCANNER SURFACE
+   ======================================================== */
+.luminous-scanner-surface {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 34px 20px;
+  background: var(--app-surface);
+  border: 1px solid var(--app-border);
+  border-radius: 24px;
+  box-shadow: var(--app-shadow-card);
+  overflow: hidden;
+  text-align: center;
+}
+
+.luminous-scanner-surface::before {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: 260px;
+  height: 260px;
+  border-radius: 50%;
+  background: radial-gradient(
+    circle,
+    rgba(112, 243, 207, 0.16) 0%,
+    rgba(101, 191, 255, 0.10) 45%,
+    rgba(24, 27, 33, 0) 70%
+  );
+  pointer-events: none;
+  z-index: 0;
+  transition: opacity 0.3s ease;
+}
+
+.luminous-scanner-surface.is-scanning::before {
+  background: radial-gradient(
+    circle,
+    rgba(112, 243, 207, 0.28) 0%,
+    rgba(101, 191, 255, 0.18) 45%,
+    rgba(24, 27, 33, 0) 70%
+  );
+}
+
+.luminous-radar-wrap {
+  position: relative;
+  width: 120px;
+  height: 120px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 16px;
+  z-index: 1;
+}
+
+/* Concentric Ripple Waves */
+.radar-ring {
+  position: absolute;
+  border-radius: 50%;
+  border: 1px solid rgba(112, 243, 207, 0.25);
+  pointer-events: none;
+}
+
+.radar-ring.ring-1 {
+  width: 82px;
+  height: 82px;
+}
+
+.radar-ring.ring-2 {
+  width: 108px;
+  height: 108px;
+  border-color: rgba(101, 191, 255, 0.18);
+}
+
+.radar-ring.ring-3 {
+  width: 132px;
+  height: 132px;
+  border-color: rgba(139, 133, 246, 0.12);
+}
+
+.is-scanning .radar-ring.ring-1 {
+  animation: radar-pulse-1 2.4s infinite cubic-bezier(0.16, 1, 0.3, 1);
+}
+.is-scanning .radar-ring.ring-2 {
+  animation: radar-pulse-2 2.4s infinite cubic-bezier(0.16, 1, 0.3, 1) 0.35s;
+}
+.is-scanning .radar-ring.ring-3 {
+  animation: radar-pulse-3 2.4s infinite cubic-bezier(0.16, 1, 0.3, 1) 0.7s;
+}
+
+@keyframes radar-pulse-1 {
+  0% { transform: scale(0.95); opacity: 0.3; }
+  50% { transform: scale(1.05); opacity: 0.8; }
+  100% { transform: scale(0.95); opacity: 0.3; }
+}
+
+@keyframes radar-pulse-2 {
+  0% { transform: scale(0.96); opacity: 0.2; }
+  50% { transform: scale(1.06); opacity: 0.6; }
+  100% { transform: scale(0.96); opacity: 0.2; }
+}
+
+@keyframes radar-pulse-3 {
+  0% { transform: scale(0.97); opacity: 0.1; }
+  50% { transform: scale(1.07); opacity: 0.45; }
+  100% { transform: scale(0.97); opacity: 0.1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .is-scanning .radar-ring.ring-1,
+  .is-scanning .radar-ring.ring-2,
+  .is-scanning .radar-ring.ring-3 {
+    animation: none;
+  }
+}
+
+/* Central Radar Core */
+.radar-core {
+  width: 60px;
+  height: 60px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, rgba(112, 243, 207, 0.2) 0%, rgba(101, 191, 255, 0.15) 100%);
+  border: 1.5px solid var(--aurora-mint);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--aurora-mint);
+  box-shadow: 0 0 20px rgba(112, 243, 207, 0.35);
+  z-index: 2;
+  transition: all 0.25s ease;
+}
+
+.radar-core ion-icon {
+  font-size: 28px;
+}
+
+.is-scanning .radar-core {
+  box-shadow: 0 0 26px rgba(112, 243, 207, 0.55), inset 0 0 10px rgba(112, 243, 207, 0.25);
+  transform: scale(1.02);
+}
+
+/* ========================================================
+   DIGITAL STUDENT ID CARD STYLING
+   ======================================================== */
+.digital-id-card {
+  position: relative;
+  overflow: hidden;
+  border-radius: 22px;
+  background: var(--aurora-gradient-primary);
+  color: #FFFFFF;
+  padding: 22px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-top: 1px solid rgba(255, 255, 255, 0.25);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.3), inset 0 1px 0 rgba(255, 255, 255, 0.15);
+}
+
+.digital-id-card::before {
+  content: '';
+  position: absolute;
+  top: -20%;
+  right: -20%;
+  width: 140%;
+  height: 140%;
+  background:
+    radial-gradient(circle at 80% 20%, rgba(112, 243, 207, 0.24) 0%, transparent 45%),
+    radial-gradient(circle at 20% 80%, rgba(139, 133, 246, 0.20) 0%, transparent 50%);
+  pointer-events: none;
+  z-index: 0;
+}
+
+.digital-id-card > * {
+  position: relative;
+  z-index: 1;
+}
+
+.digital-id-chip-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 20px;
+}
+
+.simulated-emv-chip {
+  width: 36px;
+  height: 28px;
+  border-radius: 6px;
+  background: linear-gradient(135deg, #FFB78F 0%, #D99522 60%, #B87B17 100%);
+  border: 1px solid rgba(255, 255, 255, 0.3);
+  position: relative;
+}
+
+.simulated-emv-chip::after {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 0;
+  right: 0;
+  height: 1px;
+  background: rgba(0, 0, 0, 0.3);
+}
+
+/* ========================================================
+   MINT INTERACTIVE ACCENTS & REFINEMENTS
+   ======================================================== */
+.btn-aurora-mint {
+  --background: var(--aurora-mint);
+  --color: #0A261D;
+  font-weight: 650;
+  box-shadow: 0 4px 14px rgba(112, 243, 207, 0.35);
+}
+
+.text-aurora-mint {
+  color: var(--aurora-mint) !important;
+}
+
+.border-aurora-mint {
+  border-color: var(--aurora-mint) !important;
+}
+
+.badge-aurora-mint {
+  background: rgba(112, 243, 207, 0.16);
+  color: var(--aurora-mint);
+  border: 1px solid rgba(112, 243, 207, 0.25);
+}
+
+/* Active Event Card Accent Strip */
+.active-event-strip {
+  border-left: 3.5px solid var(--aurora-mint) !important;
+}

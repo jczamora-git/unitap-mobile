@@ -1,0 +1,419 @@
+/* UniTap Minimal — Global Utility, Typography, and Primitive Styles */
+
+/* Safe area & container spacing */
+.safe-content {
+  --padding-top: 12px;
+  --padding-bottom: calc(92px + var(--ion-safe-area-bottom, 0px));
+  --padding-start: 16px;
+  --padding-end: 16px;
+  --background: var(--app-bg);
+}
+
+@media (min-width: 480px) {
+  .safe-content {
+    --padding-start: 20px;
+    --padding-end: 20px;
+  }
+}
+
+.page-container {
+  max-width: 580px;
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
+}
+
+/* Typography Utilities */
+.page-title {
+  font-size: 26px;
+  font-weight: 700;
+  letter-spacing: -0.025em;
+  color: var(--app-text-primary);
+  line-height: 1.15;
+  margin: 0;
+}
+
+.page-subtitle {
+  font-size: 13px;
+  font-weight: 400;
+  color: var(--app-text-secondary);
+  line-height: 1.35;
+  margin-top: 3px;
+}
+
+.section-heading {
+  font-size: 18px;
+  font-weight: 650;
+  letter-spacing: -0.015em;
+  color: var(--app-text-primary);
+  margin: 0 0 12px 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.section-heading-sub {
+  font-size: 12px;
+  color: var(--app-text-secondary);
+  font-weight: 400;
+}
+
+.card-title {
+  font-size: 16px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--app-text-primary);
+  margin: 0;
+}
+
+.body-text {
+  font-size: 14px;
+  font-weight: 400;
+  color: var(--app-text-primary);
+  line-height: 1.45;
+}
+
+.secondary-text {
+  font-size: 13px;
+  font-weight: 400;
+  color: var(--app-text-secondary);
+}
+
+.metadata-text {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--app-text-muted);
+  letter-spacing: 0.02em;
+}
+
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
+
+.font-mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  letter-spacing: 0.02em;
+}
+
+/* Header Composition */
+.header-styled {
+  background: var(--app-bg);
+}
+
+.header-styled ion-toolbar {
+  --background: var(--app-bg);
+  --border-width: 0;
+  --padding-top: calc(8px + var(--ion-safe-area-top, 0px));
+  --padding-bottom: 8px;
+  --padding-start: 16px;
+  --padding-end: 16px;
+}
+
+.header-inner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+}
+
+/* Minimal Surface Cards */
+.minimal-card {
+  background: var(--app-surface);
+  border: 1px solid var(--app-border);
+  border-radius: var(--app-card-radius);
+  padding: 16px;
+  box-shadow: var(--app-shadow-card);
+  transition: transform 0.15s ease, border-color 0.15s ease;
+}
+
+.minimal-card-interactive {
+  cursor: pointer;
+}
+
+.minimal-card-interactive:active {
+  transform: scale(0.99);
+}
+
+/* Action button overrides - Controlled, non-oversized */
+ion-button {
+  --border-radius: var(--app-btn-radius);
+  font-weight: 600;
+  font-size: 14px;
+  letter-spacing: -0.01em;
+  text-transform: none;
+}
+
+ion-button.button-small {
+  font-size: 13px;
+  --padding-start: 12px;
+  --padding-end: 12px;
+}
+
+/* Standardized Header Action Buttons */
+.uni-header-action-btn,
+.settings-action-btn,
+.diagnostics-action-btn,
+.header-action-btn {
+  width: 40px;
+  height: 40px;
+  min-width: 40px;
+  min-height: 40px;
+  border-radius: 11px;
+  background: var(--uni-surface, var(--app-surface));
+  border: 1px solid var(--uni-border, var(--app-border));
+  color: var(--uni-text-primary, var(--app-text-primary));
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  padding: 0;
+  box-sizing: border-box;
+  transition: transform 0.15s cubic-bezier(0.16, 1, 0.3, 1), background-color 0.15s ease, border-color 0.15s ease;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.uni-header-action-btn:active,
+.settings-action-btn:active,
+.diagnostics-action-btn:active,
+.header-action-btn:active {
+  transform: scale(0.92);
+  background: var(--uni-surface-elevated, var(--app-surface-subtle));
+}
+
+.uni-header-action-btn:focus-visible,
+.settings-action-btn:focus-visible,
+.diagnostics-action-btn:focus-visible,
+.header-action-btn:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px rgba(112, 243, 207, 0.4);
+}
+
+.uni-header-action-btn ion-icon,
+.settings-action-btn ion-icon,
+.diagnostics-action-btn ion-icon,
+.header-action-btn ion-icon {
+  font-size: 21px;
+  width: 21px;
+  height: 21px;
+  color: currentColor;
+  flex-shrink: 0;
+}
+
+/* Destructive Header Action Button */
+.uni-header-action-btn.action-btn-danger,
+.uni-header-action-btn.delete-icon-btn,
+.delete-icon-btn {
+  width: 40px;
+  height: 40px;
+  min-width: 40px;
+  min-height: 40px;
+  border-radius: 11px;
+  color: #DC2626;
+  background: rgba(220, 75, 75, 0.08);
+  border: 1px solid rgba(220, 75, 75, 0.22);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  padding: 0;
+  box-sizing: border-box;
+  transition: transform 0.15s ease, background 0.15s ease;
+}
+
+.delete-icon-btn ion-icon,
+.action-btn-danger ion-icon {
+  font-size: 20px;
+  width: 20px;
+  height: 20px;
+  color: currentColor;
+}
+
+.uni-header-action-btn.action-btn-danger:active,
+.delete-icon-btn:active {
+  background: rgba(220, 75, 75, 0.18);
+  border-color: rgba(220, 75, 75, 0.35);
+  transform: scale(0.92);
+}
+
+@media (prefers-color-scheme: dark) {
+  .uni-header-action-btn.action-btn-danger,
+  .uni-header-action-btn.delete-icon-btn,
+  .delete-icon-btn {
+    color: #EF4444;
+    background: rgba(220, 75, 75, 0.14);
+    border-color: rgba(239, 68, 68, 0.3);
+  }
+}
+
+/* Circular Icon Action Button */
+.circular-icon-btn {
+  width: 40px;
+  height: 40px;
+  min-width: 40px;
+  min-height: 40px;
+  border-radius: 50%;
+  background: var(--app-surface);
+  border: 1px solid var(--app-border);
+  color: var(--app-text-primary);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  box-shadow: var(--app-shadow-card);
+  transition: background-color 0.15s ease, transform 0.15s ease;
+}
+
+.circular-icon-btn-sm {
+  width: 38px;
+  height: 38px;
+  min-width: 38px;
+  min-height: 38px;
+  border-radius: 10px;
+  background: var(--app-surface);
+  border: 1px solid var(--app-border);
+  color: var(--app-text-primary);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: background-color 0.15s ease, transform 0.15s ease;
+}
+
+.circular-icon-btn-sm.text-danger {
+  color: #DC2626;
+  background: rgba(220, 75, 75, 0.08);
+  border-color: rgba(220, 75, 75, 0.22);
+}
+
+.circular-icon-btn:active,
+.circular-icon-btn-sm:active {
+  transform: scale(0.94);
+  background: var(--app-surface-subtle);
+}
+
+.circular-icon-btn ion-icon {
+  font-size: 20px;
+}
+
+.circular-icon-btn-sm ion-icon {
+  font-size: 19px;
+}
+
+/* Standardized Icon Utility Sizes */
+.icon-size-xs { font-size: 14px; width: 14px; height: 14px; }
+.icon-size-sm { font-size: 16px; width: 16px; height: 16px; }
+.icon-size-md { font-size: 20px; width: 20px; height: 20px; }
+.icon-size-lg { font-size: 22px; width: 22px; height: 22px; }
+.icon-size-xl { font-size: 24px; width: 24px; height: 24px; }
+
+/* Status Badges */
+.status-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 9px;
+  border-radius: var(--app-pill-radius);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.status-badge.badge-success {
+  background: rgba(21, 154, 116, 0.1);
+  color: var(--ion-color-success);
+}
+
+.status-badge.badge-warning {
+  background: rgba(217, 149, 34, 0.12);
+  color: var(--ion-color-warning);
+}
+
+.status-badge.badge-danger {
+  background: rgba(220, 75, 75, 0.1);
+  color: var(--ion-color-danger);
+}
+
+.status-badge.badge-neutral {
+  background: var(--app-surface-subtle);
+  color: var(--app-text-secondary);
+}
+
+.status-badge.badge-accent {
+  background: var(--app-accent-soft);
+  color: var(--ion-color-primary);
+}
+
+/* Clean Empty State */
+.empty-state-box {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 32px 20px;
+  background: var(--app-surface);
+  border: 1px dashed var(--app-border);
+  border-radius: var(--app-card-radius);
+  gap: 8px;
+}
+
+.empty-state-icon {
+  font-size: 32px;
+  color: var(--app-text-muted);
+  margin-bottom: 4px;
+}
+
+.empty-state-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--app-text-primary);
+  margin: 0;
+}
+
+.empty-state-sub {
+  font-size: 13px;
+  color: var(--app-text-secondary);
+  max-width: 260px;
+  margin: 0 0 10px 0;
+}
+
+/* Form inputs */
+ion-input, ion-textarea, ion-select {
+  --background: var(--app-surface-subtle);
+  --color: var(--app-text-primary);
+  --placeholder-color: var(--app-text-muted);
+  --padding-start: 14px;
+  --padding-end: 14px;
+  --border-radius: 12px;
+  border: 1px solid var(--app-border);
+  border-radius: 12px;
+  font-size: 14px;
+  min-height: 48px;
+}
+
+ion-input:focus-within, ion-textarea:focus-within, ion-select:focus-within {
+  border-color: var(--aurora-mint);
+  box-shadow: 0 0 0 2px rgba(112, 243, 207, 0.18);
+}
+
+/* Animations */
+@keyframes nfc-pulse {
+  0% {
+    transform: scale(0.96);
+    box-shadow: 0 0 0 0 rgba(59, 130, 246, 0.35);
+  }
+  70% {
+    transform: scale(1.04);
+    box-shadow: 0 0 0 20px rgba(59, 130, 246, 0);
+  }
+  100% {
+    transform: scale(0.96);
+    box-shadow: 0 0 0 0 rgba(59, 130, 246, 0);
+  }
+}
+
+.nfc-pulse-active {
+  animation: nfc-pulse 2.2s infinite cubic-bezier(0.4, 0, 0.6, 1);
+}

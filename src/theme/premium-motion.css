@@ -1,0 +1,74 @@
+/* UniTap Living Interface — Motion Design Tokens & Easing Curves */
+
+:root {
+  /* Timing Durations */
+  --motion-fast: 150ms;
+  --motion-standard: 240ms;
+  --motion-sheet: 320ms;
+  --motion-ambient: 2400ms;
+
+  /* Easing Curves */
+  --ease-spring: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-smooth: cubic-bezier(0.2, 0.8, 0.2, 1);
+  --ease-out: cubic-bezier(0, 0, 0.2, 1);
+  --ease-in-out: cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* Tactile press response */
+.tactile-press {
+  transition: transform var(--motion-fast) var(--ease-spring), opacity var(--motion-fast) ease, box-shadow var(--motion-fast) ease;
+}
+
+.tactile-press:active {
+  transform: scale(0.98);
+}
+
+/* Micro-Entrance Animation */
+.animate-fade-up {
+  animation: fade-up-in var(--motion-standard) var(--ease-spring) both;
+}
+
+@keyframes fade-up-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* Modal Smooth Scale */
+@keyframes modal-scale-in {
+  from {
+    opacity: 0;
+    transform: scale(0.95);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+/* Subtle Breathing Glow for Listening/Active State */
+@keyframes breathing-light {
+  0% {
+    box-shadow: 0 0 16px rgba(112, 243, 207, 0.25);
+  }
+  50% {
+    box-shadow: 0 0 28px rgba(112, 243, 207, 0.55), inset 0 0 8px rgba(112, 243, 207, 0.2);
+  }
+  100% {
+    box-shadow: 0 0 16px rgba(112, 243, 207, 0.25);
+  }
+}
+
+/* Reduced Motion Preference Compliance */
+@media (prefers-reduced-motion: reduce) {
+  *, ::before, ::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

@@ -1,0 +1,249 @@
+<script setup lang="ts">
+import { IonIcon, IonSpinner } from '@ionic/vue';
+import { haptics } from '@/utilities/haptics';
+
+interface Props {
+  variant?: 'primary' | 'secondary' | 'outline' | 'ghost' | 'destructive';
+  size?: 'sm' | 'md' | 'lg' | 'icon' | 'icon-sm';
+  disabled?: boolean;
+  loading?: boolean;
+  type?: 'button' | 'submit' | 'reset';
+  block?: boolean;
+  icon?: any;
+  iconPosition?: 'left' | 'right';
+  iconOnly?: boolean;
+  ariaLabel?: string;
+}
+
+const props = withDefaults(defineProps<Props>(), {
+  variant: 'primary',
+  size: 'md',
+  disabled: false,
+  loading: false,
+  type: 'button',
+  block: false,
+  icon: undefined,
+  iconPosition: 'left',
+  iconOnly: false,
+  ariaLabel: undefined
+});
+
+const emit = defineEmits<{
+  (e: 'click', event: MouseEvent): void;
+}>();
+
+function handleClick(event: MouseEvent) {
+  if (props.disabled || props.loading) {
+    event.preventDefault();
+    return;
+  }
+  haptics.light();
+  emit('click', event);
+}
+</script>
+
+<template>
+  <button
+    :type="type"
+    class="uni-btn"
+    :class="[
+      `uni-btn-${variant}`,
+      `uni-btn-${size}`,
+      { 
+        'uni-btn-block': block, 
+        'uni-btn-loading': loading,
+        'uni-btn-icon-only': iconOnly || size === 'icon' || size === 'icon-sm'
+      }
+    ]"
+    :disabled="disabled || loading"
+    :aria-label="ariaLabel"
+    @click="handleClick"
+  >
+    <ion-spinner v-if="loading" name="crescent" class="btn-spinner" />
+    
+    <template v-else>
+      <ion-icon 
+        v-if="icon && (iconPosition === 'left' || iconOnly || size === 'icon' || size === 'icon-sm')" 
+        :icon="icon" 
+        class="btn-icon btn-icon-start" 
+      />
+      
+      <span v-if="$slots.default && !iconOnly && size !== 'icon' && size !== 'icon-sm'" class="btn-label">
+        <slot />
+      </span>
+
+      <ion-icon 
+        v-if="icon && iconPosition === 'right' && !iconOnly && size !== 'icon' && size !== 'icon-sm'" 
+        :icon="icon" 
+        class="btn-icon btn-icon-end" 
+      />
+    </template>
+  </button>
+</template>
+
+<style scoped>
+.uni-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--uni-font-family);
+  font-weight: 600;
+  border-radius: var(--uni-radius-btn);
+  border: 1px solid transparent;
+  cursor: pointer;
+  transition: transform 0.14s cubic-bezier(0.16, 1, 0.3, 1), 
+              background 0.14s ease, 
+              border-color 0.14s ease, 
+              opacity 0.14s ease;
+  user-select: none;
+  -webkit-user-select: none;
+  text-decoration: none;
+  white-space: nowrap;
+  box-sizing: border-box;
+}
+
+.uni-btn:active:not(:disabled) {
+  transform: scale(0.975);
+}
+
+.uni-btn-block {
+  width: 100%;
+}
+
+.uni-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  pointer-events: none;
+}
+
+/* Sizes */
+.uni-btn-sm {
+  height: 36px;
+  padding: 0 14px;
+  font-size: 12.5px;
+  gap: 6px;
+}
+
+.uni-btn-md {
+  height: 48px;
+  padding: 0 18px;
+  font-size: 14px;
+  gap: 8px;
+}
+
+.uni-btn-lg {
+  height: 52px;
+  padding: 0 22px;
+  font-size: 15px;
+  gap: 10px;
+}
+
+.uni-btn-icon {
+  width: 40px;
+  height: 40px;
+  min-width: 40px;
+  padding: 0;
+  border-radius: 11px;
+}
+
+.uni-btn-icon-sm {
+  width: 36px;
+  height: 36px;
+  min-width: 36px;
+  padding: 0;
+  border-radius: 9px;
+}
+
+.uni-btn:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(112, 243, 207, 0.4);
+}
+
+/* Variants */
+.uni-btn-primary {
+  background: var(--uni-mint);
+  color: #0A1C16;
+  border-color: rgba(255, 255, 255, 0.15);
+  box-shadow: 0 2px 10px rgba(112, 243, 207, 0.25);
+}
+
+.uni-btn-primary:hover:not(:disabled) {
+  filter: brightness(1.04);
+}
+
+.uni-btn-secondary {
+  background: var(--uni-surface-elevated);
+  color: var(--uni-text-primary);
+  border-color: var(--uni-border);
+}
+
+.uni-btn-secondary:hover:not(:disabled) {
+  background: var(--uni-surface);
+}
+
+.uni-btn-outline {
+  background: transparent;
+  color: var(--uni-text-primary);
+  border-color: var(--uni-border);
+}
+
+.uni-btn-outline:hover:not(:disabled) {
+  background: var(--uni-surface-elevated);
+}
+
+.uni-btn-ghost {
+  background: transparent;
+  color: var(--uni-text-secondary);
+  border-color: transparent;
+}
+
+.uni-btn-ghost:hover:not(:disabled) {
+  color: var(--uni-text-primary);
+  background: var(--uni-surface-elevated);
+}
+
+.uni-btn-destructive {
+  background: rgba(220, 75, 75, 0.12);
+  color: #DC2626;
+  border-color: rgba(220, 75, 75, 0.25);
+}
+
+.uni-btn-destructive:hover:not(:disabled) {
+  background: rgba(220, 75, 75, 0.2);
+}
+
+@media (prefers-color-scheme: dark) {
+  .uni-btn-destructive {
+    color: #EF4444;
+    border-color: rgba(239, 68, 68, 0.32);
+    background: rgba(220, 75, 75, 0.16);
+  }
+}
+
+/* Icons and Spinners */
+.btn-icon {
+  font-size: 19px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.uni-btn-sm .btn-icon {
+  font-size: 15px;
+}
+
+.uni-btn-icon .btn-icon {
+  font-size: 21px;
+}
+
+.uni-btn-icon-sm .btn-icon {
+  font-size: 18px;
+}
+
+.btn-spinner {
+  width: 20px;
+  height: 20px;
+  --color: currentColor;
+}
+</style>

@@ -1,0 +1,82 @@
+/* UniTap Design Tokens — Minimal Premium Mobile Experience */
+
+:root {
+  /* Brand Accent Tokens */
+  --uni-mint: #70F3CF;
+  --uni-mint-rgb: 112, 243, 207;
+  --uni-blue: #65BFFF;
+  --uni-blue-rgb: 101, 191, 255;
+  --uni-violet: #8B85F6;
+  --uni-violet-rgb: 139, 133, 246;
+  --uni-peach: #FFB78F;
+  --uni-peach-rgb: 255, 183, 143;
+
+  /* Typography Scale */
+  --uni-font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --uni-font-page-title: 24px;
+  --uni-font-section-title: 18px;
+  --uni-font-card-title: 15px;
+  --uni-font-body: 14px;
+  --uni-font-secondary: 13px;
+  --uni-font-meta: 11px;
+  --uni-font-financial: 30px;
+
+  /* Geometry & Radii */
+  --uni-radius-card: 18px;
+  --uni-radius-hero: 22px;
+  --uni-radius-input: 13px;
+  --uni-radius-btn: 13px;
+  --uni-radius-dock: 9999px;
+  --uni-radius-pill: 9999px;
+  --uni-radius-modal: 20px;
+  --uni-radius-sheet: 24px;
+
+  /* Light Theme Surfaces & Text (Default) */
+  --uni-bg: #F7F8FA;
+  --uni-surface: #FFFFFF;
+  --uni-surface-elevated: #F0F2F5;
+  --uni-surface-input: #F0F2F5;
+  --uni-text-primary: #191B20;
+  --uni-text-secondary: #747B85;
+  --uni-text-muted: #949BA6;
+  --uni-border: rgba(0, 0, 0, 0.06);
+  --uni-border-subtle: rgba(0, 0, 0, 0.04);
+  --uni-shadow-card: 0 2px 12px rgba(0, 0, 0, 0.03);
+  --uni-shadow-dock: 0 8px 24px rgba(0, 0, 0, 0.06);
+  --uni-shadow-sheet: 0 -8px 32px rgba(0, 0, 0, 0.08);
+  --uni-shadow-dialog: 0 20px 48px rgba(0, 0, 0, 0.12);
+
+  /* Legacy Bridge Tokens */
+  --app-bg: var(--uni-bg);
+  --app-surface: var(--uni-surface);
+  --app-surface-subtle: var(--uni-surface-elevated);
+  --app-surface-elevated: var(--uni-surface-elevated);
+  --app-text-primary: var(--uni-text-primary);
+  --app-text-secondary: var(--uni-text-secondary);
+  --app-text-muted: var(--uni-text-muted);
+  --app-border: var(--uni-border);
+  --app-card-radius: var(--uni-radius-card);
+  --aurora-mint: var(--uni-mint);
+  --aurora-sky: var(--uni-blue);
+  --aurora-violet: var(--uni-violet);
+  --aurora-peach: var(--uni-peach);
+}
+
+/* Dark Theme Overrides */
+@media (prefers-color-scheme: dark) {
+  :root {
+    --uni-bg: #111318;
+    --uni-surface: #1B1D22;
+    --uni-surface-elevated: #24272D;
+    --uni-surface-input: #24272D;
+    --uni-text-primary: #F5F6F7;
+    --uni-text-secondary: #949BA6;
+    --uni-text-muted: #737B86;
+    --uni-border: rgba(255, 255, 255, 0.07);
+    --uni-border-subtle: rgba(255, 255, 255, 0.04);
+    --uni-shadow-card: 0 4px 18px rgba(0, 0, 0, 0.25);
+    --uni-shadow-dock: 0 12px 36px rgba(0, 0, 0, 0.4);
+    --uni-shadow-sheet: 0 -12px 40px rgba(0, 0, 0, 0.5);
+    --uni-shadow-dialog: 0 24px 56px rgba(0, 0, 0, 0.6);
+  }
+}
