@@ -375,6 +375,62 @@ export class FinanceService {
     return payment;
   }
 
+  async reversePayment(paymentId: string, reason: string, _reversedByUserId = 'officer'): Promise<Payment> {
+    if (!reason || !reason.trim()) {
+      throw new Error('A reversal reason is mandatory.');
+    }
+
+    const store = await this.repo.getData();
+    const payment = store.payments.find(p => p.id === paymentId);
+    if (!payment) {
+      throw new Error('Payment not found.');
+    }
+    if (payment.status === 'REVERSED') {
+      throw new Error('Payment is already reversed.');
+    }
+
+    const now = new Date().toISOString();
+    payment.status = 'REVERSED';
+    (payment as any).reversedAt = now;
+    (payment as any).reversalReason = reason.trim();
+
+    // Revert charge paid amounts
+    for (const alloc of payment.allocations) {
+      const charge = store.charges.find(c => c.id === alloc.studentChargeId);
+      if (charge) {
+        charge.paidAmount = Math.max(0, charge.paidAmount - alloc.amountApplied);
+        if (charge.paidAmount === 0) {
+          charge.status = 'UNPAID';
+        } else if (charge.paidAmount < charge.issuedAmount) {
+          charge.status = 'PARTIALLY_PAID';
+        }
+        charge.updatedAt = now;
+      }
+    }
+
+    // Refund wallet if payment was from wallet
+    if (payment.paymentSource === 'WALLET') {
+      const wallet = store.wallets.find(w => w.studentId === payment.studentId);
+      if (wallet) {
+        const refundTxn: WalletTransaction = {
+          id: generateId('txn_rev'),
+          walletId: wallet.id,
+          studentId: payment.studentId,
+          type: 'PAYMENT_REVERSAL',
+          amount: payment.amount,
+          referenceNumber: 'REV-' + payment.referenceNumber,
+          relatedPaymentId: payment.id,
+          description: `Payment Reversal: ${reason.trim()}`,
+          createdAt: now
+        };
+        store.transactions.unshift(refundTxn);
+      }
+    }
+
+    await this.repo.saveData(store);
+    return payment;
+  }
+
   async getFinanceSummary(): Promise<FinanceSummary> {
     const store = await this.repo.getData();
 

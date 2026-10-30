@@ -108,6 +108,41 @@ const routes: Array<RouteRecordRaw> = [
     component: () => import('@/views/ScannerPage.vue')
   },
   {
+    path: '/login',
+    name: 'Login',
+    component: () => import('@/views/LoginPage.vue')
+  },
+  {
+    path: '/academic',
+    name: 'Academic',
+    component: () => import('@/views/AcademicPage.vue')
+  },
+  {
+    path: '/students/import',
+    name: 'CsvImport',
+    component: () => import('@/views/CsvImportPage.vue')
+  },
+  {
+    path: '/finance/reports',
+    name: 'Reports',
+    component: () => import('@/views/ReportsPage.vue')
+  },
+  {
+    path: '/register',
+    name: 'Register',
+    component: () => import('@/views/RegisterPage.vue')
+  },
+  {
+    path: '/initial-sync',
+    name: 'InitialSync',
+    component: () => import('@/views/InitialSyncPage.vue')
+  },
+  {
+    path: '/sync-status',
+    name: 'SyncStatus',
+    component: () => import('@/views/SyncStatusPage.vue')
+  },
+  {
     path: '/:catchAll(.*)',
     redirect: '/tabs/home'
   }
@@ -116,6 +151,25 @@ const routes: Array<RouteRecordRaw> = [
 const router = createRouter({
   history: createWebHistory(import.meta.env.BASE_URL),
   routes
+});
+
+// UniTap 2.0 Auth Navigation Guard
+router.beforeEach(async (to, _from, next) => {
+  const { authService } = await import('@/services/auth.service');
+  await authService.initSession();
+
+  const isPublic = to.path === '/login' || to.path === '/register';
+  const authenticated = authService.isAuthenticated.value;
+
+  if (!authenticated && !isPublic) {
+    // If not authenticated, redirect to login
+    next('/login');
+  } else if (authenticated && (to.path === '/login' || to.path === '/register')) {
+    // If already logged in and visiting public auth, go to home
+    next('/tabs/home');
+  } else {
+    next();
+  }
 });
 
 export default router;

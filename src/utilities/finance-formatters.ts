@@ -14,6 +14,10 @@ export function formatPeso(centavos: number): string {
   }).format(pesos);
 }
 
+export function formatCentavosToPesos(centavos: number): string {
+  return formatPeso(centavos);
+}
+
 export function pesoToCentavos(pesos: number): number {
   if (isNaN(pesos) || !Number.isFinite(pesos)) return 0;
   return Math.round(pesos * 100);

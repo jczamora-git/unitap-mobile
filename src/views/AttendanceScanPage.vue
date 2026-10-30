@@ -3,8 +3,6 @@ import { ref, onMounted, computed, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import {
   IonPage,
-  IonHeader,
-  IonToolbar,
   IonContent,
   IonIcon,
   IonSelect,
@@ -26,7 +24,8 @@ import {
 } from 'ionicons/icons';
 import { useNfc } from '@/composables/useNfc';
 import { eventService } from '@/services/event.service';
-import { attendanceService } from '@/services/attendance.service';
+import { attendanceService, type VerificationPromptData } from '@/services/attendance.service';
+import { authService } from '@/services/auth.service';
 import type { EventOccurrence, Event } from '@/types/event';
 import type { AttendanceScanResult, AttendanceStats, AttendanceScanLog } from '@/types/attendance';
 import { formatTime, formatDate } from '@/utilities/date-formatters';
@@ -55,6 +54,7 @@ const selectedOccurrence = computed(() =>
 const sessionStats = ref<AttendanceStats | null>(null);
 const recentLogs = ref<AttendanceScanLog[]>([]);
 const lastResult = ref<AttendanceScanResult | null>(null);
+const pendingVerification = ref<VerificationPromptData | null>(null);
 const isProcessing = ref(false);
 
 async function loadOccurrences() {
@@ -107,18 +107,30 @@ watch(lastTag, async (newTag) => {
 
   isProcessing.value = true;
   try {
-    const result = await attendanceService.processNfcScan(selectedOccurrenceId.value, newTag.id);
-    lastResult.value = result;
-    if (result.type === 'ACCEPTED') {
-      await haptics.success();
-    } else if (result.type === 'DUPLICATE') {
-      await haptics.warning();
+    const officerId = authService.user.value?.id || 'officer_user';
+    const prep = await attendanceService.prepareNfcVerification(selectedOccurrenceId.value, newTag.id, officerId);
+    
+    if (prep.type === 'ACCEPTED' && prep.eligible && prep.student) {
+      pendingVerification.value = prep;
+      lastResult.value = null;
+      await haptics.medium();
     } else {
-      await haptics.error();
+      pendingVerification.value = null;
+      lastResult.value = {
+        type: prep.type,
+        message: prep.message,
+        timestamp: new Date().toISOString(),
+        rfidUid: newTag.id
+      };
+      if (prep.type === 'DUPLICATE') {
+        await haptics.warning();
+      } else {
+        await haptics.error();
+      }
     }
     await refreshSessionData();
   } catch (err: unknown) {
-    console.error('Error recording attendance:', err);
+    console.error('Error in verification scan:', err);
     await haptics.error();
     lastResult.value = {
       type: 'INVALID',
@@ -130,6 +142,73 @@ watch(lastTag, async (newTag) => {
     isProcessing.value = false;
   }
 });
+
+async function handleConfirmStudent() {
+  const pv = pendingVerification.value;
+  if (!pv || !pv.student) return;
+  const officerId = authService.user.value?.id || 'officer_user';
+  try {
+    await attendanceService.confirmStudentAttendance(
+      pv.occurrenceId,
+      pv.student.id,
+      officerId,
+      pv.suggestedStatus
+    );
+    lastResult.value = {
+      type: 'ACCEPTED',
+      message: `${pv.studentFullName} confirmed as ${pv.suggestedStatus}!`,
+      timestamp: new Date().toISOString(),
+      rfidUid: pv.rfidUid,
+    };
+    await haptics.success();
+    pendingVerification.value = null;
+    await refreshSessionData();
+  } catch (err: unknown) {
+    alert((err as Error).message);
+  }
+}
+
+async function handleRejectStudent() {
+  if (!pendingVerification.value) return;
+  const officerId = authService.user.value?.id || 'officer_user';
+  const pv = pendingVerification.value;
+  try {
+    await attendanceService.rejectStudentScan(
+      pv.occurrenceId,
+      pv.rfidUid,
+      pv.student?.id || null,
+      officerId,
+      'Visual photo identity mismatch'
+    );
+    lastResult.value = {
+      type: 'INVALID',
+      message: `Identity rejected: Card holder does not match photo for ${pv.studentFullName}.`,
+      timestamp: new Date().toISOString(),
+      rfidUid: pv.rfidUid,
+    };
+    await haptics.error();
+    pendingVerification.value = null;
+    await refreshSessionData();
+  } catch (err: unknown) {
+    alert((err as Error).message);
+  }
+}
+
+async function handleVoidAttendance(recordId: string) {
+  const reason = window.prompt('Enter mandatory reason to void this attendance record:');
+  if (!reason || !reason.trim()) {
+    alert('A reason is mandatory to void attendance.');
+    return;
+  }
+  const officerId = authService.user.value?.id || 'officer_user';
+  try {
+    await attendanceService.voidAttendance(recordId, reason.trim(), officerId);
+    alert('Attendance record voided with audit log.');
+    await refreshSessionData();
+  } catch (err: unknown) {
+    alert((err as Error).message);
+  }
+}
 
 onMounted(async () => {
   await refreshStatus();
@@ -263,6 +342,60 @@ function handleRegisterCard() {
           </div>
         </div>
 
+        <!-- Photo Identity Verification Card (UniTap 2.0) -->
+        <div v-if="pendingVerification" class="minimal-card photo-verify-card">
+          <div class="verify-header">
+            <span class="verify-eyebrow">PHOTO IDENTITY VERIFICATION</span>
+            <span class="verify-status-tag" :class="pendingVerification.suggestedStatus.toLowerCase()">
+              Suggested: {{ pendingVerification.suggestedStatus }}
+            </span>
+          </div>
+
+          <div class="verify-student-row">
+            <div class="verify-avatar-box">
+              <img
+                v-if="pendingVerification.photoLocalUri"
+                :src="pendingVerification.photoLocalUri"
+                alt="Student Photo"
+                class="verify-photo-img"
+              />
+              <div v-else class="verify-avatar-placeholder">
+                {{ pendingVerification.studentFullName?.charAt(0) || 'S' }}
+              </div>
+            </div>
+            <div class="verify-details">
+              <h3 class="verify-name">{{ pendingVerification.studentFullName }}</h3>
+              <div class="verify-meta font-mono">
+                School ID: {{ pendingVerification.student?.school_id }}
+              </div>
+              <div class="verify-meta">
+                Card UID: <span class="font-mono">{{ pendingVerification.rfidUid }}</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="verify-warning-box">
+            🛡️ <strong>Visual Check Required:</strong> Compare the student holding the card with the official record before confirming. A UID tap alone does not prove identity.
+          </div>
+
+          <div class="verify-actions-grid">
+            <button
+              type="button"
+              class="btn-reject-scan"
+              @click="handleRejectStudent"
+            >
+              ✕ Reject · Wrong Person
+            </button>
+            <button
+              type="button"
+              class="btn-confirm-scan"
+              @click="handleConfirmStudent"
+            >
+              ✓ Confirm Student
+            </button>
+          </div>
+        </div>
+
         <!-- Scan Result Card -->
         <div 
           v-if="lastResult" 
@@ -298,6 +431,17 @@ function handleRegisterCard() {
           <p class="result-detail-text">
             {{ lastResult.message }}
           </p>
+
+          <div v-if="lastResult.type === 'ACCEPTED'" style="margin-top: 10px;">
+            <button
+              type="button"
+              class="btn-reject-scan"
+              style="font-size: 0.8rem; padding: 6px 12px; width: auto;"
+              @click="handleVoidAttendance(lastResult.rfidUid)"
+            >
+              Void Attendance
+            </button>
+          </div>
 
           <div v-if="lastResult.type === 'UNREGISTERED'" class="result-cta-row">
             <UniButton 
@@ -853,5 +997,132 @@ function handleRegisterCard() {
   border-radius: 50%;
   background: var(--ion-color-success);
   display: inline-block;
+}
+
+/* UniTap 2.0 Photo Identity Verification Styles */
+.photo-verify-card {
+  background: #ffffff;
+  border: 2px solid var(--uni-primary, #0F766E);
+  border-radius: 18px;
+  padding: 20px;
+  margin-bottom: 20px;
+  box-shadow: 0 10px 28px rgba(15, 118, 110, 0.12);
+}
+
+.verify-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 16px;
+}
+
+.verify-eyebrow {
+  font-size: 10px;
+  font-weight: 800;
+  color: var(--uni-primary, #0F766E);
+  letter-spacing: 1.2px;
+}
+
+.verify-status-tag {
+  font-size: 11px;
+  font-weight: 800;
+  padding: 4px 10px;
+  border-radius: 9999px;
+  text-transform: uppercase;
+}
+
+.verify-status-tag.present {
+  background: #dcfce7;
+  color: #15803d;
+}
+
+.verify-status-tag.late {
+  background: #fef3c7;
+  color: #b45309;
+}
+
+.verify-student-row {
+  display: flex;
+  gap: 16px;
+  align-items: center;
+  margin-bottom: 16px;
+}
+
+.verify-avatar-box {
+  width: 80px;
+  height: 88px;
+  border-radius: 14px;
+  background: linear-gradient(135deg, #ccfbf1, #dbeafe);
+  border: 1.5px solid #cbd5e1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+
+.verify-photo-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.verify-avatar-placeholder {
+  font-size: 32px;
+  font-weight: 800;
+  color: var(--uni-primary, #0F766E);
+}
+
+.verify-name {
+  font-size: 18px;
+  font-weight: 800;
+  color: var(--uni-ink, #0F172A);
+  margin: 0 0 4px;
+}
+
+.verify-meta {
+  font-size: 12px;
+  color: var(--uni-muted, #64748B);
+  margin-bottom: 2px;
+}
+
+.verify-warning-box {
+  background: #fffbeb;
+  border: 1px solid #fef3c7;
+  color: #92400e;
+  font-size: 12px;
+  line-height: 1.5;
+  padding: 12px;
+  border-radius: 12px;
+  margin-bottom: 16px;
+}
+
+.verify-actions-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+.btn-reject-scan {
+  background: #ffffff;
+  color: var(--uni-danger, #B91C1C);
+  border: 1.5px solid #fca5a5;
+  border-radius: 12px;
+  padding: 12px 8px;
+  font-size: 12px;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.btn-confirm-scan {
+  background: var(--uni-primary, #0F766E);
+  color: #ffffff;
+  border: 0;
+  border-radius: 12px;
+  padding: 12px 8px;
+  font-size: 12px;
+  font-weight: 800;
+  cursor: pointer;
+  box-shadow: 0 4px 12px rgba(15, 118, 110, 0.2);
 }
 </style>

@@ -14,6 +14,7 @@ class NfcService {
   private lastScannedTime = 0;
   private currentCallback: TagCallback | null = null;
   private stabilityMode = false;
+  private sessionOwner: string | null = null;
 
   get platform(): 'android' | 'ios' | 'web' {
     const p = Capacitor.getPlatform();
@@ -113,18 +114,37 @@ class NfcService {
     }
   }
 
+  getActiveOwner(): string | null {
+    return this.sessionOwner;
+  }
+
   async startScanning(
-    onTagDiscovered: TagCallback,
+    onTagDiscoveredOrOwner: TagCallback | string,
+    callbackOrOptions?: TagCallback | { isStabilityTest?: boolean },
     options?: { isStabilityTest?: boolean }
   ): Promise<void> {
+    let owner = 'GLOBAL';
+    let onTagDiscovered: TagCallback;
+    let opt = options;
+
+    if (typeof onTagDiscoveredOrOwner === 'string') {
+      owner = onTagDiscoveredOrOwner;
+      onTagDiscovered = callbackOrOptions as TagCallback;
+    } else {
+      onTagDiscovered = onTagDiscoveredOrOwner;
+      opt = callbackOrOptions as { isStabilityTest?: boolean } | undefined;
+    }
+
     if (!this.isNative()) {
+      this.sessionOwner = owner;
       throw new Error('Native NFC scanning is unavailable in web browser preview. Please test on an Android device.');
     }
 
     // Stop any existing session
     await this.stopScanning();
 
-    this.stabilityMode = options?.isStabilityTest ?? false;
+    this.sessionOwner = owner;
+    this.stabilityMode = opt?.isStabilityTest ?? false;
     this.currentCallback = onTagDiscovered;
     this.lastScannedTagId = null;
     this.lastScannedTime = 0;
@@ -142,10 +162,16 @@ class NfcService {
     this.isScanning = true;
   }
 
-  async stopScanning(): Promise<void> {
+  async stopScanning(owner?: string): Promise<void> {
+    if (owner && this.sessionOwner && this.sessionOwner !== owner) {
+      // Don't stop if another owner already claimed it
+      return;
+    }
+
     if (!this.isNative()) {
       this.isScanning = false;
       this.currentCallback = null;
+      this.sessionOwner = null;
       return;
     }
 
@@ -168,6 +194,7 @@ class NfcService {
       this.isScanning = false;
       this.currentCallback = null;
       this.stabilityMode = false;
+      this.sessionOwner = null;
     }
   }
 

@@ -1,10 +1,8 @@
 <script setup lang="ts">
-import { ref, onMounted } from 'vue';
+import { ref, onMounted, computed } from 'vue';
 import { useRouter } from 'vue-router';
 import {
   IonPage,
-  IonHeader,
-  IonToolbar,
   IonContent,
   IonIcon,
   onIonViewWillEnter
@@ -18,7 +16,6 @@ import {
   addOutline,
   settingsOutline,
   checkmarkCircle,
-  chevronForwardOutline,
   timeOutline,
   flashOutline,
   radioOutline
@@ -27,6 +24,10 @@ import { studentService } from '@/services/student.service';
 import { eventService } from '@/services/event.service';
 import { attendanceService } from '@/services/attendance.service';
 import { financeService } from '@/services/finance.service';
+import { authService } from '@/services/auth.service';
+import { useSyncStatus } from '@/composables/useSyncStatus';
+import { AcademicRepository } from '@/database/repositories/academic.repository';
+import type { Semester } from '@/types/database';
 import { formatPeso } from '@/utilities/finance-formatters';
 import { formatTime, formatDate } from '@/utilities/date-formatters';
 import type { Event, EventOccurrence } from '@/types/event';
@@ -58,6 +59,15 @@ const totalOutstandingCentavos = ref(0);
 const activeEvent = ref<Event | null>(null);
 const activeOccurrence = ref<EventOccurrence | null>(null);
 const occurrenceStats = ref<AttendanceStats | null>(null);
+const currentSemester = ref<Semester | null>(null);
+const currentUserRole = computed(() => authService.role.value);
+const currentUsername = computed(() => authService.user.value?.username || 'User');
+const { state: syncState } = useSyncStatus();
+
+async function handleLogout() {
+  await authService.logout();
+  router.replace('/login');
+}
 
 const recentActivity = ref<AttendanceScanLog[]>([]);
 const isLoading = ref(true);
@@ -65,6 +75,7 @@ const isLoading = ref(true);
 async function loadDashboardData() {
   isLoading.value = true;
   try {
+    currentSemester.value = await AcademicRepository.getActiveSemester();
     // 1. Students
     const students = await studentService.getStudents();
     totalStudents.value = students.length;
@@ -103,17 +114,6 @@ async function loadDashboardData() {
 
 onMounted(loadDashboardData);
 onIonViewWillEnter(loadDashboardData);
-
-function navigateToScan() {
-  if (activeOccurrence.value) {
-    router.push({
-      path: '/tabs/scan',
-      query: { occurrenceId: activeOccurrence.value.id }
-    });
-  } else {
-    router.push('/tabs/scan');
-  }
-}
 </script>
 
 <template>
@@ -136,6 +136,27 @@ function navigateToScan() {
 
     <ion-content class="safe-content">
       <div class="page-container">
+        <!-- User Session & Term Banner -->
+        <div class="user-session-bar">
+          <div class="user-info-side">
+            <span class="user-badge" :class="currentUserRole?.toLowerCase()">
+              {{ currentUserRole || 'DEVADMIN' }}
+            </span>
+            <span class="user-name-text">{{ currentUsername }}</span>
+          </div>
+          <div class="term-info-side">
+            <button class="sync-pill" :class="'pill-' + syncState.toLowerCase()" @click="router.push('/sync-status')">
+              <span class="sync-dot"></span> {{ syncState === 'SYNCED' ? 'Cloud Synced' : syncState }}
+            </button>
+            <span v-if="currentSemester" class="term-pill">
+              📅 {{ currentSemester.term }} Term
+            </span>
+            <button class="btn-logout-link" @click="handleLogout">
+              Sign Out
+            </button>
+          </div>
+        </div>
+
         <!-- 2x2 Metric Grid -->
         <section class="metrics-grid">
           <UniStatCard
@@ -264,7 +285,28 @@ function navigateToScan() {
               <div class="tile-icon-box">
                 <ion-icon :icon="scanOutline" />
               </div>
-              <span class="tile-label">Scan</span>
+              <span class="tile-label">Scan NFC</span>
+            </button>
+
+            <button class="quick-action-tile" @click="navigateWithHaptic('/finance/reports')">
+              <div class="tile-icon-box">
+                <ion-icon :icon="walletOutline" />
+              </div>
+              <span class="tile-label">Reports</span>
+            </button>
+
+            <button class="quick-action-tile" @click="navigateWithHaptic('/students/import')">
+              <div class="tile-icon-box">
+                <ion-icon :icon="peopleOutline" />
+              </div>
+              <span class="tile-label">Import CSV</span>
+            </button>
+
+            <button class="quick-action-tile" @click="navigateWithHaptic('/academic')">
+              <div class="tile-icon-box">
+                <ion-icon :icon="calendarOutline" />
+              </div>
+              <span class="tile-label">Terms</span>
             </button>
 
             <button class="quick-action-tile" @click="navigateWithHaptic('/events/create')">
@@ -743,5 +785,117 @@ function navigateToScan() {
   font-size: 13px;
   font-weight: 600;
   cursor: pointer;
+}
+
+/* User Session Bar */
+.user-session-bar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  background: #ffffff;
+  border: 1px solid var(--uni-border, #CBD5E1);
+  border-radius: 12px;
+  padding: 8px 14px;
+  margin-bottom: 16px;
+  font-size: 12px;
+}
+
+.user-info-side {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.user-badge {
+  font-size: 10px;
+  font-weight: 800;
+  padding: 2px 7px;
+  border-radius: 6px;
+  text-transform: uppercase;
+}
+
+.user-badge.devadmin {
+  background: #fef2f2;
+  color: #b91c1c;
+}
+
+.user-badge.officer {
+  background: #f0fdf4;
+  color: #15803d;
+}
+
+.user-badge.student {
+  background: #f0f9ff;
+  color: #0369a1;
+}
+
+.user-name-text {
+  font-weight: 700;
+  color: var(--uni-ink, #0F172A);
+}
+
+.term-info-side {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.term-pill {
+  color: var(--uni-muted, #64748B);
+  font-weight: 600;
+}
+
+.btn-logout-link {
+  background: none;
+  border: 0;
+  color: var(--uni-danger, #B91C1C);
+  font-weight: 700;
+  cursor: pointer;
+  padding: 0;
+}
+
+.sync-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  font-weight: 700;
+  border: none;
+  cursor: pointer;
+  text-transform: uppercase;
+}
+
+.sync-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.pill-synced {
+  background: #DCFCE7;
+  color: #166534;
+}
+
+.pill-syncing {
+  background: #E0E7FF;
+  color: #3730A3;
+}
+
+.pill-pending_changes {
+  background: #FEF3C7;
+  color: #92400E;
+}
+
+.pill-sync_error, .pill-conflict {
+  background: #FEE2E2;
+  color: #991B1B;
+}
+
+.pill-offline {
+  background: #F1F5F9;
+  color: #475569;
 }
 </style>

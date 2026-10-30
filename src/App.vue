@@ -21,11 +21,21 @@ import OnboardingModal from '@/components/onboarding/OnboardingModal.vue';
 import { UniToast } from '@/components/ui';
 import { useOnboarding } from '@/composables/useOnboarding';
 import { useToast } from '@/composables/useToast';
+import { getDatabase } from '@/database/database';
+import { LegacyMigrationService } from '@/services/legacy-migration.service';
+import { authService } from '@/services/auth.service';
 
 const { isOnboardingOpen, checkOnboardingStatus, closeOnboardingTour } = useOnboarding();
 const { toastState } = useToast();
 
 onMounted(async () => {
+  try {
+    await getDatabase();
+    await LegacyMigrationService.runMigrationIfNeeded();
+    await authService.initSession();
+  } catch (err) {
+    console.error('Initialization error:', err);
+  }
   await checkOnboardingStatus();
 });
 </script>

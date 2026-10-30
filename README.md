@@ -1,42 +1,56 @@
-# UniTap — NFC-Powered CSG Attendance, Event Management & Student Transactions
+# UniTap 2.0 — Hybrid Online-Offline NFC CSG Operations, Attendance & Financial Platform
 
-**UniTap** is an offline-first mobile application built with **Ionic Vue 9**, **Capacitor 8**, and **TypeScript** for Android. Designed for university student government organizations (CSG), UniTap transforms university-issued student RFID/NFC cards into instant, tap-to-record attendance tokens and student account identifiers.
+**UniTap 2.0** is an enterprise-grade hybrid mobile application built with **Ionic Vue 9**, **Capacitor 8**, **TypeScript**, and **Supabase** for Android. Designed for university Computer Studies Government (CSG) organizations, UniTap transforms university-issued student RFID/NFC cards into instant, tap-to-record attendance tokens and student account identifiers, powered by a native **34-table SQLite local database** and **bidirectional real-time cloud sync with Supabase PostgreSQL & Auth**.
 
 ---
 
-## Key Modules & Features
+## What's New in UniTap 2.0
 
-### 1. Unified Dashboard (Home)
-- **Real-Time CSG Metrics**: Registered student count, active events, check-in totals, and outstanding fee obligations.
-- **Active Session Progress**: Live progress bar showing check-in percentage for ongoing events.
-- **Quick Actions**: One-tap access to attendance scanning, event creation, student registration, and fee issuance.
-- **Recent Activity Feed**: Real-time event log tracking check-ins, registrations, and transactions.
+### 1. Hybrid Online–Offline Architecture & Supabase Integration
+- **Central Cloud Authority**: Supabase PostgreSQL serves as the authoritative central repository for user identities, profiles, card ownership, events, attendance, and financial ledgers.
+- **Supabase Auth**: Online authentication, token refresh, and student self-registration via single-use 8-character activation tokens.
+- **First-Login Hydration**: Downloads role-scoped authoritative records into SQLite (`InitialSyncService`) in foreign-key safe topological order.
+- **Offline Operation**: Core operations (NFC scanning, photo verification, attendance, fines, contributions, wallet payments) read and write to local SQLite. Disconnected sessions remain valid for 7 days via cached tokens.
+- **Bidirectional Sync**: Local mutations transactionally enqueue into `sync_outbox` and push to Supabase; remote mutations pull incrementally via monotonic cursors and Supabase Realtime channel notifications.
 
-### 2. CSG Event & Attendance Management
-- **Event Creation**: Schedule events (General Assembly, IT Day, Sportsfest, Seminars) with flexible audience rules (All BSIT, by Year Level, or by Section).
-- **Session Lifecycle**: Open, monitor, and close attendance occurrences.
-- **Live NFC Attendance Scanning**:
-  - Automatically identifies registered students on tap.
-  - Distinguishes **Present** from **Late** using a configurable grace period.
-  - Rejects duplicate check-ins for the same occurrence.
-  - Alerts when an unregistered card or ineligible student taps.
-- **Session Finalization**: Automatically converts all remaining `PENDING` expected participants to `ABSENT` upon session closure.
-- **Attendance Roster & Manual Corrections**: Review complete rosters with officer excuse overrides requiring an audit reason.
+### 2. 34-Table Offline SQLite Database Architecture
+- **Primary Persistence**: Operates reliably without internet connectivity using a SQLite schema with 34 tables, foreign keys (`PRAGMA foreign_keys = ON`), constraints, indexes, and transactional rollbacks.
+- **Dual Adapter Architecture**: Web/Vitest WebAssembly adapter (`sql.js`) and Capacitor native adapter.
+- **Transactional Legacy Migration**: Automatically migrates existing student, event, and finance records from Capacitor Preferences (`nfc_inspector_students_v1`, `unitap_events_v1`, `unitap_finance_v1`) into SQLite without data loss.
 
-### 3. Student Information System & Card Lifecycle
-- **Student Directory**: Student numbers, full names, year levels, sections, courses, and card statuses.
-- **NFC Card Lifecycle**: Tracks `ACTIVE`, `LOST`, `REPLACED`, and `DEACTIVATED` card states while preserving card history.
-- **Duplicate Protection**: Prevents assigning an active card to multiple students.
-- **360° Student Profile**: View academic info, NFC card status, event attendance history, outstanding charges, and wallet balance.
+### 2. Offline Authentication & Role-Based Access Control
+- **Argon2id Password Hashing**: Offline password hashing and verification using `hash-wasm`.
+- **Three Distinct Roles**:
+  - `DEVADMIN`: Full system administration, academic term management, system auditing.
+  - `OFFICER`: Attendance scanning, identity verification, student roster import, card registration, financial collections.
+  - `STUDENT`: Self-service view of personal profile, ID photo, enrollment, attendance history, and fee obligations.
+- **Secure Student Self-Registration**: Activates using officer-issued 8-character single-use activation codes.
 
-### 4. Student Obligations & Simulated Wallet
-- **Charge Templates & Issuance**: Create pre-set or custom fees (e.g., Clean-up Absence ₱20, Sportsfest Contribution ₱25) stored accurately in integer centavos.
-- **Simulated Student Wallet**: Double-entry ledger architecture with demo top-up funds. Clearly labeled as simulated.
-- **NFC-Assisted Payment Flow**: Tap student ID to load outstanding charges, select full or partial payments, and confirm settlement with unique receipt references.
+### 3. Academic Year & Semester Lifecycle
+- **Multi-Semester History**: Manages academic years and semesters (`FIRST`, `SECOND`, `SUMMER`).
+- **Single Active Semester Constraint**: Enforced at the database level via a partial unique index (`only_one_active_semester`).
+- **Student Enrollments**: Preserves historical enrollment snapshots per semester.
 
-### 5. Diagnostics & Sample Data
-- **Hardware Diagnostics**: Low-level NFC tag inspection, UID stability testing, and raw scan logs preserved from NFC Inspector.
-- **One-Tap Demo Seeding**: Idempotent sample data generation in Settings for seamless capstone presentation.
+### 4. CSV Student Roster Import Wizard
+- **6-Column Standard**: Expects `school_id,first_name,middle_name,lastname,year,section`.
+- **Security & Validation**: Formula injection sanitization (protecting against `=`, `+`, `-`, `@`), duplicate detection, and batch transaction logging.
+
+### 5. Two-Step NFC Attendance & Photo Identity Verification
+- **Photo Identity Verification**: NFC tap loads student credentials and local ID photo without immediately recording attendance.
+- **Officer Confirmation**: Officer verifies the student's physical identity and taps **Confirm Student** (`PRESENT` or `LATE`) or **Reject - Wrong Person**.
+- **Audit Logging**: Logs every tap in `attendance_attempts` (`SUCCESS`, `REJECTED`, `DUPLICATE`, `UNREGISTERED`).
+- **Attendance Voiding**: Allows authorized voiding with a mandatory audit reason.
+- **Session Ownership**: Prevents cross-screen NFC scan leakage.
+
+### 6. Fines, Contributions & Double-Entry Ledger
+- **Strict Centavo Precision**: Stored and calculated in integer Philippine centavos (₱100.00 = 10000).
+- **Separation of Obligations**: Distinguishes disciplinary `FINE` from organizational `CONTRIBUTION`.
+- **Simulated Wallet & Double-Entry Ledger**: Top-ups and payments are tracked through immutable ledger entries.
+- **Payment Reversals**: Allows reversing payments with a mandatory reason, automatically refunding the simulated wallet ledger.
+
+### 7. Offline Reporting & Printable Statements
+- **Financial Summaries**: Computes total assessments, collections, and outstanding balances.
+- **Export Formats**: One-click offline CSV export and printable HTML statement generation.
 
 ---
 
@@ -45,9 +59,10 @@
 * **Framework**: [Ionic Framework 9](https://ionicframework.com/) (Vue 3 Composition API with `<script setup lang="ts">`)
 * **Language**: TypeScript (Strict typing, zero errors)
 * **Native Runtime**: [Capacitor 8](https://capacitorjs.com/)
+* **Database**: SQLite (34 tables, `sql.js` in development, Capacitor SQLite on native Android)
+* **Cryptography**: Argon2id via `hash-wasm`
 * **NFC Plugin**: `@capgo/capacitor-nfc`
-* **Storage**: `@capacitor/preferences` (Offline-first local persistence)
-* **Target Platform**: Android (API 24+)
+* **Testing & Tooling**: Vitest 4, Vue-TSC, Vite 8, pnpm
 * **Package ID**: `com.nfcinspector.app`
 
 ---

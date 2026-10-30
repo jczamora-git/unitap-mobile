@@ -1,6 +1,18 @@
 /* UniTap Design Tokens — Minimal Premium Mobile Experience */
 
 :root {
+  /* UniTap 2.0 Core Palette */
+  --uni-primary: #0F766E;
+  --uni-primary-dark: #115E59;
+  --uni-ink: #0F172A;
+  --uni-muted: #64748B;
+  --uni-background: #F8FAFC;
+  --uni-surface: #FFFFFF;
+  --uni-border: #CBD5E1;
+  --uni-success: #047857;
+  --uni-warning: #B45309;
+  --uni-danger: #B91C1C;
+
   /* Brand Accent Tokens */
   --uni-mint: #70F3CF;
   --uni-mint-rgb: 112, 243, 207;

@@ -19,7 +19,11 @@
     "@capgo/capacitor-nfc": "^8.2.7",
     "@ionic/vue": "^9.0.0",
     "@ionic/vue-router": "^9.0.0",
+    "@supabase/supabase-js": "^2.118.0",
+    "@types/sql.js": "^1.4.11",
+    "hash-wasm": "^4.12.0",
     "ionicons": "^8.1.0",
+    "sql.js": "^1.15.2",
     "vue": "^3.5.0",
     "vue-router": "^5.0.0"
   },
