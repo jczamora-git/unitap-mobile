@@ -67,3 +67,4 @@ To prevent foreign key violations, tables are downloaded and inserted in exact t
 - **STUDENT**:
   - Filtered exclusively by `student_id = auth.user.student_id`.
   - Personal profile, enrollments, attendance, obligations, wallet ledger.
+

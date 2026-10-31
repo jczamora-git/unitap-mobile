@@ -136,3 +136,4 @@ Kapag nai-run mo na ang SQL sa Supabase:
 2. Mag-login gamit ang officer o admin account.
 3. Awtomatikong dadaan ang app sa **Initial Sync screen (`/initial-sync`)** at mada-download ang data mula sa Supabase papunta sa local SQLite!
 4. Ang lahat ng offline operations (NFC tap, attendance, fines, top-up) ay mag-i-enqueue sa `sync_outbox` at kusa nang magsi-sync pabalik sa Supabase sa tuwing may internet connection.
+

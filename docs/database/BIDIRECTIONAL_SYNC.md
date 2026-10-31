@@ -74,3 +74,4 @@ in `sync_outbox`              Apply Resolution Policy
 - The app connects to Supabase Realtime channel `unitap-live-sync`.
 - Realtime messages serve as **wake-up triggers**: they do NOT bypass the change log.
 - Upon receiving a Realtime event, the client schedules an incremental pull sync to retrieve the exact server-validated changes.
+

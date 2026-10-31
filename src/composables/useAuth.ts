@@ -12,3 +12,4 @@ export function useAuth() {
     logout: SupabaseAuthService.logout.bind(SupabaseAuthService),
   };
 }
+

@@ -376,6 +376,7 @@ export class FinanceService {
   }
 
   async reversePayment(paymentId: string, reason: string, _reversedByUserId = 'officer'): Promise<Payment> {
+    void _reversedByUserId;
     if (!reason || !reason.trim()) {
       throw new Error('A reversal reason is mandatory.');
     }

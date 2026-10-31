@@ -17,3 +17,4 @@
    - Implement Supabase Auth client in `src/integrations/supabase/`.
    - Implement synchronization services in `src/services/sync/`.
    - Update `LoginPage.vue` and create `RegisterPage.vue`, `InitialSyncPage.vue`, and `SyncStatusPage.vue`.
+

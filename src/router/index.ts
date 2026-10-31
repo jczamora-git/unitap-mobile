@@ -156,16 +156,18 @@ const router = createRouter({
 // UniTap 2.0 Auth Navigation Guard
 router.beforeEach(async (to, _from, next) => {
   const { authService } = await import('@/services/auth.service');
+  const { SupabaseAuthService } = await import('@/integrations/supabase/auth.service');
   await authService.initSession();
+  await SupabaseAuthService.initialize();
 
   const isPublic = to.path === '/login' || to.path === '/register';
-  const authenticated = authService.isAuthenticated.value;
+  const authenticated = SupabaseAuthService.isAuthenticated.value || authService.isAuthenticated.value;
 
   if (!authenticated && !isPublic) {
     // If not authenticated, redirect to login
     next('/login');
   } else if (authenticated && (to.path === '/login' || to.path === '/register')) {
-    // If already logged in and visiting public auth, go to home
+    // If already logged in and visiting public auth, go to initial-sync or home
     next('/tabs/home');
   } else {
     next();

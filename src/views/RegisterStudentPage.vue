@@ -8,8 +8,7 @@ import {
 import { 
   personAddOutline, 
   idCardOutline, 
-  schoolOutline, 
-  radioOutline 
+  schoolOutline 
 } from 'ionicons/icons';
 import { 
   UniPageHeader, 

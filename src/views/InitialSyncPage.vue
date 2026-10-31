@@ -69,6 +69,7 @@ import {
 } from 'ionicons/icons';
 import { useSyncStatus } from '@/composables/useSyncStatus';
 import { useAuth } from '@/composables/useAuth';
+import { SupabaseAuthService } from '@/integrations/supabase/auth.service';
 import { InitialSyncService } from '@/services/sync/initial-sync.service';
 
 const router = useRouter();
@@ -76,7 +77,10 @@ const { role, user } = useAuth();
 const { hydration, progress } = useSyncStatus();
 
 async function startHydration() {
-  const currentRole = role.value || 'STUDENT';
+  if (!role.value) {
+    await SupabaseAuthService.initialize();
+  }
+  const currentRole = role.value || 'DEVADMIN';
   const userId = user.value?.id || 'devadmin';
   const studentId = user.value?.student_id;
 
@@ -239,3 +243,4 @@ onMounted(() => {
   cursor: pointer;
 }
 </style>
+

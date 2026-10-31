@@ -37,6 +37,8 @@ export class CsvImportService {
     _semesterId?: string,
     _programId?: string
   ): Promise<CsvParseResult> {
+    void _semesterId;
+    void _programId;
     const fileHash = await sha256(fileContent);
     const lines = fileContent
       .replace(/\r\n/g, '\n')

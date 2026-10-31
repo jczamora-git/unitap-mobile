@@ -18,8 +18,7 @@ import {
   refreshOutline,
   personAddOutline,
   eyeOutline,
-  stopCircleOutline,
-  idCardOutline
+  stopCircleOutline
 } from 'ionicons/icons';
 import { useNfc } from '@/composables/useNfc';
 import { studentService, type CardLookupResult } from '@/services/student.service';

@@ -60,3 +60,4 @@ This document establishes the bidirectional mapping between the central Supabase
   - **SQLite**: Matches 1:1.
 - **PostgreSQL**: `simulated_wallet_ledger(id UUID PK, wallet_id UUID FK, kind VARCHAR, amount_centavos BIGINT, related_payment_id UUID, reference_number TEXT, processed_by_user_id UUID, created_at TIMESTAMPTZ)`
   - **SQLite**: Matches 1:1.
+

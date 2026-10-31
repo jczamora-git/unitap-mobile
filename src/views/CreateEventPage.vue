@@ -3,17 +3,12 @@ import { ref } from 'vue';
 import { useRouter } from 'vue-router';
 import {
   IonPage,
-  IonHeader,
-  IonToolbar,
-  IonButtons,
-  IonBackButton,
   IonContent,
   IonInput,
   IonTextarea,
   IonSelect,
   IonSelectOption,
-  IonIcon,
-  IonSpinner
+  IonIcon
 } from '@ionic/vue';
 import { checkmarkOutline, closeCircleOutline } from 'ionicons/icons';
 import { eventService } from '@/services/event.service';

@@ -3,16 +3,11 @@ import { ref, onMounted, computed, watch } from 'vue';
 import { useRouter } from 'vue-router';
 import {
   IonPage,
-  IonHeader,
-  IonToolbar,
-  IonButtons,
-  IonBackButton,
   IonContent,
   IonIcon,
   IonInput,
   IonSelect,
   IonSelectOption,
-  IonSpinner,
   onIonViewWillEnter,
   onIonViewDidLeave
 } from '@ionic/vue';

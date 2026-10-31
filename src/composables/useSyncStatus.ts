@@ -11,3 +11,4 @@ export function useSyncStatus() {
     syncNow: SyncManager.syncNow.bind(SyncManager),
   };
 }
+

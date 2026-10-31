@@ -9,7 +9,6 @@ import { ConflictService } from '@/services/sync/conflict.service';
 import { AuthSessionService } from '@/integrations/supabase/auth-session.service';
 import { AccountLinkingService } from '@/integrations/supabase/account-linking.service';
 import { attendanceService } from '@/services/attendance.service';
-import { FinanceRepository } from '@/database/repositories/finance.repository';
 import { StudentsRepository } from '@/database/repositories/students.repository';
 import { AcademicRepository } from '@/database/repositories/academic.repository';
 import { EventsRepository } from '@/database/repositories/events.repository';

@@ -60,12 +60,12 @@
               </div>
 
               <div class="form-group">
-                <label for="login-id">School ID or Username</label>
+                <label for="login-id">Email, Username, or School ID</label>
                 <input
                   id="login-id"
                   v-model="loginIdentifier"
                   type="text"
-                  placeholder="e.g. 2026-0001 or devadmin"
+                  placeholder="admin@unitap.com or devadmin"
                   required
                   autocomplete="username"
                   class="custom-input"

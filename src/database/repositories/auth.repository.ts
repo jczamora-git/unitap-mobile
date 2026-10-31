@@ -23,7 +23,11 @@ export class AuthRepository {
     await db.transaction(async (tx) => {
       await tx.execute(
         `INSERT INTO users (id, username, student_id, account_status, created_by_user_id, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET
+           username = excluded.username,
+           account_status = excluded.account_status,
+           updated_at = excluded.updated_at`,
         [
           user.id,
           user.username,
@@ -37,7 +41,9 @@ export class AuthRepository {
 
       await tx.execute(
         `INSERT INTO user_credentials (user_id, password_hash, algorithm, provisioned_at, last_online_verified_at)
-         VALUES (?, ?, ?, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(user_id) DO UPDATE SET
+           provisioned_at = excluded.provisioned_at`,
         [
           credential.user_id,
           credential.password_hash,
@@ -49,7 +55,10 @@ export class AuthRepository {
 
       await tx.execute(
         `INSERT INTO user_roles (id, user_id, role, semester_id, assigned_by_user_id, assigned_at, revoked_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET
+           role = excluded.role,
+           assigned_at = excluded.assigned_at`,
         [
           role.id,
           role.user_id,

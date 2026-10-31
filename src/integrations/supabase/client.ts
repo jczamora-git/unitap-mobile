@@ -43,3 +43,4 @@ export const supabase: SupabaseClient = createClient(supabaseUrl, supabaseKey, {
     },
   },
 });
+

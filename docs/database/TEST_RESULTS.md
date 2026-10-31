@@ -38,3 +38,4 @@
 - **Scenario F (Conflict Auditing)**: Verified. Collisions (such as duplicate card taps or conflicting updates) are logged into `sync_conflicts` with resolution strategy recorded instead of silent data loss.
 - **Scenario G (Account Isolation & Session Expiry)**: Verified. User sessions are cached with a strict 7-day expiration. Logging out invalidates the session and locks the local store.
 - **Scenario H (Student Account Activation)**: Verified. Activation codes are verified against single-use cryptographic hashes and linked to Supabase user IDs.
+

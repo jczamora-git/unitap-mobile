@@ -14,7 +14,7 @@ interface Props {
   disabled?: boolean;
 }
 
-const props = withDefaults(defineProps<Props>(), {
+withDefaults(defineProps<Props>(), {
   modelValue: '',
   options: () => [],
   placeholder: 'Select option',

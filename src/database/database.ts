@@ -16,19 +16,24 @@ export async function getDatabase(): Promise<DatabaseAdapter> {
   }
 
   initPromise = (async () => {
-    const adapter: DatabaseAdapter = Capacitor.isNativePlatform()
-      ? new NativeSqliteAdapter()
-      : new WebDevSqliteAdapter();
+    try {
+      const adapter: DatabaseAdapter = Capacitor.isNativePlatform()
+        ? new NativeSqliteAdapter()
+        : new WebDevSqliteAdapter();
 
-    await adapter.initialize();
-    await MigrationRunner.runMigrations(adapter);
-    const valid = await MigrationRunner.validateSchema(adapter);
-    if (!valid) {
-      throw new Error('Database schema validation failed: missing tables.');
+      await adapter.initialize();
+      await MigrationRunner.runMigrations(adapter);
+      const valid = await MigrationRunner.validateSchema(adapter);
+      if (!valid) {
+        throw new Error('Database schema validation failed: missing tables.');
+      }
+
+      adapterInstance = adapter;
+      return adapter;
+    } catch (err) {
+      initPromise = null;
+      throw err;
     }
-
-    adapterInstance = adapter;
-    return adapter;
   })();
 
   return initPromise;

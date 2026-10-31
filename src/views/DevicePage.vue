@@ -1,10 +1,6 @@
 <script setup lang="ts">
 import { 
   IonPage, 
-  IonHeader, 
-  IonToolbar, 
-  IonButtons,
-  IonBackButton,
   IonContent, 
   IonIcon, 
   IonButton,

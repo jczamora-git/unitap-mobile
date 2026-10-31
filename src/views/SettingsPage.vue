@@ -3,13 +3,8 @@ import { ref, onMounted } from 'vue';
 import { useRouter } from 'vue-router';
 import {
   IonPage,
-  IonHeader,
-  IonToolbar,
-  IonButtons,
-  IonBackButton,
   IonContent,
   IonIcon,
-  IonAlert,
   IonSpinner
 } from '@ionic/vue';
 import {

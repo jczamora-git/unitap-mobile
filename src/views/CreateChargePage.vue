@@ -3,17 +3,11 @@ import { ref, onMounted } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import {
   IonPage,
-  IonHeader,
-  IonToolbar,
-  IonButtons,
-  IonBackButton,
   IonContent,
   IonInput,
   IonTextarea,
   IonSelect,
-  IonSelectOption,
-  IonIcon,
-  IonSpinner
+  IonSelectOption
 } from '@ionic/vue';
 import { checkmarkOutline } from 'ionicons/icons';
 import { studentService } from '@/services/student.service';

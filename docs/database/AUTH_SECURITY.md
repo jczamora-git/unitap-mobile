@@ -66,3 +66,4 @@ All Supabase tables have RLS enabled (`ALTER TABLE ... ENABLE ROW LEVEL SECURITY
 3. **`student_obligations` & `payments`**:
    - `SELECT`: Officer/DevAdmin or the student matching `student_id`.
    - `INSERT / UPDATE`: Officers / DevAdmins only.
+

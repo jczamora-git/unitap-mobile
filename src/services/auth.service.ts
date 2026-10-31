@@ -189,6 +189,19 @@ class AuthService {
     await Preferences.remove({ key: SESSION_STORAGE_KEY });
   }
 
+  public async setSession(user: UserAccount, role: UserRoleRecord, student?: StudentRecord | null): Promise<void> {
+    this.currentUser.value = user;
+    this.currentRole.value = role;
+    this.currentStudent.value = student || null;
+    const session: AuthSession = {
+      user,
+      role,
+      student: student || null,
+      loggedInAt: new Date().toISOString(),
+    };
+    await Preferences.set({ key: SESSION_STORAGE_KEY, value: JSON.stringify(session) });
+  }
+
   // --- INITIAL DEVADMIN SETUP ---
   public async isDevAdminConfigured(): Promise<boolean> {
     const admin = await AuthRepository.getUserByUsername('devadmin');

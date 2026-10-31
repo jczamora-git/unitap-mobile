@@ -3,8 +3,6 @@ import { ref, onMounted } from 'vue';
 import { useRouter } from 'vue-router';
 import {
   IonPage,
-  IonHeader,
-  IonToolbar,
   IonContent,
   IonIcon,
   IonSpinner,
@@ -34,11 +32,6 @@ const events = ref<Event[]>([]);
 const occurrencesByEvent = ref<Record<string, EventOccurrence[]>>({});
 const filterSegment = ref<'ALL' | 'ACTIVE' | 'COMPLETED'>('ALL');
 const isLoading = ref(true);
-
-function setFilter(filter: 'ALL' | 'ACTIVE' | 'COMPLETED') {
-  haptics.light();
-  filterSegment.value = filter;
-}
 
 function onEventClick(id: string) {
   haptics.light();

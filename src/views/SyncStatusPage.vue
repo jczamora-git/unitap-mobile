@@ -256,3 +256,4 @@ async function handleManualSync() {
   gap: 8px;
 }
 </style>
+

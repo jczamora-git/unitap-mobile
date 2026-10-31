@@ -4,7 +4,6 @@ import { useRouter } from 'vue-router';
 import {
   IonPage,
   IonContent,
-  IonIcon,
   IonSpinner,
   onIonViewWillEnter
 } from '@ionic/vue';

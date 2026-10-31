@@ -1,4 +1,5 @@
 import initSqlJs, { Database, SqlJsStatic } from 'sql.js';
+import sqlWasmUrl from 'sql.js/dist/sql-wasm.wasm?url';
 import { Preferences } from '@capacitor/preferences';
 import type { DatabaseAdapter } from './database-adapter.interface';
 
@@ -19,13 +20,25 @@ export class WebDevSqliteAdapter implements DatabaseAdapter {
     if (!this.SQL) {
       const isNode = typeof (globalThis as unknown as { process?: { versions?: { node?: string } } }).process?.versions?.node !== 'undefined';
       if (isNode) {
-        // Node / Vitest environment (including JSDOM)
+        // Node / Vitest test environment: synchronous local resolution via Node fs
         this.SQL = await initSqlJs();
       } else {
-        // Browser environment
-        this.SQL = await initSqlJs({
-          locateFile: (file) => `https://sql.js.org/dist/${file}`,
-        });
+        // Browser / WebView environment: use local Vite-bundled WASM asset
+        try {
+          this.SQL = await initSqlJs({
+            locateFile: (file: string) => {
+              if (file.endsWith('.wasm')) {
+                return sqlWasmUrl || '/sql-wasm.wasm';
+              }
+              return file;
+            },
+          });
+        } catch (err) {
+          console.warn('[WebDevSqliteAdapter] Primary WASM resolution failed, trying fallback to /sql-wasm.wasm:', err);
+          this.SQL = await initSqlJs({
+            locateFile: () => '/sql-wasm.wasm',
+          });
+        }
       }
     }
 

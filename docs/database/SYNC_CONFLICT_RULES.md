@@ -41,3 +41,4 @@ UniTap 2.0 avoids naive "Last-Write-Wins" for critical operational and financial
 
 - **Rule**: Field-level merge for profile updates.
 - Verified academic identifiers (`school_id`) and enrollment standings are server-authoritative and can only be altered by authorized DevAdmins.
+
