@@ -176,6 +176,14 @@
               <span class="batch-label">Batch Reference:</span>
               <code class="font-mono">{{ importResult.batchId }}</code>
             </div>
+            <div v-if="importResult.serverSynced" class="server-sync-badge">
+              <ion-icon :icon="cloudDoneOutline" class="sync-icon" />
+              <span>Synced directly with Supabase Cloud Database</span>
+            </div>
+            <div v-else class="server-sync-badge offline">
+              <ion-icon :icon="cloudUploadOutline" class="sync-icon" />
+              <span>Saved locally &amp; queued to sync outbox</span>
+            </div>
             <div class="success-actions">
               <UniButton variant="secondary" size="md" @click="router.push('/tabs/students')">
                 View Student Roster
@@ -198,6 +206,7 @@ import { IonPage, IonContent, IonIcon } from '@ionic/vue';
 import {
   cloudDownloadOutline,
   cloudUploadOutline,
+  cloudDoneOutline,
   documentTextOutline,
   closeOutline,
   checkmarkCircle,
@@ -210,7 +219,11 @@ import {
   UniButton,
 } from '@/components/ui';
 import { AcademicRepository } from '@/database/repositories/academic.repository';
-import { CsvImportService, type CsvParseResult } from '@/services/csv-import.service';
+import {
+  CsvImportService,
+  type CsvParseResult,
+  type ImportExecutionResult,
+} from '@/services/csv-import.service';
 import { authService } from '@/services/auth.service';
 import { useToast } from '@/composables/useToast';
 import { haptics } from '@/utilities/haptics';
@@ -243,7 +256,7 @@ const programOptions = computed(() =>
 const selectedFileName = ref('');
 const parseResult = ref<CsvParseResult | null>(null);
 const isImporting = ref(false);
-const importResult = ref<{ batchId: string; importedCount: number; rejectedCount: number } | null>(null);
+const importResult = ref<ImportExecutionResult | null>(null);
 const errorMessage = ref<string | null>(null);
 
 const existingCount = computed(() => {
@@ -809,6 +822,30 @@ function downloadTemplate() {
   border-radius: 6px;
   border: 1px solid var(--uni-border);
   color: var(--uni-primary);
+}
+
+.server-sync-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: #059669;
+  background: rgba(16, 185, 129, 0.12);
+  border: 1px solid rgba(16, 185, 129, 0.3);
+  padding: 4px 10px;
+  border-radius: 8px;
+  width: fit-content;
+}
+
+.server-sync-badge.offline {
+  color: #D97706;
+  background: rgba(245, 158, 11, 0.12);
+  border-color: rgba(245, 158, 11, 0.3);
+}
+
+.server-sync-badge .sync-icon {
+  font-size: 14px;
 }
 
 .success-actions {

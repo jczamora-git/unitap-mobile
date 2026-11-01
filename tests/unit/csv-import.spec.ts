@@ -1,5 +1,6 @@
-import { describe, it, expect, beforeEach } from 'vitest';
-import { resetDatabaseForTests } from '@/database/database';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { resetDatabaseForTests, getDatabase } from '@/database/database';
+import { supabase } from '@/integrations/supabase/client';
 import { CsvImportService } from '@/services/csv-import.service';
 import { AcademicRepository } from '@/database/repositories/academic.repository';
 import { StudentsRepository } from '@/database/repositories/students.repository';
@@ -125,5 +126,109 @@ describe('UniTap 2.0 CSV Student Roster Import', () => {
     expect(row.first_name).toBe('Malicious');
     expect(row.middle_name).toBe('Inject');
     expect(row.lastname).toBe('Section');
+  });
+
+  it('enqueues STUDENT and ENROLLMENT operations to sync_outbox when offline', async () => {
+    const db = await getDatabase();
+    const csvContent = `school_id,first_name,middle_name,lastname,year,section
+2026-0050,Andres,,Bonifacio,1,1F4
+2026-0051,Apolinario,,Mabini,2,2F4`;
+
+    const parseResult = await CsvImportService.parseAndValidate(
+      csvContent,
+      'offline_roster.csv',
+      semesterId,
+      programId
+    );
+
+    const importRes = await CsvImportService.executeImport(
+      parseResult,
+      semesterId,
+      programId,
+      'officer_user'
+    );
+
+    expect(importRes.importedCount).toBe(2);
+    expect(importRes.rejectedCount).toBe(0);
+    expect(importRes.serverSynced).toBe(false);
+
+    // Verify sync_outbox has records for offline push
+    const outboxOps = await db.query<{ entity_type: string; operation: string }>(
+      'SELECT entity_type, operation FROM sync_outbox ORDER BY created_at ASC'
+    );
+    expect(outboxOps.length).toBeGreaterThanOrEqual(4); // At least 2 STUDENT + 2 ENROLLMENT
+    const entityTypes = outboxOps.map((o) => o.entity_type);
+    expect(entityTypes).toContain('STUDENT');
+    expect(entityTypes).toContain('ENROLLMENT');
+  });
+
+  it('invokes import_student_roster_batch RPC and mirrors results when online', async () => {
+    const csvContent = `school_id,first_name,middle_name,lastname,year,section
+2026-0099,Gabriela,,Silang,1,1F4`;
+
+    const parseResult = await CsvImportService.parseAndValidate(
+      csvContent,
+      'online_roster.csv',
+      semesterId,
+      programId
+    );
+
+    const mockServerStudent = {
+      id: '11111111-2222-3333-4444-555555555555',
+      school_id: '2026-0099',
+      first_name: 'Gabriela',
+      middle_name: null,
+      last_name: 'Silang',
+      year: 1,
+      section: '1F4',
+      enrollment_id: '99999999-8888-7777-6666-555555555555',
+      is_existing: false,
+    };
+
+    const rpcSpy = vi.spyOn(supabase, 'rpc').mockResolvedValueOnce({
+      data: {
+        success: true,
+        batch_id: 'imp_server_123',
+        imported_count: 1,
+        updated_count: 0,
+        rejected_count: 0,
+        total_processed: 1,
+        students: [mockServerStudent],
+        errors: [],
+      },
+      error: null,
+    } as any);
+
+    // Temporarily simulate non-test environment to exercise the RPC call branch
+    (globalThis as any).__FORCE_ONLINE_TEST__ = true;
+    try {
+      const importRes = await CsvImportService.executeImport(
+        parseResult,
+        semesterId,
+        programId,
+        'officer_user'
+      );
+
+      expect(rpcSpy).toHaveBeenCalledWith(
+        'import_student_roster_batch',
+        expect.objectContaining({
+          p_source_filename: 'online_roster.csv',
+          p_semester_id: semesterId,
+          p_program_id: programId,
+        })
+      );
+
+      expect(importRes.importedCount).toBe(1);
+      expect(importRes.serverSynced).toBe(true);
+
+      // Verify the student returned by the server was mirrored into local SQLite
+      const mirrored = await StudentsRepository.getStudentBySchoolId('2026-0099');
+      expect(mirrored).toBeDefined();
+      expect(mirrored?.id).toBe(mockServerStudent.id);
+      expect(mirrored?.first_name).toBe('Gabriela');
+    } finally {
+      delete (globalThis as any).__FORCE_ONLINE_TEST__;
+      rpcSpy.mockRestore();
+    }
   });
 });
