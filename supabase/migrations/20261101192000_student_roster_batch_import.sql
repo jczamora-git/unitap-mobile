@@ -2,12 +2,29 @@
 -- UniTap 2.0: Backend Student Roster Batch Import RPC & Audit Log
 -- Migration: 20261101192000_student_roster_batch_import.sql
 -- Description:
---   1. Creates import_batches and import_rows tables in Supabase PostgreSQL
+--   1. Seeds baseline academic structure (ay_2026_2027, sem_2026_2027_1, prog_bsit)
+--      so imports targeting standard terms resolve without foreign key violations.
+--   2. Creates import_batches and import_rows tables in Supabase PostgreSQL
 --      for centralized audit logging of CSV student roster uploads.
---   2. Provides import_student_roster_batch RPC to atomically upsert students,
+--   3. Provides import_student_roster_batch RPC to atomically upsert students,
 --      enrollments, and pending profile confirmations in a single transaction.
---   3. Secures RPC and tables with DEVADMIN/OFFICER role validation.
+--   4. Secures RPC and tables with DEVADMIN/OFFICER role validation.
 -- ==============================================================================
+
+-- ------------------------------------------------------------------------------
+-- 0. SEED BASELINE ACADEMIC STRUCTURE (IF MISSING)
+-- ------------------------------------------------------------------------------
+INSERT INTO public.academic_years (id, label, starts_on, ends_on, status, created_at, updated_at)
+VALUES ('ay_2026_2027', '2026-2027', '2026-08-01', '2027-05-31', 'ACTIVE', now(), now())
+ON CONFLICT (id) DO UPDATE SET status = 'ACTIVE';
+
+INSERT INTO public.semesters (id, academic_year_id, term, starts_on, ends_on, status, created_at, updated_at)
+VALUES ('sem_2026_2027_1', 'ay_2026_2027', 'FIRST', '2026-08-01', '2026-12-31', 'ACTIVE', now(), now())
+ON CONFLICT (id) DO UPDATE SET status = 'ACTIVE';
+
+INSERT INTO public.programs (id, code, name, status)
+VALUES ('prog_bsit', 'BSIT', 'Bachelor of Science in Information Technology', 'ACTIVE')
+ON CONFLICT (id) DO UPDATE SET status = 'ACTIVE';
 
 -- ------------------------------------------------------------------------------
 -- 1. TABLES: import_batches & import_rows
@@ -130,12 +147,31 @@ BEGIN
     RAISE EXCEPTION 'Unauthorized: Only officers and devadmins can import student rosters.';
   END IF;
 
-  -- 2. Validate semester
+  -- 2. Validate / auto-provision baseline semester
   IF NOT EXISTS (SELECT 1 FROM semesters WHERE id = p_semester_id) THEN
-    RAISE EXCEPTION 'Semester % not found.', p_semester_id;
+    IF p_semester_id = 'sem_2026_2027_1' THEN
+      INSERT INTO public.academic_years (id, label, starts_on, ends_on, status, created_at, updated_at)
+      VALUES ('ay_2026_2027', '2026-2027', '2026-08-01', '2027-05-31', 'ACTIVE', now(), now())
+      ON CONFLICT (id) DO UPDATE SET status = 'ACTIVE';
+
+      INSERT INTO public.semesters (id, academic_year_id, term, starts_on, ends_on, status, created_at, updated_at)
+      VALUES ('sem_2026_2027_1', 'ay_2026_2027', 'FIRST', '2026-08-01', '2026-12-31', 'ACTIVE', now(), now())
+      ON CONFLICT (id) DO UPDATE SET status = 'ACTIVE';
+    ELSE
+      RAISE EXCEPTION 'Semester % not found.', p_semester_id;
+    END IF;
   END IF;
 
-  -- 3. Log initial batch
+  -- 3. Ensure baseline program exists if prog_bsit
+  IF p_program_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM programs WHERE id = p_program_id) THEN
+    IF p_program_id = 'prog_bsit' THEN
+      INSERT INTO public.programs (id, code, name, status)
+      VALUES ('prog_bsit', 'BSIT', 'Bachelor of Science in Information Technology', 'ACTIVE')
+      ON CONFLICT (id) DO UPDATE SET status = 'ACTIVE';
+    END IF;
+  END IF;
+
+  -- 4. Log initial batch
   INSERT INTO import_batches (
     id, semester_id, source_filename, sha256, imported_by_user_id,
     imported_at, status, total_rows, imported_rows, rejected_rows,
@@ -149,7 +185,7 @@ BEGIN
   ON CONFLICT (id) DO UPDATE SET
     updated_at = v_now;
 
-  -- 4. Process roster elements
+  -- 5. Process roster elements
   FOR v_item IN SELECT * FROM jsonb_array_elements(p_roster)
   LOOP
     v_idx := v_idx + 1;
@@ -306,7 +342,7 @@ BEGIN
     END;
   END LOOP;
 
-  -- 5. Finalize batch status
+  -- 6. Finalize batch status
   UPDATE import_batches
   SET status = CASE WHEN v_rejected_count = 0 THEN 'COMPLETED' WHEN (v_imported_count + v_updated_count) > 0 THEN 'PARTIAL' ELSE 'FAILED' END,
       imported_rows = v_imported_count + v_updated_count,

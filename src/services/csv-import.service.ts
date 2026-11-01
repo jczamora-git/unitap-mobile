@@ -265,6 +265,41 @@ export class CsvImportService {
     // 1. Attempt Atomic Online Server Ingest RPC via Supabase (if online and not in test)
     if (!isTestEnvironment()) {
       try {
+        // Pre-flight: Ensure target academic structure exists on Supabase
+        const targetSem = await AcademicRepository.getSemesterById(semesterId);
+        if (targetSem) {
+          const targetYear = await AcademicRepository.getYearById(targetSem.academic_year_id);
+          if (targetYear) {
+            await supabase.from('academic_years').upsert({
+              id: targetYear.id,
+              label: targetYear.label,
+              starts_on: targetYear.starts_on,
+              ends_on: targetYear.ends_on,
+              status: targetYear.status,
+            });
+          }
+          await supabase.from('semesters').upsert({
+            id: targetSem.id,
+            academic_year_id: targetSem.academic_year_id,
+            term: targetSem.term,
+            starts_on: targetSem.starts_on,
+            ends_on: targetSem.ends_on,
+            status: targetSem.status,
+          });
+        }
+
+        if (programId) {
+          const targetProg = await AcademicRepository.getProgramById(programId);
+          if (targetProg) {
+            await supabase.from('programs').upsert({
+              id: targetProg.id,
+              code: targetProg.code,
+              name: targetProg.name,
+              status: 'ACTIVE',
+            });
+          }
+        }
+
         const { data: rpcRes, error: rpcErr } = await supabase.rpc('import_student_roster_batch', {
           p_batch_id: batchId,
           p_source_filename: parseResult.filename,
