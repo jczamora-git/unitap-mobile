@@ -80,7 +80,6 @@ const showPendingSheet = ref(false);
 const showClearPendingDialog = ref(false);
 const pendingList = ref<SyncOutboxRecord[]>([]);
 const isLoadingPending = ref(false);
-const expandedPayloadId = ref<string | null>(null);
 const notificationsEnabled = ref(true);
 
 async function openPendingSheet() {
@@ -114,20 +113,97 @@ async function handleClearAllPending() {
   statusMessage.value = 'Pending changes cleared.';
 }
 
-function togglePayload(id: string) {
-  if (expandedPayloadId.value === id) {
-    expandedPayloadId.value = null;
-  } else {
-    expandedPayloadId.value = id;
+function formatFriendlyError(rawError?: string | null): string | undefined {
+  if (!rawError) return undefined;
+  const lower = rawError.toLowerCase();
+  if (lower.includes('duplicate key') || lower.includes('unique constraint') || lower.includes('23505')) {
+    if (lower.includes('school_id')) {
+      return 'Already saved in the cloud. This student ID is already registered.';
+    }
+    return 'This record already exists on the server.';
   }
+  if (lower.includes('foreign key') || lower.includes('23503')) {
+    return 'Already up to date in the cloud. You can safely clear this item.';
+  }
+  if (lower.includes('permission denied') || lower.includes('rls') || lower.includes('42501')) {
+    return 'Permission denied by server security policy.';
+  }
+  if (lower.includes('unauthorized') || lower.includes('authentication')) {
+    return 'Session expired. Please sign in again.';
+  }
+  if (lower.includes('network') || lower.includes('fetch') || lower.includes('connection')) {
+    return 'Network connection issue. Will retry automatically.';
+  }
+  return rawError;
 }
 
-function formatPayloadJson(jsonStr: string): string {
+function getFriendlyItem(item: SyncOutboxRecord) {
+  let title = item.entity_type;
+  let subtitle = 'Pending sync update';
+  let badge: string = item.operation;
+  let badgeClass = 'badge-primary';
+
   try {
-    return JSON.stringify(JSON.parse(jsonStr), null, 2);
+    const payload = item.payload_json ? JSON.parse(item.payload_json) : {};
+    
+    if (item.entity_type === 'STUDENT') {
+      const name = [payload.first_name, payload.last_name].filter(Boolean).join(' ');
+      title = name ? `Student: ${name}` : 'Student Record';
+      const meta = [
+        payload.school_id ? `ID: ${payload.school_id}` : null,
+        payload.section ? `Sec ${payload.section}` : null,
+        payload.year ? `Year ${payload.year}` : null,
+      ].filter(Boolean).join(' • ');
+      subtitle = meta || 'Student profile information';
+      badge = item.operation === 'CREATE' ? 'New Registration' : 'Update Info';
+      badgeClass = item.operation === 'CREATE' ? 'badge-success' : 'badge-info';
+    } else if (item.entity_type === 'ENROLLMENT') {
+      const name = [payload.first_name_snapshot, payload.last_name_snapshot].filter(Boolean).join(' ');
+      title = name ? `Enrollment: ${name}` : 'Class Enrollment';
+      const meta = [
+        payload.year_level ? `${payload.year_level} Year` : null,
+        payload.section ? `Section ${payload.section}` : null,
+        payload.program_id ? (payload.program_id.replace('prog_', '').toUpperCase()) : null,
+      ].filter(Boolean).join(' • ');
+      subtitle = meta || 'Term enrollment record';
+      badge = 'Enrollment';
+      badgeClass = 'badge-primary';
+    } else if (item.entity_type === 'ATTENDANCE') {
+      title = 'Event Attendance Check-in';
+      subtitle = payload.scanned_at ? `Tap at ${new Date(payload.scanned_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}` : 'Attendance check-in record';
+      badge = 'Attendance';
+      badgeClass = 'badge-warning';
+    } else if (item.entity_type === 'PAYMENT' || item.entity_type === 'PAYMENT_ALLOCATION') {
+      const pesos = payload.amount_centavos ? `₱${(payload.amount_centavos / 100).toFixed(2)}` : '';
+      title = pesos ? `Payment: ${pesos}` : 'Payment Transaction';
+      subtitle = payload.reference_number ? `Ref: ${payload.reference_number}` : 'Collected fee/contribution';
+      badge = 'Payment';
+      badgeClass = 'badge-success';
+    } else if (item.entity_type === 'CARD') {
+      title = 'NFC Smart Card';
+      subtitle = payload.uid_normalized ? `Card UID: ${payload.uid_normalized}` : 'Student smart card linked';
+      badge = 'NFC Card';
+      badgeClass = 'badge-accent';
+    } else {
+      title = item.entity_type.charAt(0) + item.entity_type.slice(1).toLowerCase().replace(/_/g, ' ');
+      subtitle = `Operation: ${item.operation}`;
+    }
   } catch {
-    return jsonStr;
+    title = `${item.entity_type} Record`;
+    subtitle = `Operation: ${item.operation}`;
   }
+
+  const friendlyError = formatFriendlyError(item.last_error);
+  const timeStr = item.created_at ? new Date(item.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '';
+
+  return {
+    title,
+    subtitle,
+    badge,
+    badgeClass,
+    friendlyError,
+    timeStr,
+  };
 }
 
 const syncModeOptions = [
@@ -696,13 +772,13 @@ function toggleNotifications() {
       <!-- Pending Changes & Outbox Logs Sheet -->
       <UniSheet
         v-model:is-open="showPendingSheet"
-        title="Pending Sync Operations"
-        :subtitle="`${pendingList.length} operations queued for cloud upload`"
+        title="Pending Changes"
+        :subtitle="`${pendingList.length} updates waiting to upload`"
       >
         <div class="pending-sheet-content">
           <div v-if="pendingList.length > 0" class="pending-sheet-toolbar">
             <span class="sheet-summary-text">
-              Uncommitted operations stored safely in local SQLite outbox.
+              These changes are saved safely on this device. They will automatically upload when connected to the server.
             </span>
             <div class="toolbar-actions">
               <UniButton
@@ -727,13 +803,13 @@ function toggleNotifications() {
 
           <div v-if="isLoadingPending" class="loading-state">
             <ion-spinner name="crescent" color="primary" />
-            <p class="metadata-text">Loading outbox logs...</p>
+            <p class="metadata-text">Checking pending changes...</p>
           </div>
 
           <div v-else-if="pendingList.length === 0" class="empty-pending-state">
             <ion-icon :icon="checkmarkCircle" class="empty-icon text-success" />
-            <span class="empty-title">Queue is empty</span>
-            <span class="empty-desc">All local operations have been synchronized with the cloud.</span>
+            <span class="empty-title">All Caught Up!</span>
+            <span class="empty-desc">All student records and operations are up to date with the server.</span>
           </div>
 
           <div v-else class="pending-items-list">
@@ -743,39 +819,27 @@ function toggleNotifications() {
               class="pending-item-card"
             >
               <div class="item-head-row">
-                <div class="item-badges">
-                  <span class="entity-badge">{{ item.entity_type }}</span>
-                  <span class="op-badge" :class="'op-' + item.operation.toLowerCase()">
-                    {{ item.operation }}
-                  </span>
+                <div class="item-info">
+                  <div class="item-title-row">
+                    <span class="item-friendly-title">{{ getFriendlyItem(item).title }}</span>
+                    <span class="item-badge" :class="getFriendlyItem(item).badgeClass">
+                      {{ getFriendlyItem(item).badge }}
+                    </span>
+                  </div>
+                  <span class="item-friendly-desc">{{ getFriendlyItem(item).subtitle }}</span>
                 </div>
                 <div class="item-actions">
-                  <span v-if="item.retry_count && item.retry_count > 0" class="retry-tag">
-                    Retried {{ item.retry_count }}x
-                  </span>
-                  <button class="delete-item-btn" title="Discard this stuck change" @click="handleDeletePending(item.id)">
+                  <span class="item-time font-mono">{{ getFriendlyItem(item).timeStr }}</span>
+                  <button class="delete-item-btn" title="Discard this change" @click="handleDeletePending(item.id)">
                     <ion-icon :icon="trashOutline" />
                   </button>
                 </div>
               </div>
 
-              <div class="item-meta-row font-mono">
-                <span>ID: {{ item.id }}</span>
-                <span>{{ item.created_at ? new Date(item.created_at).toLocaleTimeString() : '' }}</span>
-              </div>
-
-              <!-- Error Log Callout if last_error exists -->
-              <div v-if="item.last_error" class="item-error-box">
+              <!-- Friendly Error Note if error exists -->
+              <div v-if="getFriendlyItem(item).friendlyError" class="item-error-box">
                 <ion-icon :icon="alertCircleOutline" class="item-error-icon" />
-                <span class="item-error-text">{{ item.last_error }}</span>
-              </div>
-
-              <!-- Payload Toggle & Preview -->
-              <div class="payload-section">
-                <button class="payload-toggle-btn" @click="togglePayload(item.id)">
-                  {{ expandedPayloadId === item.id ? 'Hide Payload' : 'Inspect Payload' }}
-                </button>
-                <pre v-if="expandedPayloadId === item.id" class="payload-code-block">{{ formatPayloadJson(item.payload_json) }}</pre>
+                <span class="item-error-text">{{ getFriendlyItem(item).friendlyError }}</span>
               </div>
             </div>
           </div>
@@ -1410,71 +1474,88 @@ function toggleNotifications() {
 
 .item-head-row {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
+  gap: 12px;
 }
 
-.item-badges {
+.item-info {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  flex: 1;
+}
+
+.item-title-row {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
+  flex-wrap: wrap;
 }
 
-.entity-badge {
-  font-size: 11px;
+.item-friendly-title {
+  font-size: 13.5px;
+  font-weight: 700;
+  color: var(--uni-text);
+}
+
+.item-friendly-desc {
+  font-size: 11.5px;
+  color: var(--uni-text-secondary);
+  line-height: 1.35;
+}
+
+.item-badge {
+  font-size: 10px;
   font-weight: 700;
   padding: 2px 7px;
   border-radius: 6px;
-  background: var(--uni-primary-bg, rgba(15, 118, 110, 0.15));
-  color: var(--uni-primary, #0F766E);
   text-transform: uppercase;
   letter-spacing: 0.03em;
 }
 
-.op-badge {
-  font-size: 10.5px;
-  font-weight: 700;
-  padding: 2px 6px;
-  border-radius: 6px;
-  text-transform: uppercase;
-}
-
-.op-badge.op-create {
+.item-badge.badge-success {
   background: rgba(16, 185, 129, 0.15);
   color: #10B981;
 }
 
-.op-badge.op-update {
+.item-badge.badge-info {
   background: rgba(59, 130, 246, 0.15);
   color: #3B82F6;
 }
 
-.op-badge.op-void,
-.op-badge.op-revoke {
-  background: rgba(239, 68, 68, 0.15);
-  color: #EF4444;
+.item-badge.badge-primary {
+  background: var(--uni-primary-bg, rgba(15, 118, 110, 0.15));
+  color: var(--uni-primary, #0F766E);
+}
+
+.item-badge.badge-warning {
+  background: rgba(245, 158, 11, 0.15);
+  color: #F59E0B;
+}
+
+.item-badge.badge-accent {
+  background: rgba(139, 92, 246, 0.15);
+  color: #8B5CF6;
 }
 
 .item-actions {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
+  flex-shrink: 0;
 }
 
-.retry-tag {
+.item-time {
   font-size: 11px;
-  padding: 2px 6px;
-  border-radius: 4px;
-  background: rgba(239, 68, 68, 0.12);
-  color: var(--uni-danger, #EF4444);
-  font-weight: 600;
+  color: var(--uni-text-secondary);
 }
 
 .delete-item-btn {
   background: none;
   border: none;
   color: var(--uni-text-secondary);
-  font-size: 16px;
+  font-size: 17px;
   cursor: pointer;
   padding: 4px;
   display: flex;
@@ -1486,16 +1567,9 @@ function toggleNotifications() {
   color: var(--uni-danger, #EF4444);
 }
 
-.item-meta-row {
-  display: flex;
-  justify-content: space-between;
-  font-size: 11px;
-  color: var(--uni-text-secondary);
-}
-
 .item-error-box {
-  background: rgba(239, 68, 68, 0.1);
-  border: 1px solid rgba(239, 68, 68, 0.25);
+  background: rgba(239, 68, 68, 0.08);
+  border: 1px solid rgba(239, 68, 68, 0.22);
   border-radius: 8px;
   padding: 8px 10px;
   display: flex;
@@ -1513,39 +1587,6 @@ function toggleNotifications() {
 .item-error-text {
   font-size: 11.5px;
   color: var(--uni-danger, #EF4444);
-  line-height: 1.35;
-  font-family: monospace;
-  word-break: break-all;
-}
-
-.payload-section {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-
-.payload-toggle-btn {
-  background: none;
-  border: none;
-  color: var(--uni-primary, #0F766E);
-  font-size: 11.5px;
-  font-weight: 600;
-  cursor: pointer;
-  padding: 0;
-  text-align: left;
-}
-
-.payload-code-block {
-  margin: 0;
-  padding: 8px;
-  background: var(--uni-surface);
-  border: 1px solid var(--uni-border);
-  border-radius: 6px;
-  font-size: 10.5px;
-  line-height: 1.35;
-  max-height: 160px;
-  overflow-y: auto;
-  white-space: pre-wrap;
-  word-break: break-all;
+  line-height: 1.4;
 }
 </style>

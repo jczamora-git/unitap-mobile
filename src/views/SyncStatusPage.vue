@@ -43,31 +43,39 @@
         <div v-if="lastError" class="sync-error-card">
           <ion-icon :icon="alertCircleOutline" class="error-card-icon" />
           <div class="error-card-content">
-            <span class="error-card-title">Push Synchronization Error</span>
-            <span class="error-card-msg font-mono">{{ lastError }}</span>
+            <span class="error-card-title">Sync Notice</span>
+            <span class="error-card-msg">{{ formatFriendlyError(lastError) }}</span>
           </div>
         </div>
 
         <!-- Pending Outbox Queue -->
         <div v-if="pendingCount > 0" class="outbox-section">
           <div class="section-head-row">
-            <h3 class="section-title">Pending Operations Queue ({{ pendingCount }})</h3>
+            <h3 class="section-title">Pending Changes ({{ pendingCount }})</h3>
             <button class="clear-queue-btn" @click="handleClearQueue">Clear Queue</button>
           </div>
           <div class="outbox-cards">
             <div v-for="item in outboxItems" :key="item.id" class="outbox-item-card">
               <div class="outbox-head">
-                <span class="outbox-entity">{{ item.entity_type }}</span>
-                <span class="outbox-op">{{ item.operation }}</span>
-                <span v-if="item.retry_count && item.retry_count > 0" class="outbox-retry">
-                  Retried {{ item.retry_count }}x
-                </span>
-                <button class="delete-btn" title="Discard item" @click="handleDeleteItem(item.id)">
-                  <ion-icon :icon="trashOutline" />
-                </button>
+                <div class="outbox-info">
+                  <div class="outbox-title-row">
+                    <span class="outbox-friendly-title">{{ getFriendlyItem(item).title }}</span>
+                    <span class="outbox-badge" :class="getFriendlyItem(item).badgeClass">
+                      {{ getFriendlyItem(item).badge }}
+                    </span>
+                  </div>
+                  <span class="outbox-desc">{{ getFriendlyItem(item).subtitle }}</span>
+                </div>
+                <div class="outbox-actions">
+                  <span class="outbox-time font-mono">{{ getFriendlyItem(item).timeStr }}</span>
+                  <button class="delete-btn" title="Discard this change" @click="handleDeleteItem(item.id)">
+                    <ion-icon :icon="trashOutline" />
+                  </button>
+                </div>
               </div>
-              <div v-if="item.last_error" class="outbox-err font-mono">
-                {{ item.last_error }}
+              <div v-if="getFriendlyItem(item).friendlyError" class="outbox-err">
+                <ion-icon :icon="alertCircleOutline" class="err-icon" />
+                <span>{{ getFriendlyItem(item).friendlyError }}</span>
               </div>
             </div>
           </div>
@@ -138,6 +146,99 @@ async function handleClearQueue() {
 async function handleDeleteItem(id: string) {
   await deletePendingItem(id);
   await loadOutbox();
+}
+
+function formatFriendlyError(rawError?: string | null): string | undefined {
+  if (!rawError) return undefined;
+  const lower = rawError.toLowerCase();
+  if (lower.includes('duplicate key') || lower.includes('unique constraint') || lower.includes('23505')) {
+    if (lower.includes('school_id')) {
+      return 'Already saved in the cloud. This student ID is already registered.';
+    }
+    return 'This record already exists on the server.';
+  }
+  if (lower.includes('foreign key') || lower.includes('23503')) {
+    return 'Already up to date in the cloud. You can safely clear this item.';
+  }
+  if (lower.includes('permission denied') || lower.includes('rls') || lower.includes('42501')) {
+    return 'Permission denied by server security policy.';
+  }
+  if (lower.includes('unauthorized') || lower.includes('authentication')) {
+    return 'Session expired. Please sign in again.';
+  }
+  if (lower.includes('network') || lower.includes('fetch') || lower.includes('connection')) {
+    return 'Network connection issue. Will retry automatically.';
+  }
+  return rawError;
+}
+
+function getFriendlyItem(item: SyncOutboxRecord) {
+  let title = item.entity_type;
+  let subtitle = 'Pending sync update';
+  let badge: string = item.operation;
+  let badgeClass = 'badge-primary';
+
+  try {
+    const payload = item.payload_json ? JSON.parse(item.payload_json) : {};
+    
+    if (item.entity_type === 'STUDENT') {
+      const name = [payload.first_name, payload.last_name].filter(Boolean).join(' ');
+      title = name ? `Student: ${name}` : 'Student Record';
+      const meta = [
+        payload.school_id ? `ID: ${payload.school_id}` : null,
+        payload.section ? `Sec ${payload.section}` : null,
+        payload.year ? `Year ${payload.year}` : null,
+      ].filter(Boolean).join(' • ');
+      subtitle = meta || 'Student profile information';
+      badge = item.operation === 'CREATE' ? 'New Registration' : 'Update Info';
+      badgeClass = item.operation === 'CREATE' ? 'badge-success' : 'badge-info';
+    } else if (item.entity_type === 'ENROLLMENT') {
+      const name = [payload.first_name_snapshot, payload.last_name_snapshot].filter(Boolean).join(' ');
+      title = name ? `Enrollment: ${name}` : 'Class Enrollment';
+      const meta = [
+        payload.year_level ? `${payload.year_level} Year` : null,
+        payload.section ? `Section ${payload.section}` : null,
+        payload.program_id ? (payload.program_id.replace('prog_', '').toUpperCase()) : null,
+      ].filter(Boolean).join(' • ');
+      subtitle = meta || 'Term enrollment record';
+      badge = 'Enrollment';
+      badgeClass = 'badge-primary';
+    } else if (item.entity_type === 'ATTENDANCE') {
+      title = 'Event Attendance Check-in';
+      subtitle = payload.scanned_at ? `Tap at ${new Date(payload.scanned_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}` : 'Attendance check-in record';
+      badge = 'Attendance';
+      badgeClass = 'badge-warning';
+    } else if (item.entity_type === 'PAYMENT' || item.entity_type === 'PAYMENT_ALLOCATION') {
+      const pesos = payload.amount_centavos ? `₱${(payload.amount_centavos / 100).toFixed(2)}` : '';
+      title = pesos ? `Payment: ${pesos}` : 'Payment Transaction';
+      subtitle = payload.reference_number ? `Ref: ${payload.reference_number}` : 'Collected fee/contribution';
+      badge = 'Payment';
+      badgeClass = 'badge-success';
+    } else if (item.entity_type === 'CARD') {
+      title = 'NFC Smart Card';
+      subtitle = payload.uid_normalized ? `Card UID: ${payload.uid_normalized}` : 'Student smart card linked';
+      badge = 'NFC Card';
+      badgeClass = 'badge-accent';
+    } else {
+      title = item.entity_type.charAt(0) + item.entity_type.slice(1).toLowerCase().replace(/_/g, ' ');
+      subtitle = `Operation: ${item.operation}`;
+    }
+  } catch {
+    title = `${item.entity_type} Record`;
+    subtitle = `Operation: ${item.operation}`;
+  }
+
+  const friendlyError = formatFriendlyError(item.last_error);
+  const timeStr = item.created_at ? new Date(item.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '';
+
+  return {
+    title,
+    subtitle,
+    badge,
+    badgeClass,
+    friendlyError,
+    timeStr,
+  };
 }
 </script>
 
@@ -426,7 +527,7 @@ async function handleDeleteItem(id: string) {
   background: rgba(0, 0, 0, 0.03);
   border: 1px solid var(--uni-border);
   border-radius: 8px;
-  padding: 10px;
+  padding: 10px 12px;
   display: flex;
   flex-direction: column;
   gap: 6px;
@@ -434,29 +535,80 @@ async function handleDeleteItem(id: string) {
 
 .outbox-head {
   display: flex;
-  align-items: center;
-  gap: 8px;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
 }
 
-.outbox-entity {
-  font-size: 11px;
+.outbox-info {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  flex: 1;
+}
+
+.outbox-title-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.outbox-friendly-title {
+  font-size: 13px;
   font-weight: 700;
+  color: var(--uni-ink, #0F172A);
+}
+
+.outbox-badge {
+  font-size: 9.5px;
+  font-weight: 700;
+  padding: 1px 6px;
+  border-radius: 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.outbox-badge.badge-success {
+  background: rgba(16, 185, 129, 0.15);
+  color: #10B981;
+}
+
+.outbox-badge.badge-info {
+  background: rgba(59, 130, 246, 0.15);
+  color: #3B82F6;
+}
+
+.outbox-badge.badge-primary {
   background: var(--uni-primary-bg, rgba(15, 118, 110, 0.15));
   color: var(--uni-primary, #0F766E);
-  padding: 2px 6px;
-  border-radius: 4px;
 }
 
-.outbox-op {
-  font-size: 10.5px;
-  font-weight: 600;
+.outbox-badge.badge-warning {
+  background: rgba(245, 158, 11, 0.15);
+  color: #F59E0B;
+}
+
+.outbox-badge.badge-accent {
+  background: rgba(139, 92, 246, 0.15);
+  color: #8B5CF6;
+}
+
+.outbox-desc {
+  font-size: 11px;
   color: var(--uni-muted, #64748B);
 }
 
-.outbox-retry {
-  font-size: 10px;
-  color: var(--uni-danger, #EF4444);
-  margin-left: auto;
+.outbox-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.outbox-time {
+  font-size: 10.5px;
+  color: var(--uni-muted, #64748B);
 }
 
 .delete-btn {
@@ -465,8 +617,9 @@ async function handleDeleteItem(id: string) {
   color: var(--uni-muted, #64748B);
   cursor: pointer;
   padding: 2px 4px;
-  font-size: 14px;
-  margin-left: auto;
+  font-size: 15px;
+  display: flex;
+  align-items: center;
 }
 
 .delete-btn:hover {
@@ -478,9 +631,17 @@ async function handleDeleteItem(id: string) {
   color: var(--uni-danger, #EF4444);
   line-height: 1.35;
   background: rgba(239, 68, 68, 0.08);
+  border: 1px solid rgba(239, 68, 68, 0.2);
   padding: 6px 8px;
-  border-radius: 4px;
-  word-break: break-all;
+  border-radius: 6px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.err-icon {
+  font-size: 14px;
+  flex-shrink: 0;
 }
 </style>
 
