@@ -1,138 +1,191 @@
 import { describe, it, expect, beforeEach } from 'vitest';
+import { resetDatabaseForTests, getDatabase } from '@/database/database';
 import { FinanceService } from '@/services/finance.service';
-import type { IFinanceRepository, FinanceDataStore } from '@/storage/finance-storage.service';
-
-class MockFinanceRepo implements IFinanceRepository {
-  private data: FinanceDataStore = {
-    templates: [],
-    charges: [],
-    wallets: [],
-    transactions: [],
-    payments: []
-  };
-
-  async getData(): Promise<FinanceDataStore> { return this.data; }
-  async saveData(store: FinanceDataStore): Promise<void> { this.data = store; }
-  clearCache(): void {}
-  async resetAll(): Promise<void> {
-    this.data = { templates: [], charges: [], wallets: [], transactions: [], payments: [] };
-  }
-}
+import { StudentsRepository } from '@/database/repositories/students.repository';
+import { AcademicRepository } from '@/database/repositories/academic.repository';
 
 describe('FinanceService', () => {
-  let repo: MockFinanceRepo;
   let service: FinanceService;
+  const semesterId = 'sem_service_test';
+  const studentId = 'stu_service_test';
 
-  beforeEach(() => {
-    repo = new MockFinanceRepo();
-    service = new FinanceService(repo);
+  beforeEach(async () => {
+    await resetDatabaseForTests();
+    service = new FinanceService();
+
+    const db = await getDatabase();
+    await db.execute(
+      `INSERT INTO users (id, username, account_status, created_at, updated_at)
+       VALUES ('officer_service', 'officer_service', 'ACTIVE', '2026-08-01T00:00:00Z', '2026-08-01T00:00:00Z')`
+    );
+
+    await AcademicRepository.createYear({
+      id: 'ay_service',
+      label: '2026-2027',
+      starts_on: '2026-08-01',
+      ends_on: '2027-05-31',
+      status: 'ACTIVE',
+    });
+
+    await AcademicRepository.createSemester({
+      id: semesterId,
+      academic_year_id: 'ay_service',
+      term: 'FIRST',
+      starts_on: '2026-08-01',
+      ends_on: '2026-12-31',
+      status: 'ACTIVE',
+    });
+
+    await StudentsRepository.createStudent({
+      id: studentId,
+      school_id: '2026-9999',
+      first_name: 'Jose',
+      last_name: 'Rizal',
+      status: 'ACTIVE',
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    });
+
+    await AcademicRepository.createEnrollment({
+      id: 'enr_service',
+      student_id: studentId,
+      semester_id: semesterId,
+      year_level: 4,
+      section: '4A',
+      enrollment_status: 'ENROLLED',
+      first_name_snapshot: 'Jose',
+      last_name_snapshot: 'Rizal',
+      updated_at: new Date().toISOString(),
+    });
   });
 
-  it('computes wallet balance from immutable ledger transactions', async () => {
-    const studentId = 'stu_test_1';
-    await service.getOrCreateWallet(studentId);
+  it('creates obligation rules and retrieves them by semester', async () => {
+    const rule = await service.createRule({
+      semesterId,
+      name: 'General Assembly Fine',
+      type: 'FINE',
+      triggerType: 'ABSENCE',
+      defaultAmountCentavos: 5000, // ₱50.00
+      actorUserId: 'officer_service',
+    });
 
-    // Initial balance should be 0
-    let balance = await service.calculateWalletBalance(studentId);
-    expect(balance).toBe(0);
+    expect(rule.id).toBeDefined();
+    expect(rule.defaultAmountCentavos).toBe(5000);
 
-    // Top up ₱100 (10000 centavos)
-    await service.topUpWallet(studentId, 10000, 'Initial Top-up');
-    balance = await service.calculateWalletBalance(studentId);
-    expect(balance).toBe(10000);
-
-    // Top up ₱50 (5000 centavos)
-    await service.topUpWallet(studentId, 5000, 'Second Top-up');
-    balance = await service.calculateWalletBalance(studentId);
-    expect(balance).toBe(15000);
+    const rules = await service.getRules(semesterId);
+    expect(rules.length).toBe(1);
+    expect(rules[0].name).toBe('General Assembly Fine');
   });
 
-  it('issues charges in integer centavos and tracks status', async () => {
-    const studentId = 'stu_test_1';
-    const charge = await service.issueCharge({
+  it('issues manual fine in integer centavos and computes balances', async () => {
+    const fine = await service.issueManualFine({
       studentId,
-      title: 'Cleanup Absence',
-      chargeType: 'FINE',
-      issuedAmount: 2000 // ₱20.00
+      semesterId,
+      title: 'Uniform Violation',
+      amountCentavos: 2500, // ₱25.00
+      actorUserId: 'officer_service',
     });
 
-    expect(charge.id).toBeDefined();
-    expect(charge.issuedAmount).toBe(2000);
-    expect(charge.paidAmount).toBe(0);
-    expect(charge.status).toBe('UNPAID');
+    expect(fine.id).toBeDefined();
+    expect(fine.amountCentavos).toBe(2500);
+    expect(fine.balanceCentavos).toBe(2500);
+    expect(fine.status).toBe('UNPAID');
+
+    const obligations = await service.getStudentObligations(studentId, semesterId);
+    expect(obligations.length).toBe(1);
+    expect(obligations[0].title).toBe('Uniform Violation');
   });
 
-  it('processes simulated payment and deducts from ledger atomically', async () => {
-    const studentId = 'stu_test_1';
-    await service.topUpWallet(studentId, 5000, 'Demo Funds'); // ₱50.00
-
-    const charge = await service.issueCharge({
+  it('records direct payment against obligation and generates receipt', async () => {
+    const fine = await service.issueManualFine({
       studentId,
-      title: 'IT Day T-Shirt',
-      chargeType: 'CONTRIBUTION',
-      issuedAmount: 3000 // ₱30.00
+      semesterId,
+      title: 'Laboratory Fine',
+      amountCentavos: 5000,
+      actorUserId: 'officer_service',
     });
 
-    // Pay full charge
-    const payment = await service.processPayment({
+    const paymentResult = await service.recordPayment({
       studentId,
-      allocations: [{ chargeId: charge.id, amountCentavos: 3000 }],
-      channel: 'NFC'
+      semesterId,
+      amountCentavos: 5000,
+      source: 'CASH',
+      allocations: [{ obligationId: fine.id, amountCentavos: 5000 }],
+      notes: 'Paid in cash at CSG office',
+      actorUserId: 'officer_service',
     });
 
-    expect(payment.referenceNumber).toBeDefined();
-    expect(payment.amount).toBe(3000);
+    expect(paymentResult.paymentId).toBeDefined();
+    expect(paymentResult.referenceNumber).toContain('PAY-');
 
-    // Balance should now be 2000 centavos (₱20.00)
-    const remainingBalance = await service.calculateWalletBalance(studentId);
-    expect(remainingBalance).toBe(2000);
+    // Balance should now be 0
+    const obligations = await service.getStudentObligations(studentId, semesterId);
+    expect(obligations[0].balanceCentavos).toBe(0);
+    expect(obligations[0].status).toBe('PAID');
 
-    // Charge status should be PAID
-    const charges = await service.getCharges(studentId);
-    const updatedCharge = charges.find(c => c.id === charge.id);
-    expect(updatedCharge?.status).toBe('PAID');
-    expect(updatedCharge?.paidAmount).toBe(3000);
+    // Generate receipt
+    const receipt = await service.generatePaymentReceipt(paymentResult.paymentId, 'Officer Jane');
+    expect(receipt.referenceNumber).toBe(paymentResult.referenceNumber);
+    expect(receipt.student.schoolId).toBe('2026-9999');
+    expect(receipt.totalPaidCentavos).toBe(5000);
+    expect(receipt.items[0].remainingBalanceCentavos).toBe(0);
+
+    // Printable HTML should contain receipt reference and student details
+    const html = service.generatePrintableReceiptHtml(receipt);
+    expect(html).toContain(paymentResult.referenceNumber);
+    expect(html).toContain('Jose');
   });
 
-  it('rejects payment when wallet balance is insufficient', async () => {
-    const studentId = 'stu_test_1';
-    await service.topUpWallet(studentId, 1000, 'Small Funds'); // ₱10.00
-
-    const charge = await service.issueCharge({
+  it('reverses payment and restores balance', async () => {
+    const fine = await service.issueManualFine({
       studentId,
-      title: 'Sportsfest Fee',
-      chargeType: 'CONTRIBUTION',
-      issuedAmount: 2500 // ₱25.00
+      semesterId,
+      title: 'Tardiness Fine',
+      amountCentavos: 3000,
+      actorUserId: 'officer_service',
     });
 
-    await expect(service.processPayment({
+    const pay = await service.recordPayment({
       studentId,
-      allocations: [{ chargeId: charge.id, amountCentavos: 2500 }],
-      channel: 'MANUAL'
-    })).rejects.toThrow('Insufficient wallet balance');
+      semesterId,
+      amountCentavos: 3000,
+      source: 'CASH',
+      allocations: [{ obligationId: fine.id, amountCentavos: 3000 }],
+      actorUserId: 'officer_service',
+    });
+
+    // Reverse
+    await service.reversePayment(pay.paymentId, 'Duplicate entry error', 'officer_service');
+
+    const obligations = await service.getStudentObligations(studentId, semesterId);
+    expect(obligations[0].balanceCentavos).toBe(3000);
+    expect(obligations[0].status).toBe('UNPAID');
   });
 
-  it('supports partial payment of charges', async () => {
-    const studentId = 'stu_test_1';
-    await service.topUpWallet(studentId, 5000, 'Funds'); // ₱50.00
-
-    const charge = await service.issueCharge({
+  it('aggregates finance summary correctly', async () => {
+    // Fine: ₱50.00
+    await service.issueManualFine({
       studentId,
-      title: 'Annual Dues',
-      chargeType: 'CONTRIBUTION',
-      issuedAmount: 4000 // ₱40.00
+      semesterId,
+      title: 'Meeting Fine',
+      amountCentavos: 5000,
+      actorUserId: 'officer_service',
     });
 
-    // Pay partial ₱20 (2000 centavos)
-    await service.processPayment({
-      studentId,
-      allocations: [{ chargeId: charge.id, amountCentavos: 2000 }],
-      channel: 'MANUAL'
+    // Contribution: ₱100.00
+    await service.assessBulkContributions({
+      semesterId,
+      title: 'CSG Membership',
+      amountCentavos: 10000,
+      targetScope: 'ALL',
+      actorUserId: 'officer_service',
     });
 
-    const charges = await service.getCharges(studentId);
-    const updated = charges.find(c => c.id === charge.id);
-    expect(updated?.status).toBe('PARTIALLY_PAID');
-    expect(updated?.paidAmount).toBe(2000);
+    const summary = await service.getFinanceSummary(semesterId);
+    expect(summary.totalAssessedCentavos).toBe(15000);
+    expect(summary.totalOutstandingCentavos).toBe(15000);
+    expect(summary.totalPaymentsCollectedCentavos).toBe(0);
+    expect(summary.activeFinesCount).toBe(1);
+    expect(summary.activeContributionsCount).toBe(1);
   });
 });

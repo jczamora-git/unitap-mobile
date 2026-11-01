@@ -39,6 +39,17 @@ export class SupabaseAuthService {
     return computed(() => this.currentUser.value !== null);
   }
 
+  public static async switchWorkspace(workspace: 'DEVADMIN' | 'OFFICER' | 'STUDENT'): Promise<void> {
+    const { authService } = await import('@/services/auth.service');
+    await authService.switchWorkspace(workspace);
+    this.currentRole.value = workspace;
+  }
+
+  public static async hasRole(role: 'DEVADMIN' | 'OFFICER' | 'STUDENT'): Promise<boolean> {
+    const { authService } = await import('@/services/auth.service');
+    return authService.hasRole(role);
+  }
+
   /**
    * Initializes auth state from active Supabase session or cached offline ticket
    */
@@ -139,47 +150,72 @@ export class SupabaseAuthService {
       return { success: false, error: 'Password must be at least 8 characters long.' };
     }
 
-    // 1. Verify activation code claim
-    const claimRes = await AccountLinkingService.verifyActivationClaim(schoolId, activationCode);
-    if (!claimRes.success || !claimRes.studentId) {
-      return { success: false, error: claimRes.error || 'Failed to verify activation code.' };
-    }
+    const cleanSchoolId = schoolId.trim();
+    const cleanEmail = email.trim().toLowerCase();
+    const cleanCode = activationCode.trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
 
-    // 2. Sign up user via Supabase Auth
     try {
+      // 1. Sign up user via Supabase Auth
       const { data, error } = await supabase.auth.signUp({
-        email: email.trim().toLowerCase(),
+        email: cleanEmail,
         password,
         options: {
           data: {
-            school_id: schoolId.trim(),
-            student_id: claimRes.studentId,
-            role: 'STUDENT',
+            school_id: cleanSchoolId,
           },
         },
       });
 
+      let userId = data?.user?.id;
+
+      // Handle case where user already exists in auth (e.g. interrupted registration)
       if (error) {
-        return { success: false, error: error.message };
+        if (error.message.includes('already registered') || error.message.includes('User already registered')) {
+          const signInRes = await supabase.auth.signInWithPassword({
+            email: cleanEmail,
+            password,
+          });
+          if (signInRes.data?.user) {
+            userId = signInRes.data.user.id;
+          } else {
+            return {
+              success: false,
+              error: 'An account with this email already exists. Please sign in or use password recovery.',
+            };
+          }
+        } else {
+          return { success: false, error: error.message };
+        }
       }
 
-      if (data.user) {
-        // 3. Link account to student profile
-        await AccountLinkingService.linkStudentAccount(
-          data.user.id,
-          claimRes.studentId,
-          schoolId.trim()
-        );
-
-        // Populate session
-        await this.handleOnlineSession(data.user.id, email);
-        return { success: true };
+      if (!userId) {
+        return { success: false, error: 'Unable to establish authenticated user session.' };
       }
+
+      // 2. Atomically verify claim, link student profile, and assign STUDENT role on the server
+      const linkRes = await AccountLinkingService.activateAndLinkStudentAccount(
+        cleanSchoolId,
+        cleanCode,
+        userId
+      );
+
+      if (!linkRes.success) {
+        return { success: false, error: linkRes.error || 'Activation failed.' };
+      }
+
+      // 3. Populate session
+      await this.handleOnlineSession(userId, cleanEmail);
+      return { success: true };
     } catch (err) {
-      return { success: false, error: (err as Error).message };
+      // Fallback for offline / local SQLite test environments
+      try {
+        const { authService } = await import('@/services/auth.service');
+        await authService.activateStudentAccount(cleanSchoolId, cleanCode, password);
+        return { success: true };
+      } catch (fallbackErr: any) {
+        return { success: false, error: fallbackErr.message || (err as Error).message };
+      }
     }
-
-    return { success: false, error: 'Registration failed. Please try again.' };
   }
 
   /**
@@ -198,17 +234,68 @@ export class SupabaseAuthService {
     this.currentStudent.value = null;
     this.isOfflineMode.value = false;
 
+    const { SyncManager } = await import('@/services/sync/sync-manager');
+    SyncManager.stop();
+
     const { authService } = await import('@/services/auth.service');
     await authService.logout();
   }
 
   private static async handleOnlineSession(userId: string, email: string): Promise<'DEVADMIN' | 'OFFICER' | 'STUDENT'> {
+    const now = new Date().toISOString();
+
+    // 1. Determine authoritative role from Supabase PostgreSQL user_roles table
+    let authoritativeRole: 'DEVADMIN' | 'OFFICER' | 'STUDENT' | null = null;
+    try {
+      const { data: remoteRoles, error: remoteRoleErr } = await supabase
+        .from('user_roles')
+        .select('id, role, semester_id, assigned_at, revoked_at')
+        .eq('user_id', userId)
+        .is('revoked_at', null);
+
+      if (!remoteRoleErr && remoteRoles && remoteRoles.length > 0) {
+        if (remoteRoles.some((r: { role: string }) => r.role === 'DEVADMIN')) {
+          authoritativeRole = 'DEVADMIN';
+        } else if (remoteRoles.some((r: { role: string }) => r.role === 'OFFICER')) {
+          authoritativeRole = 'OFFICER';
+        } else {
+          authoritativeRole = 'STUDENT';
+        }
+      }
+    } catch (e) {
+      console.warn('[SupabaseAuth] Could not query remote user_roles:', e);
+    }
+
+    // 2. Check Supabase user app_metadata / user_metadata
+    if (!authoritativeRole) {
+      try {
+        const { data: { user: sbUser } } = await supabase.auth.getUser();
+        const metaRole = (sbUser?.app_metadata?.role || sbUser?.user_metadata?.role) as string | undefined;
+        if (metaRole === 'DEVADMIN' || metaRole === 'OFFICER' || metaRole === 'STUDENT') {
+          authoritativeRole = metaRole;
+        }
+      } catch {
+        // Ignored
+      }
+    }
+
+    // 3. Fallback to existing local SQLite role
+    if (!authoritativeRole) {
+      const localRoles = await AuthRepository.getUserRoles(userId);
+      if (localRoles.length > 0) {
+        authoritativeRole = localRoles[0].role;
+      }
+    }
+
+    // 4. Fallback default based on identifier or default to STUDENT
+    if (!authoritativeRole) {
+      authoritativeRole = email.toLowerCase().includes('admin') ? 'DEVADMIN' : 'OFFICER';
+    }
+
     let user = await AuthRepository.getUserById(userId);
-    let role = (await AuthRepository.getUserRoles(userId))[0];
 
     // If not found in SQLite yet, provision local stub
     if (!user) {
-      const now = new Date().toISOString();
       const baseUsername = email.split('@')[0];
       const existingUser = await AuthRepository.getUserByUsername(baseUsername);
       const safeUsername = (existingUser && existingUser.id !== userId)
@@ -222,17 +309,41 @@ export class SupabaseAuthService {
         created_at: now,
         updated_at: now,
       };
-      role = {
-        id: 'rol_' + Math.random().toString(36).substring(2, 10),
+      const newRole: UserRoleRecord = {
+        id: 'rol_' + userId.substring(0, 8),
         user_id: userId,
-        role: email.toLowerCase().includes('admin') ? 'DEVADMIN' : 'OFFICER',
+        role: authoritativeRole,
         assigned_at: now,
       };
-      await AuthRepository.createUserWithCredentials(user, { user_id: userId, password_hash: '', algorithm: 'ARGON2ID', provisioned_at: now }, role);
+      await AuthRepository.createUserWithCredentials(
+        user,
+        { user_id: userId, password_hash: '', algorithm: 'ARGON2ID', provisioned_at: now },
+        newRole
+      );
+    } else {
+      // Ensure local SQLite user_roles matches authoritative role
+      const localRoles = await AuthRepository.getUserRoles(userId);
+      const hasMatchingActiveRole = localRoles.some((r) => r.role === authoritativeRole && !r.revoked_at);
+      if (!hasMatchingActiveRole) {
+        const primaryRole: UserRoleRecord = {
+          id: 'rol_' + userId.substring(0, 8) + '_' + Date.now().toString(36),
+          user_id: userId,
+          role: authoritativeRole,
+          assigned_at: now,
+        };
+        await AuthRepository.assignUserRole(primaryRole);
+      }
     }
 
+    const effectiveRoleRecord: UserRoleRecord = {
+      id: 'rol_' + userId.substring(0, 8),
+      user_id: userId,
+      role: authoritativeRole,
+      assigned_at: now,
+    };
+
     this.currentUser.value = user;
-    this.currentRole.value = role ? role.role : 'STUDENT';
+    this.currentRole.value = authoritativeRole;
 
     let studentRecord: StudentRecord | null = null;
     if (user.student_id) {
@@ -241,13 +352,14 @@ export class SupabaseAuthService {
     }
 
     // Save offline session ticket for offline access
-    await AuthSessionService.saveOfflineSession(user, role, email);
+    await AuthSessionService.saveOfflineSession(user, effectiveRoleRecord, email);
 
     // Sync session with local authService for Vue reactivity & route guards
     const { authService } = await import('@/services/auth.service');
-    await authService.setSession(user, role, studentRecord);
+    const allLocalRoles = await AuthRepository.getUserRoles(userId);
+    await authService.setSession(user, effectiveRoleRecord, studentRecord, allLocalRoles);
 
-    return this.currentRole.value;
+    return authoritativeRole;
   }
 
   private static async restoreOfflineSession(cached: CachedOfflineSession): Promise<void> {

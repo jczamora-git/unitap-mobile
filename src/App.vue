@@ -24,12 +24,14 @@ import { useToast } from '@/composables/useToast';
 import { getDatabase } from '@/database/database';
 import { LegacyMigrationService } from '@/services/legacy-migration.service';
 import { authService } from '@/services/auth.service';
+import { themeService } from '@/services/theme.service';
 
 const { isOnboardingOpen, checkOnboardingStatus, closeOnboardingTour } = useOnboarding();
 const { toastState } = useToast();
 
 onMounted(async () => {
   try {
+    await themeService.init();
     await getDatabase();
     await LegacyMigrationService.runMigrationIfNeeded();
     await authService.initSession();

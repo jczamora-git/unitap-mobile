@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, computed } from 'vue';
+import { ref, onMounted } from 'vue';
 import { useRouter } from 'vue-router';
 import {
   IonPage,
@@ -24,12 +24,9 @@ import { studentService } from '@/services/student.service';
 import { eventService } from '@/services/event.service';
 import { attendanceService } from '@/services/attendance.service';
 import { financeService } from '@/services/finance.service';
-import { authService } from '@/services/auth.service';
-import { useSyncStatus } from '@/composables/useSyncStatus';
-import { AcademicRepository } from '@/database/repositories/academic.repository';
-import type { Semester } from '@/types/database';
 import { formatPeso } from '@/utilities/finance-formatters';
 import { formatTime, formatDate } from '@/utilities/date-formatters';
+import { formatAttendanceStatus } from '@/utilities/presentation-formatters';
 import type { Event, EventOccurrence } from '@/types/event';
 import type { AttendanceStats, AttendanceScanLog } from '@/types/attendance';
 import { haptics } from '@/utilities/haptics';
@@ -59,15 +56,6 @@ const totalOutstandingCentavos = ref(0);
 const activeEvent = ref<Event | null>(null);
 const activeOccurrence = ref<EventOccurrence | null>(null);
 const occurrenceStats = ref<AttendanceStats | null>(null);
-const currentSemester = ref<Semester | null>(null);
-const currentUserRole = computed(() => authService.role.value);
-const currentUsername = computed(() => authService.user.value?.username || 'User');
-const { state: syncState } = useSyncStatus();
-
-async function handleLogout() {
-  await authService.logout();
-  router.replace('/login');
-}
 
 const recentActivity = ref<AttendanceScanLog[]>([]);
 const isLoading = ref(true);
@@ -75,7 +63,6 @@ const isLoading = ref(true);
 async function loadDashboardData() {
   isLoading.value = true;
   try {
-    currentSemester.value = await AcademicRepository.getActiveSemester();
     // 1. Students
     const students = await studentService.getStudents();
     totalStudents.value = students.length;
@@ -136,27 +123,6 @@ onIonViewWillEnter(loadDashboardData);
 
     <ion-content class="safe-content">
       <div class="page-container">
-        <!-- User Session & Term Banner -->
-        <div class="user-session-bar">
-          <div class="user-info-side">
-            <span class="user-badge" :class="currentUserRole?.toLowerCase()">
-              {{ currentUserRole || 'DEVADMIN' }}
-            </span>
-            <span class="user-name-text">{{ currentUsername }}</span>
-          </div>
-          <div class="term-info-side">
-            <button class="sync-pill" :class="'pill-' + syncState.toLowerCase()" @click="router.push('/sync-status')">
-              <span class="sync-dot"></span> {{ syncState === 'SYNCED' ? 'Cloud Synced' : syncState }}
-            </button>
-            <span v-if="currentSemester" class="term-pill">
-              📅 {{ currentSemester.term }} Term
-            </span>
-            <button class="btn-logout-link" @click="handleLogout">
-              Sign Out
-            </button>
-          </div>
-        </div>
-
         <!-- 2x2 Metric Grid -->
         <section class="metrics-grid">
           <UniStatCard
@@ -282,52 +248,38 @@ onIonViewWillEnter(loadDashboardData);
 
           <div class="quick-actions-row">
             <button class="quick-action-tile tile-featured-mint" @click="navigateWithHaptic('/tabs/scan')">
-              <div class="tile-icon-box">
-                <ion-icon :icon="scanOutline" />
-              </div>
+              <ion-icon :icon="scanOutline" class="tile-icon" />
               <span class="tile-label">Scan NFC</span>
             </button>
 
             <button class="quick-action-tile" @click="navigateWithHaptic('/finance/reports')">
-              <div class="tile-icon-box">
-                <ion-icon :icon="walletOutline" />
-              </div>
+              <ion-icon :icon="walletOutline" class="tile-icon" />
               <span class="tile-label">Reports</span>
             </button>
 
             <button class="quick-action-tile" @click="navigateWithHaptic('/students/import')">
-              <div class="tile-icon-box">
-                <ion-icon :icon="peopleOutline" />
-              </div>
-              <span class="tile-label">Import CSV</span>
+              <ion-icon :icon="peopleOutline" class="tile-icon" />
+              <span class="tile-label">Import Students</span>
             </button>
 
             <button class="quick-action-tile" @click="navigateWithHaptic('/academic')">
-              <div class="tile-icon-box">
-                <ion-icon :icon="calendarOutline" />
-              </div>
-              <span class="tile-label">Terms</span>
+              <ion-icon :icon="calendarOutline" class="tile-icon" />
+              <span class="tile-label">Academic Terms</span>
             </button>
 
             <button class="quick-action-tile" @click="navigateWithHaptic('/events/create')">
-              <div class="tile-icon-box">
-                <ion-icon :icon="addOutline" />
-              </div>
+              <ion-icon :icon="addOutline" class="tile-icon" />
               <span class="tile-label">New Event</span>
             </button>
 
             <button class="quick-action-tile" @click="navigateWithHaptic('/register-student')">
-              <div class="tile-icon-box">
-                <ion-icon :icon="personAddOutline" />
-              </div>
+              <ion-icon :icon="personAddOutline" class="tile-icon" />
               <span class="tile-label">Add Student</span>
             </button>
 
             <button class="quick-action-tile" @click="navigateWithHaptic('/finance/pay')">
-              <div class="tile-icon-box">
-                <ion-icon :icon="flashOutline" />
-              </div>
-              <span class="tile-label">Pay Fee</span>
+              <ion-icon :icon="flashOutline" class="tile-icon" />
+              <span class="tile-label">Record Payment</span>
             </button>
           </div>
         </section>
@@ -352,7 +304,7 @@ onIonViewWillEnter(loadDashboardData);
                 <div class="activity-sub-line">
                   <span class="activity-note">{{ item.note || item.result }}</span>
                   <span class="status-badge" :class="item.result === 'ACCEPTED' ? 'badge-success' : 'badge-warning'">
-                    {{ item.attendanceStatus || item.result }}
+                    {{ formatAttendanceStatus(item.attendanceStatus || item.result) }}
                   </span>
                 </div>
               </div>
@@ -557,19 +509,26 @@ onIonViewWillEnter(loadDashboardData);
   width: 100%;
   height: 44px;
   border-radius: 14px;
-  background: var(--aurora-mint);
-  color: #0B251D;
+  background: var(--uni-btn-primary-bg, #0F766E);
+  color: #FFFFFF;
   border: none;
   font-size: 14px;
-  font-weight: 700;
+  font-weight: 600;
   cursor: pointer;
-  box-shadow: 0 4px 16px rgba(112, 243, 207, 0.38);
-  transition: transform 0.15s ease, box-shadow 0.15s ease;
+  box-shadow: none;
+  transition: transform 0.15s ease;
+}
+
+:root.dark .aurora-scan-btn,
+:root.ion-palette-dark .aurora-scan-btn {
+  background: var(--uni-btn-primary-bg, #0D9488);
+  color: #FFFFFF;
+  box-shadow: none;
 }
 
 .aurora-scan-btn:active {
   transform: scale(0.985);
-  box-shadow: 0 2px 8px rgba(112, 243, 207, 0.25);
+  box-shadow: none;
 }
 
 .btn-nfc-icon {
@@ -580,7 +539,19 @@ onIonViewWillEnter(loadDashboardData);
   padding: 22px 20px;
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: 16px;
+  background: var(--uni-surface, #FFFFFF);
+  border: 1px solid var(--uni-border, #E2E8F0);
+  border-radius: var(--uni-radius-hero, 22px);
+  box-shadow: var(--uni-shadow-card, 0 4px 18px rgba(0, 0, 0, 0.04));
+}
+
+:root.dark .session-empty-aurora,
+:root.ion-palette-dark .session-empty-aurora {
+  background: linear-gradient(135deg, #092620 0%, #0c1e22 55%, #101925 100%);
+  border: 1px solid rgba(94, 234, 212, 0.18);
+  border-top: 1px solid rgba(94, 234, 212, 0.3);
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.35);
 }
 
 .empty-aurora-content {
@@ -628,17 +599,37 @@ onIonViewWillEnter(loadDashboardData);
 /* Quick Actions */
 .quick-actions-row {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(2, 1fr);
   gap: 10px;
+}
+
+@media (max-width: 380px) {
+  .quick-actions-row {
+    gap: 8px;
+  }
+}
+
+@media (min-width: 600px) {
+  .quick-actions-row {
+    grid-template-columns: repeat(4, 1fr);
+  }
+}
+
+.quick-actions-row .quick-action-tile:last-child:nth-child(odd) {
+  grid-column: 1 / -1;
+  flex-direction: row;
+  justify-content: center;
+  gap: 10px;
+  padding: 12px 14px;
 }
 
 .quick-action-tile {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 6px;
-  padding: 12px 6px;
-  border-radius: var(--app-card-radius);
+  gap: 8px;
+  padding: 14px 8px;
+  border-radius: var(--app-card-radius, 16px);
   background: var(--app-surface);
   border: 1px solid var(--app-border);
   box-shadow: var(--app-shadow-card);
@@ -647,30 +638,22 @@ onIonViewWillEnter(loadDashboardData);
 }
 
 .quick-action-tile:active {
-  transform: scale(0.95);
+  transform: scale(0.96);
+}
+
+.tile-icon {
+  font-size: 24px;
+  color: var(--uni-primary);
+  display: block;
 }
 
 .tile-featured-mint {
-  border-color: rgba(112, 243, 207, 0.35);
-  background: rgba(112, 243, 207, 0.05);
+  border-color: rgba(15, 118, 110, 0.28);
 }
 
-.tile-featured-mint .tile-icon-box {
-  background: rgba(112, 243, 207, 0.18);
-  color: var(--aurora-mint);
-  box-shadow: 0 0 12px rgba(112, 243, 207, 0.25);
-}
-
-.tile-icon-box {
-  width: 38px;
-  height: 38px;
-  border-radius: 12px;
-  background: var(--app-surface-subtle);
-  color: var(--ion-color-primary);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 18px;
+:root.dark .tile-featured-mint,
+:root.ion-palette-dark .tile-featured-mint {
+  border-color: rgba(94, 234, 212, 0.35);
 }
 
 .session-action-wrap {
@@ -680,17 +663,11 @@ onIonViewWillEnter(loadDashboardData);
 }
 
 .tile-label {
-  font-size: 11px;
+  font-size: 11.5px;
   font-weight: 600;
   color: var(--app-text-primary);
-  white-space: nowrap;
-}
-
-@media (max-width: 360px) {
-  .quick-actions-row {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 8px;
-  }
+  text-align: center;
+  line-height: 1.25;
 }
 
 /* Recent Activity */
@@ -711,23 +688,21 @@ onIonViewWillEnter(loadDashboardData);
 }
 
 .activity-icon-wrap {
-  width: 32px;
-  height: 32px;
-  border-radius: 50%;
+  width: 24px;
+  height: 24px;
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 16px;
+  font-size: 20px;
   flex-shrink: 0;
+  background: transparent;
 }
 
 .icon-accepted {
-  background: rgba(21, 154, 116, 0.1);
   color: var(--ion-color-success);
 }
 
 .icon-duplicate, .icon-invalid, .icon-unregistered {
-  background: rgba(217, 149, 34, 0.12);
   color: var(--ion-color-warning);
 }
 
@@ -785,117 +760,5 @@ onIonViewWillEnter(loadDashboardData);
   font-size: 13px;
   font-weight: 600;
   cursor: pointer;
-}
-
-/* User Session Bar */
-.user-session-bar {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  background: #ffffff;
-  border: 1px solid var(--uni-border, #CBD5E1);
-  border-radius: 12px;
-  padding: 8px 14px;
-  margin-bottom: 16px;
-  font-size: 12px;
-}
-
-.user-info-side {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.user-badge {
-  font-size: 10px;
-  font-weight: 800;
-  padding: 2px 7px;
-  border-radius: 6px;
-  text-transform: uppercase;
-}
-
-.user-badge.devadmin {
-  background: #fef2f2;
-  color: #b91c1c;
-}
-
-.user-badge.officer {
-  background: #f0fdf4;
-  color: #15803d;
-}
-
-.user-badge.student {
-  background: #f0f9ff;
-  color: #0369a1;
-}
-
-.user-name-text {
-  font-weight: 700;
-  color: var(--uni-ink, #0F172A);
-}
-
-.term-info-side {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-
-.term-pill {
-  color: var(--uni-muted, #64748B);
-  font-weight: 600;
-}
-
-.btn-logout-link {
-  background: none;
-  border: 0;
-  color: var(--uni-danger, #B91C1C);
-  font-weight: 700;
-  cursor: pointer;
-  padding: 0;
-}
-
-.sync-pill {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 4px 10px;
-  border-radius: 999px;
-  font-size: 0.72rem;
-  font-weight: 700;
-  border: none;
-  cursor: pointer;
-  text-transform: uppercase;
-}
-
-.sync-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: currentColor;
-}
-
-.pill-synced {
-  background: #DCFCE7;
-  color: #166534;
-}
-
-.pill-syncing {
-  background: #E0E7FF;
-  color: #3730A3;
-}
-
-.pill-pending_changes {
-  background: #FEF3C7;
-  color: #92400E;
-}
-
-.pill-sync_error, .pill-conflict {
-  background: #FEE2E2;
-  color: #991B1B;
-}
-
-.pill-offline {
-  background: #F1F5F9;
-  color: #475569;
 }
 </style>

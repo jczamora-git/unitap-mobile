@@ -23,6 +23,63 @@ export class PushSyncService {
     let pushedCount = 0;
     let errorCount = 0;
 
+    // 1. Attempt atomic batch push via PostgreSQL RPC (1 Single Request)
+    try {
+      const ops = pendingOps.map((op) => ({
+        id: op.id,
+        entity_type: op.entity_type,
+        entity_id: op.entity_id,
+        operation: op.operation,
+        payload: JSON.parse(op.payload_json),
+      }));
+
+      const { data: batchRes, error: batchErr } = await supabase.rpc('sync_push_batch', {
+        p_operations: ops,
+      });
+
+      if (!batchErr && batchRes && Array.isArray(batchRes.results)) {
+        for (const res of batchRes.results) {
+          if (res.status === 'APPLIED') {
+            await db.execute('DELETE FROM sync_outbox WHERE id = ?', [res.id]);
+            pushedCount++;
+          } else if (res.status === 'COLLISION_AUDITED') {
+            const originalOp = pendingOps.find((o) => o.id === res.id);
+            if (originalOp) {
+              await ConflictService.recordConflict({
+                id: 'conf_' + Math.random().toString(36).substring(2, 10),
+                entityType: originalOp.entity_type,
+                entityId: originalOp.entity_id,
+                conflictType: 'UNIQUE_CONSTRAINT_COLLISION',
+                clientPayload: JSON.parse(originalOp.payload_json),
+                resolution: 'SERVER_WINS',
+              });
+            }
+            await db.execute('DELETE FROM sync_outbox WHERE id = ?', [res.id]);
+            pushedCount++;
+          } else {
+            errorCount++;
+          }
+        }
+
+        const remaining = await db.queryOne<{ count: number }>(
+          'SELECT count(*) as count FROM sync_outbox'
+        );
+        const count = remaining?.count || 0;
+        SyncStatusService.setPendingCount(count);
+
+        if (errorCount > 0) {
+          SyncStatusService.setState('SYNC_ERROR');
+        } else if (count === 0) {
+          SyncStatusService.setState('SYNCED');
+        }
+
+        return { pushedCount, errorCount };
+      }
+    } catch {
+      // Fallback to sequential table-by-table REST calls
+    }
+
+    // 2. Fallback: Sequential table-by-table REST push
     for (const op of pendingOps) {
       try {
         const payload = JSON.parse(op.payload_json);
@@ -89,14 +146,20 @@ export class PushSyncService {
       ATTENDANCE_ATTEMPT: 'attendance_attempts',
       ATTENDANCE_VOID: 'attendance_audit',
       OBLIGATION: 'student_obligations',
+      OBLIGATION_RULE: 'obligation_rules',
       PAYMENT: 'payments',
       PAYMENT_ALLOCATION: 'payment_allocations',
-      WALLET_LEDGER: 'simulated_wallet_ledger',
       STUDENT: 'students',
       ENROLLMENT: 'student_enrollments',
       CARD: 'nfc_cards',
       EVENT: 'events',
+      EVENT_CATEGORY: 'event_categories',
+      YEAR_LEVEL: 'year_levels',
+      SECTION: 'sections',
+      ACADEMIC_YEAR: 'academic_years',
+      SEMESTER: 'semesters',
       OCCURRENCE: 'event_occurrences',
+      PARTICIPANT: 'event_participants',
     };
     return map[entityType] || entityType.toLowerCase() + 's';
   }

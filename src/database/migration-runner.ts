@@ -1,5 +1,9 @@
 import type { DatabaseAdapter } from './adapters/database-adapter.interface';
 import { INITIAL_MIGRATION_SQL } from './migrations/001_initial';
+import { FINES_REDESIGN_MIGRATION_SQL } from './migrations/002_fines_contributions_redesign';
+import { SYSTEM_SETUP_MIGRATION_SQL } from './migrations/003_system_setup_academic_structure';
+import { STUDENT_ACTIVATION_MIGRATION_SQL } from './migrations/004_student_activation_audit';
+import { OFFICER_MANAGEMENT_MIGRATION_SQL } from './migrations/005_officer_management';
 
 export interface Migration {
   version: number;
@@ -12,6 +16,26 @@ export const MIGRATIONS: Migration[] = [
     version: 1,
     description: 'UniTap phase 1 offline database',
     sql: INITIAL_MIGRATION_SQL,
+  },
+  {
+    version: 2,
+    description: 'UniTap 2.0 Fines & Contributions Redesign',
+    sql: FINES_REDESIGN_MIGRATION_SQL,
+  },
+  {
+    version: 3,
+    description: 'UniTap 2.0 DevAdmin-Only System Setup & Academic Structure',
+    sql: SYSTEM_SETUP_MIGRATION_SQL,
+  },
+  {
+    version: 4,
+    description: 'UniTap 2.0 Student Activation, Rate-Limiting & Audit',
+    sql: STUDENT_ACTIVATION_MIGRATION_SQL,
+  },
+  {
+    version: 5,
+    description: 'UniTap 2.0 DevAdmin-Only Officer Management & Multi-Role Appointment Architecture',
+    sql: OFFICER_MANAGEMENT_MIGRATION_SQL,
   },
 ];
 
@@ -50,6 +74,86 @@ export class MigrationRunner {
         console.log(`[UniTap Database] Migration v${migration.version} applied successfully.`);
       }
     }
+
+    // 4. Safe data upgrade for any existing legacy seeded identifiers to standard RFC 4122 UUIDs
+    await this.upgradeLegacySeededIds(adapter);
+  }
+
+  private static async upgradeLegacySeededIds(adapter: DatabaseAdapter): Promise<void> {
+    try {
+      const check = await adapter.query<{ id: string }>(
+        "SELECT id FROM event_categories WHERE id = 'cat_ga' LIMIT 1"
+      );
+      if (check && check.length > 0) {
+        console.log('[UniTap Database] Migrating legacy seeded identifiers to standard UUIDs...');
+        await adapter.execute(`
+          PRAGMA foreign_keys = OFF;
+          UPDATE events SET category_id = 'ec000000-0000-4000-8000-000000000001' WHERE category_id = 'cat_ga';
+          UPDATE events SET category_id = 'ec000000-0000-4000-8000-000000000002' WHERE category_id = 'cat_cleanup';
+          UPDATE events SET category_id = 'ec000000-0000-4000-8000-000000000003' WHERE category_id = 'cat_sports';
+          UPDATE events SET category_id = 'ec000000-0000-4000-8000-000000000004' WHERE category_id = 'cat_it_day';
+          UPDATE events SET category_id = 'ec000000-0000-4000-8000-000000000005' WHERE category_id = 'cat_orientation';
+          UPDATE events SET category_id = 'ec000000-0000-4000-8000-000000000006' WHERE category_id = 'cat_seminar';
+          UPDATE events SET category_id = 'ec000000-0000-4000-8000-000000000007' WHERE category_id = 'cat_other';
+
+          UPDATE event_categories SET id = 'ec000000-0000-4000-8000-000000000001' WHERE id = 'cat_ga';
+          UPDATE event_categories SET id = 'ec000000-0000-4000-8000-000000000002' WHERE id = 'cat_cleanup';
+          UPDATE event_categories SET id = 'ec000000-0000-4000-8000-000000000003' WHERE id = 'cat_sports';
+          UPDATE event_categories SET id = 'ec000000-0000-4000-8000-000000000004' WHERE id = 'cat_it_day';
+          UPDATE event_categories SET id = 'ec000000-0000-4000-8000-000000000005' WHERE id = 'cat_orientation';
+          UPDATE event_categories SET id = 'ec000000-0000-4000-8000-000000000006' WHERE id = 'cat_seminar';
+          UPDATE event_categories SET id = 'ec000000-0000-4000-8000-000000000007' WHERE id = 'cat_other';
+
+          UPDATE sections SET year_level_id = 'e1000000-0000-4000-8000-000000000001' WHERE year_level_id = 'yl_1';
+          UPDATE sections SET year_level_id = 'e1000000-0000-4000-8000-000000000002' WHERE year_level_id = 'yl_2';
+          UPDATE sections SET year_level_id = 'e1000000-0000-4000-8000-000000000003' WHERE year_level_id = 'yl_3';
+          UPDATE sections SET year_level_id = 'e1000000-0000-4000-8000-000000000004' WHERE year_level_id = 'yl_4';
+
+          UPDATE student_enrollments SET year_level_id = 'e1000000-0000-4000-8000-000000000001' WHERE year_level_id = 'yl_1';
+          UPDATE student_enrollments SET year_level_id = 'e1000000-0000-4000-8000-000000000002' WHERE year_level_id = 'yl_2';
+          UPDATE student_enrollments SET year_level_id = 'e1000000-0000-4000-8000-000000000003' WHERE year_level_id = 'yl_3';
+          UPDATE student_enrollments SET year_level_id = 'e1000000-0000-4000-8000-000000000004' WHERE year_level_id = 'yl_4';
+
+          UPDATE year_levels SET id = 'e1000000-0000-4000-8000-000000000001' WHERE id = 'yl_1';
+          UPDATE year_levels SET id = 'e1000000-0000-4000-8000-000000000002' WHERE id = 'yl_2';
+          UPDATE year_levels SET id = 'e1000000-0000-4000-8000-000000000003' WHERE id = 'yl_3';
+          UPDATE year_levels SET id = 'e1000000-0000-4000-8000-000000000004' WHERE id = 'yl_4';
+
+          UPDATE student_enrollments SET section_id = 'eb000000-0000-4000-8000-000000000001' WHERE section_id = 'sec_1f1';
+          UPDATE student_enrollments SET section_id = 'eb000000-0000-4000-8000-000000000002' WHERE section_id = 'sec_1f2';
+          UPDATE student_enrollments SET section_id = 'eb000000-0000-4000-8000-000000000003' WHERE section_id = 'sec_1f3';
+          UPDATE student_enrollments SET section_id = 'eb000000-0000-4000-8000-000000000004' WHERE section_id = 'sec_1f4';
+          UPDATE student_enrollments SET section_id = 'eb000000-0000-4000-8000-000000000005' WHERE section_id = 'sec_2f1';
+          UPDATE student_enrollments SET section_id = 'eb000000-0000-4000-8000-000000000006' WHERE section_id = 'sec_2f2';
+          UPDATE student_enrollments SET section_id = 'eb000000-0000-4000-8000-000000000007' WHERE section_id = 'sec_2f3';
+          UPDATE student_enrollments SET section_id = 'eb000000-0000-4000-8000-000000000008' WHERE section_id = 'sec_2f4';
+          UPDATE student_enrollments SET section_id = 'eb000000-0000-4000-8000-000000000009' WHERE section_id = 'sec_3f1';
+          UPDATE student_enrollments SET section_id = 'eb000000-0000-4000-8000-000000000010' WHERE section_id = 'sec_3f4';
+          UPDATE student_enrollments SET section_id = 'eb000000-0000-4000-8000-000000000011' WHERE section_id = 'sec_3f5';
+          UPDATE student_enrollments SET section_id = 'eb000000-0000-4000-8000-000000000012' WHERE section_id = 'sec_4f1';
+          UPDATE student_enrollments SET section_id = 'eb000000-0000-4000-8000-000000000013' WHERE section_id = 'sec_4f4';
+          UPDATE student_enrollments SET section_id = 'eb000000-0000-4000-8000-000000000014' WHERE section_id = 'sec_4f5';
+
+          UPDATE sections SET id = 'eb000000-0000-4000-8000-000000000001' WHERE id = 'sec_1f1';
+          UPDATE sections SET id = 'eb000000-0000-4000-8000-000000000002' WHERE id = 'sec_1f2';
+          UPDATE sections SET id = 'eb000000-0000-4000-8000-000000000003' WHERE id = 'sec_1f3';
+          UPDATE sections SET id = 'eb000000-0000-4000-8000-000000000004' WHERE id = 'sec_1f4';
+          UPDATE sections SET id = 'eb000000-0000-4000-8000-000000000005' WHERE id = 'sec_2f1';
+          UPDATE sections SET id = 'eb000000-0000-4000-8000-000000000006' WHERE id = 'sec_2f2';
+          UPDATE sections SET id = 'eb000000-0000-4000-8000-000000000007' WHERE id = 'sec_2f3';
+          UPDATE sections SET id = 'eb000000-0000-4000-8000-000000000008' WHERE id = 'sec_2f4';
+          UPDATE sections SET id = 'eb000000-0000-4000-8000-000000000009' WHERE id = 'sec_3f1';
+          UPDATE sections SET id = 'eb000000-0000-4000-8000-000000000010' WHERE id = 'sec_3f4';
+          UPDATE sections SET id = 'eb000000-0000-4000-8000-000000000011' WHERE id = 'sec_3f5';
+          UPDATE sections SET id = 'eb000000-0000-4000-8000-000000000012' WHERE id = 'sec_4f1';
+          UPDATE sections SET id = 'eb000000-0000-4000-8000-000000000013' WHERE id = 'sec_4f4';
+          UPDATE sections SET id = 'eb000000-0000-4000-8000-000000000014' WHERE id = 'sec_4f5';
+          PRAGMA foreign_keys = ON;
+        `);
+      }
+    } catch {
+      // Non-fatal if tables do not exist yet
+    }
   }
 
   public static async validateSchema(adapter: DatabaseAdapter): Promise<boolean> {
@@ -63,6 +167,8 @@ export class MigrationRunner {
       'payments', 'payment_allocations', 'simulated_wallets', 'simulated_wallet_ledger',
       'import_batches', 'import_rows', 'report_exports', 'audit_events',
       'sync_outbox', 'sync_state', 'sync_conflicts',
+      'event_categories', 'year_levels', 'sections',
+      'officer_appointments',
     ];
 
     const tables = await adapter.query<{ name: string }>(

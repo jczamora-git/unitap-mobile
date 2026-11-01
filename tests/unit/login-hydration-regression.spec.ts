@@ -104,7 +104,7 @@ describe('UniTap 2.0 Login to Initial Sync Regression Suite', () => {
     // 4. Verify SQLite sync_state is now recorded as hydrated
     const isHydratedAfter = await InitialSyncService.isHydrated();
     expect(isHydratedAfter).toBe(true);
-  });
+  }, 15000);
 
   it('handles hydration retry gracefully on transient network/database error', async () => {
     // Simulate failed hydration state

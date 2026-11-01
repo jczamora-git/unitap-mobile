@@ -1,10 +1,15 @@
 <script setup lang="ts">
 import { IonIcon } from '@ionic/vue';
 import { 
+  home,
   homeOutline, 
+  calendar,
   calendarOutline, 
+  scan,
   scanOutline, 
+  people,
   peopleOutline, 
+  wallet,
   walletOutline 
 } from 'ionicons/icons';
 import { haptics } from '@/utilities/haptics';
@@ -13,7 +18,8 @@ interface NavItem {
   id: string;
   name: string;
   path: string;
-  icon: any;
+  activeIcon: any;
+  inactiveIcon: any;
   ariaLabel: string;
 }
 
@@ -30,11 +36,11 @@ const emit = defineEmits<{
 }>();
 
 const navItems: NavItem[] = [
-  { id: 'home', name: 'Home', path: '/tabs/home', icon: homeOutline, ariaLabel: 'Home' },
-  { id: 'events', name: 'Events', path: '/tabs/events', icon: calendarOutline, ariaLabel: 'Events' },
-  { id: 'scan', name: 'Scan', path: '/tabs/scan', icon: scanOutline, ariaLabel: 'Scan' },
-  { id: 'students', name: 'Students', path: '/tabs/students', icon: peopleOutline, ariaLabel: 'Students' },
-  { id: 'finance', name: 'Finance', path: '/tabs/finance', icon: walletOutline, ariaLabel: 'Finance' },
+  { id: 'home', name: 'Home', path: '/tabs/home', activeIcon: home, inactiveIcon: homeOutline, ariaLabel: 'Home' },
+  { id: 'events', name: 'Events', path: '/tabs/events', activeIcon: calendar, inactiveIcon: calendarOutline, ariaLabel: 'Events' },
+  { id: 'scan', name: 'Scan', path: '/tabs/scan', activeIcon: scan, inactiveIcon: scanOutline, ariaLabel: 'Scan' },
+  { id: 'students', name: 'Students', path: '/tabs/students', activeIcon: people, inactiveIcon: peopleOutline, ariaLabel: 'Students' },
+  { id: 'finance', name: 'Finance', path: '/tabs/finance', activeIcon: wallet, inactiveIcon: walletOutline, ariaLabel: 'Finance' },
 ];
 
 function handleTabClick(item: NavItem) {
@@ -55,8 +61,8 @@ function handleTabClick(item: NavItem) {
       :aria-current="currentTab === item.id ? 'page' : undefined"
       @click="handleTabClick(item)"
     >
-      <div class="dock-icon-pill">
-        <ion-icon :icon="item.icon" class="dock-icon" />
+      <div class="dock-icon-wrap">
+        <ion-icon :icon="currentTab === item.id ? item.activeIcon : item.inactiveIcon" class="dock-icon" />
       </div>
     </button>
   </nav>
@@ -72,10 +78,10 @@ function handleTabClick(item: NavItem) {
   max-width: 420px;
   margin: 0 auto;
   height: 58px;
-  border-radius: var(--uni-radius-dock);
-  background: var(--uni-surface);
-  border: 1px solid var(--uni-border);
-  box-shadow: var(--uni-shadow-dock);
+  border-radius: var(--uni-radius-dock, 9999px);
+  background: var(--uni-surface, #FFFFFF);
+  border: 1px solid var(--uni-border, #E2E8F0);
+  box-shadow: var(--uni-shadow-dock, 0 8px 24px rgba(0, 0, 0, 0.06));
   display: grid;
   grid-template-columns: repeat(5, minmax(0, 1fr));
   align-items: center;
@@ -84,6 +90,15 @@ function handleTabClick(item: NavItem) {
   backdrop-filter: blur(12px);
   -webkit-backdrop-filter: blur(12px);
   box-sizing: border-box;
+}
+
+:root.dark .uni-dock-bar,
+:root.ion-palette-dark .uni-dock-bar,
+body.dark .uni-dock-bar,
+body.ion-palette-dark .uni-dock-bar {
+  background: var(--uni-surface, #1B1D23);
+  border-color: var(--uni-border, #30343D);
+  box-shadow: var(--uni-shadow-dock, 0 14px 40px rgba(0, 0, 0, 0.6));
 }
 
 .uni-dock-item {
@@ -101,20 +116,20 @@ function handleTabClick(item: NavItem) {
   position: relative;
 }
 
-.dock-icon-pill {
-  width: 40px;
-  max-width: 100%;
-  height: 36px;
-  border-radius: 9999px;
+.dock-icon-wrap {
+  width: 100%;
+  height: 100%;
   display: flex;
   align-items: center;
   justify-content: center;
-  transition: all 0.16s cubic-bezier(0.16, 1, 0.3, 1);
-  color: var(--uni-text-muted);
+  background: transparent;
+  color: var(--uni-text-muted, #64748B);
+  transition: color 0.16s ease, transform 0.16s ease;
 }
 
 .dock-icon {
-  font-size: 22px;
+  font-size: 24px;
+  color: var(--uni-text-muted, #64748B);
   transition: transform 0.15s ease, color 0.15s ease;
 }
 
@@ -122,36 +137,40 @@ function handleTabClick(item: NavItem) {
   transform: scale(0.9);
 }
 
-.uni-dock-item.is-active .dock-icon-pill {
-  background: rgba(112, 243, 207, 0.12);
-  color: var(--uni-mint);
-}
-
-@media (prefers-color-scheme: light) {
-  .uni-dock-item.is-active .dock-icon-pill {
-    background: rgba(21, 154, 116, 0.1);
-    color: #0E8560;
-  }
+.uni-dock-item.is-active .dock-icon-wrap {
+  background: transparent;
+  color: var(--uni-primary, #0F766E);
 }
 
 .uni-dock-item.is-active .dock-icon {
-  color: currentColor;
+  color: var(--uni-primary, #0F766E);
+  transform: scale(1.04);
 }
 
-@media (max-width: 360px) {
+:root.dark .uni-dock-item.is-active .dock-icon-wrap,
+:root.ion-palette-dark .uni-dock-item.is-active .dock-icon-wrap,
+body.dark .uni-dock-item.is-active .dock-icon-wrap,
+body.ion-palette-dark .uni-dock-item.is-active .dock-icon-wrap {
+  background: transparent;
+  color: var(--uni-primary, #5EEAD4);
+}
+
+:root.dark .uni-dock-item.is-active .dock-icon,
+:root.ion-palette-dark .uni-dock-item.is-active .dock-icon,
+body.dark .uni-dock-item.is-active .dock-icon,
+body.ion-palette-dark .uni-dock-item.is-active .dock-icon {
+  color: var(--uni-primary, #5EEAD4);
+}
+
+@media (max-width: 380px) {
   .uni-dock-bar {
     width: calc(100% - 16px);
     height: 54px;
     padding: 0 2px;
   }
 
-  .dock-icon-pill {
-    width: 34px;
-    height: 32px;
-  }
-
   .dock-icon {
-    font-size: 20px;
+    font-size: 22px;
   }
 }
 </style>

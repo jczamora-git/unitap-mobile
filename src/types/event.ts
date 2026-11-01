@@ -5,7 +5,8 @@ export type EventType =
   | 'General Assembly'
   | 'Orientation'
   | 'Seminar'
-  | 'Other';
+  | 'Other'
+  | (string & Record<never, never>);
 
 export type AudienceType = 'ALL_BSIT' | 'YEAR_LEVEL' | 'SECTION';
 
@@ -22,6 +23,7 @@ export interface Event {
   title: string;
   description: string;
   type: EventType;
+  categoryId?: string;
   audience: AudienceConfig;
   attendanceRequired: boolean;
   status: EventStatus;

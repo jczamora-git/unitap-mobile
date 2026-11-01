@@ -5,22 +5,38 @@ import { closeOutline } from 'ionicons/icons';
 import { haptics } from '@/utilities/haptics';
 
 interface Props {
-  isOpen: boolean;
+  isOpen?: boolean;
+  open?: boolean;
   title?: string;
   subtitle?: string;
+  description?: string;
   showClose?: boolean;
   closeOnBackdrop?: boolean;
   maxHeight?: string;
   size?: 'compact' | 'standard' | 'expanded';
+  beforeClose?: () => boolean;
 }
 
 const props = withDefaults(defineProps<Props>(), {
+  isOpen: false,
+  open: undefined,
   title: '',
   subtitle: '',
+  description: '',
   showClose: true,
   closeOnBackdrop: true,
   maxHeight: '88vh',
-  size: 'standard'
+  size: 'standard',
+  beforeClose: undefined,
+});
+
+const isEffectiveOpen = computed(() => {
+  if (props.open !== undefined) return props.open;
+  return props.isOpen;
+});
+
+const effectiveSubtitle = computed(() => {
+  return props.subtitle || props.description || '';
 });
 
 const effectiveMaxHeight = computed(() => {
@@ -31,12 +47,17 @@ const effectiveMaxHeight = computed(() => {
 
 const emit = defineEmits<{
   (e: 'update:isOpen', value: boolean): void;
+  (e: 'update:open', value: boolean): void;
   (e: 'close'): void;
 }>();
 
 function dismiss() {
+  if (props.beforeClose && props.beforeClose() === false) {
+    return;
+  }
   haptics.light();
   emit('update:isOpen', false);
+  emit('update:open', false);
   emit('close');
 }
 
@@ -47,13 +68,13 @@ function handleBackdropClick() {
 }
 
 function handleKeydown(e: KeyboardEvent) {
-  if (e.key === 'Escape' && props.isOpen) {
+  if (e.key === 'Escape' && isEffectiveOpen.value) {
     dismiss();
   }
 }
 
 // Lock / unlock body scroll
-watch(() => props.isOpen, (open) => {
+watch(isEffectiveOpen, (open) => {
   if (open) {
     document.body.style.overflow = 'hidden';
     window.addEventListener('keydown', handleKeydown);
@@ -73,7 +94,7 @@ onBeforeUnmount(() => {
   <Teleport to="body">
     <Transition name="uni-sheet-fade">
       <div 
-        v-if="isOpen" 
+        v-if="isEffectiveOpen" 
         class="uni-sheet-overlay" 
         role="dialog" 
         aria-modal="true"
@@ -91,11 +112,11 @@ onBeforeUnmount(() => {
             </div>
 
             <!-- Header Row -->
-            <div v-if="title || $slots.header" class="sheet-header">
+            <div v-if="title || effectiveSubtitle || $slots.header" class="sheet-header">
               <slot name="header">
                 <div class="sheet-header-titles">
                   <h3 class="sheet-title">{{ title }}</h3>
-                  <p v-if="subtitle" class="sheet-subtitle">{{ subtitle }}</p>
+                  <p v-if="effectiveSubtitle" class="sheet-subtitle">{{ effectiveSubtitle }}</p>
                 </div>
                 <button 
                   v-if="showClose" 
@@ -242,6 +263,18 @@ onBeforeUnmount(() => {
   flex-shrink: 0;
 }
 
+@media (max-width: 380px) {
+  .sheet-header {
+    padding: 0 14px 10px 14px;
+  }
+  .sheet-scroll-body {
+    padding: 12px 14px;
+  }
+  .sheet-footer {
+    padding: 10px 14px 0 14px;
+  }
+}
+
 /* Animations */
 .uni-sheet-fade-enter-active,
 .uni-sheet-fade-leave-active {
@@ -264,5 +297,42 @@ onBeforeUnmount(() => {
 .uni-sheet-slide-enter-from,
 .uni-sheet-slide-leave-to {
   transform: translateY(100%);
+}
+
+/* Dark Mode Overrides */
+:global(.dark) .uni-sheet-container,
+:global(.ion-palette-dark) .uni-sheet-container {
+  background: var(--uni-surface, #1B1D23);
+  border-color: var(--uni-border, #30343D);
+  box-shadow: 0 -12px 40px rgba(0, 0, 0, 0.6);
+}
+
+:global(.dark) .sheet-title,
+:global(.ion-palette-dark) .sheet-title {
+  color: var(--uni-text, #F8FAFC);
+}
+
+:global(.dark) .sheet-subtitle,
+:global(.ion-palette-dark) .sheet-subtitle {
+  color: var(--uni-text-secondary, #9CA3AF);
+}
+
+:global(.dark) .sheet-drag-handle,
+:global(.ion-palette-dark) .sheet-drag-handle {
+  background: var(--uni-border, #30343D);
+}
+
+:global(.dark) .sheet-header,
+:global(.ion-palette-dark) .sheet-header,
+:global(.dark) .sheet-footer,
+:global(.ion-palette-dark) .sheet-footer {
+  border-color: var(--uni-border, #30343D);
+}
+
+:global(.dark) .sheet-close-btn,
+:global(.ion-palette-dark) .sheet-close-btn {
+  background: var(--uni-surface-secondary, #252830);
+  border-color: var(--uni-border, #30343D);
+  color: var(--uni-text-secondary, #9CA3AF);
 }
 </style>

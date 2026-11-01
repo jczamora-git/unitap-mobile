@@ -174,6 +174,15 @@ onBeforeUnmount(() => {
   box-sizing: border-box;
 }
 
+@media (max-width: 380px) {
+  .uni-dialog-overlay {
+    padding: 16px;
+  }
+  .uni-dialog-card {
+    padding: 20px 16px 16px 16px;
+  }
+}
+
 .dialog-icon-box {
   width: 44px;
   height: 44px;
@@ -255,8 +264,14 @@ onBeforeUnmount(() => {
 }
 
 .dialog-btn-confirm {
-  background: var(--uni-mint);
-  color: #0A1C16;
+  background: var(--uni-btn-primary-bg, #0F766E);
+  color: #FFFFFF;
+}
+
+:root.dark .dialog-btn-confirm,
+:root.ion-palette-dark .dialog-btn-confirm {
+  background: var(--uni-btn-primary-bg, #0D9488);
+  color: #FFFFFF;
 }
 
 .dialog-btn-destructive {

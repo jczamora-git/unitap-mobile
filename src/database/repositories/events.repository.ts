@@ -11,15 +11,16 @@ export class EventsRepository {
     const db = await this.getDb(adapter);
     await db.execute(
       `INSERT INTO events (
-        id, semester_id, title, description, event_type, audience_type, audience_json,
+        id, semester_id, title, description, event_type, category_id, audience_type, audience_json,
         attendance_required, status, created_by_user_id, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         event.id,
         event.semester_id,
         event.title,
         event.description || null,
         event.event_type,
+        event.category_id || null,
         event.audience_type,
         event.audience_json,
         event.attendance_required,

@@ -108,12 +108,12 @@ async function handleManualSync() {
 }
 
 .status-summary-card {
-  background: #FFFFFF;
-  border: 1px solid var(--uni-border, #CBD5E1);
+  background: var(--uni-surface);
+  border: 1px solid var(--uni-border);
   border-radius: 12px;
   padding: 24px;
   margin-bottom: 24px;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.04);
+  box-shadow: var(--uni-shadow-card);
 }
 
 .status-badge-row {
@@ -156,14 +156,39 @@ async function handleManualSync() {
   color: #475569;
 }
 
+.dark .pill-synced {
+  background: rgba(34, 197, 94, 0.2);
+  color: #86efac;
+}
+
+.dark .pill-syncing {
+  background: rgba(99, 102, 241, 0.2);
+  color: #c7d2fe;
+}
+
+.dark .pill-pending_changes {
+  background: rgba(245, 158, 11, 0.2);
+  color: #fde68a;
+}
+
+.dark .pill-sync_error, .dark .pill-conflict {
+  background: rgba(239, 68, 68, 0.2);
+  color: #fca5a5;
+}
+
+.dark .pill-offline {
+  background: rgba(100, 116, 139, 0.2);
+  color: #cbd5e1;
+}
+
 .online-tag {
-  color: #059669;
+  color: var(--uni-success);
   font-size: 0.82rem;
   font-weight: 600;
 }
 
 .offline-tag {
-  color: #64748B;
+  color: var(--uni-text-secondary);
   font-size: 0.82rem;
   font-weight: 600;
 }
@@ -176,8 +201,8 @@ async function handleManualSync() {
 }
 
 .metric-box {
-  background: #F8FAFC;
-  border: 1px solid #E2E8F0;
+  background: var(--uni-surface-secondary);
+  border: 1px solid var(--uni-border);
   border-radius: 8px;
   padding: 16px;
   text-align: center;
@@ -187,22 +212,22 @@ async function handleManualSync() {
   display: block;
   font-size: 1.3rem;
   font-weight: 700;
-  color: var(--uni-ink, #0F172A);
+  color: var(--uni-text);
 }
 
 .metric-lbl {
   font-size: 0.75rem;
-  color: var(--uni-muted, #64748B);
+  color: var(--uni-text-secondary);
 }
 
 .meta-row {
   display: flex;
   justify-content: space-between;
   font-size: 0.82rem;
-  color: var(--uni-muted, #64748B);
+  color: var(--uni-text-secondary);
   padding: 12px 0;
-  border-top: 1px solid #F1F5F9;
-  border-bottom: 1px solid #F1F5F9;
+  border-top: 1px solid var(--uni-border);
+  border-bottom: 1px solid var(--uni-border);
   margin-bottom: 20px;
 }
 
@@ -213,8 +238,8 @@ async function handleManualSync() {
   justify-content: center;
   gap: 8px;
   padding: 12px;
-  background: var(--uni-primary, #0F766E);
-  color: #FFFFFF;
+  background: var(--uni-primary);
+  color: var(--uni-primary-contrast);
   border: none;
   border-radius: 8px;
   font-weight: 700;
@@ -232,8 +257,8 @@ async function handleManualSync() {
 }
 
 .info-section {
-  background: #FFFFFF;
-  border: 1px solid var(--uni-border, #CBD5E1);
+  background: var(--uni-surface);
+  border: 1px solid var(--uni-border);
   border-radius: 12px;
   padding: 20px;
 }

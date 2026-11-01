@@ -197,7 +197,7 @@ function filteredEvents() {
   font-size: 13px;
   font-weight: 600;
   cursor: pointer;
-  box-shadow: 0 2px 8px rgba(59, 130, 246, 0.25);
+  box-shadow: none;
   transition: transform 0.15s ease, opacity 0.15s ease;
 }
 

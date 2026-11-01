@@ -39,6 +39,8 @@ withDefaults(defineProps<Props>(), {
   flex-direction: column;
   gap: 6px;
   width: 100%;
+  max-width: 100%;
+  min-width: 0;
 }
 
 .field-label-row {
@@ -61,6 +63,8 @@ withDefaults(defineProps<Props>(), {
 
 .field-control-wrap {
   width: 100%;
+  max-width: 100%;
+  min-width: 0;
 }
 
 .field-error-msg {

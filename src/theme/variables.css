@@ -3,133 +3,130 @@
 :root {
   --ion-font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
 
-  /* Primary Brand Accent (Aurora Mint) */
-  --ion-color-primary: #159A74;
-  --ion-color-primary-rgb: 21, 154, 116;
-  --ion-color-primary-contrast: #ffffff;
+  /* Primary Brand Accent (Teal / Aurora Mint) */
+  --ion-color-primary: var(--uni-primary);
+  --ion-color-primary-rgb: 15, 118, 110;
+  --ion-color-primary-contrast: var(--uni-primary-contrast);
   --ion-color-primary-contrast-rgb: 255, 255, 255;
-  --ion-color-primary-shade: #118161;
-  --ion-color-primary-tint: #70F3CF;
+  --ion-color-primary-shade: var(--uni-primary-hover);
+  --ion-color-primary-tint: #14B8A6;
 
   /* Secondary Accent (Soft Violet) */
-  --ion-color-secondary: #8B85F6;
-  --ion-color-secondary-rgb: 139, 133, 246;
+  --ion-color-secondary: var(--uni-violet);
+  --ion-color-secondary-rgb: 124, 58, 237;
   --ion-color-secondary-contrast: #ffffff;
-  --ion-color-secondary-shade: #746de3;
-  --ion-color-secondary-tint: #a6a2f8;
+  --ion-color-secondary-shade: #6D28D9;
+  --ion-color-secondary-tint: #8B5CF6;
 
-  /* Success (Aurora Mint / Emerald) */
-  --ion-color-success: #159A74;
-  --ion-color-success-rgb: 21, 154, 116;
+  /* Success (Emerald) */
+  --ion-color-success: var(--uni-success);
+  --ion-color-success-rgb: 5, 150, 105;
   --ion-color-success-contrast: #ffffff;
-  --ion-color-success-shade: #118161;
-  --ion-color-success-tint: #70F3CF;
+  --ion-color-success-shade: #047857;
+  --ion-color-success-tint: #10B981;
 
-  /* Warning (Warm Peach / Amber) */
-  --ion-color-warning: #D99522;
-  --ion-color-warning-rgb: 217, 149, 34;
+  /* Warning (Amber) */
+  --ion-color-warning: var(--uni-warning);
+  --ion-color-warning-rgb: 217, 119, 6;
   --ion-color-warning-contrast: #ffffff;
-  --ion-color-warning-shade: #B87B17;
-  --ion-color-warning-tint: #FFB78F;
+  --ion-color-warning-shade: #B45309;
+  --ion-color-warning-tint: #F59E0B;
 
-  /* Danger (Subdued Crimson) */
-  --ion-color-danger: #DC4B4B;
-  --ion-color-danger-rgb: 220, 75, 75;
+  /* Danger (Crimson) */
+  --ion-color-danger: var(--uni-danger);
+  --ion-color-danger-rgb: 220, 38, 38;
   --ion-color-danger-contrast: #ffffff;
-  --ion-color-danger-shade: #BD3A3A;
-  --ion-color-danger-tint: #E46868;
+  --ion-color-danger-shade: #B91C1C;
+  --ion-color-danger-tint: #EF4444;
 
   /* Brand Accents */
-  --aurora-mint: #70F3CF;
-  --aurora-mint-rgb: 112, 243, 207;
-  --aurora-sky: #65BFFF;
-  --aurora-sky-rgb: 101, 191, 255;
-  --aurora-violet: #8B85F6;
-  --aurora-violet-rgb: 139, 133, 246;
-  --aurora-peach: #FFB78F;
-  --aurora-peach-rgb: 255, 183, 143;
+  --aurora-mint: var(--uni-mint);
+  --aurora-sky: var(--uni-blue);
+  --aurora-violet: var(--uni-violet);
+  --aurora-peach: var(--uni-peach);
 
   /* Light Theme Surfaces & Text (Living Interface) */
-  --app-bg: #F7F8FA;
-  --app-bg-elevated: #FFFFFF;
-  --app-surface: #FFFFFF;
-  --app-surface-subtle: #F0F2F5;
-  --app-surface-elevated: #FFFFFF;
-  --app-border: #E8EBEF;
-  --app-border-subtle: #F2F4F7;
-  --app-text-primary: #17191D;
-  --app-text-secondary: #89919D;
-  --app-text-muted: #9CA3AF;
+  --app-bg: var(--uni-background);
+  --app-bg-elevated: var(--uni-surface);
+  --app-surface: var(--uni-surface);
+  --app-surface-subtle: var(--uni-surface-secondary);
+  --app-surface-elevated: var(--uni-surface-secondary);
+  --app-border: var(--uni-border);
+  --app-border-subtle: var(--uni-border);
+  --app-text-primary: var(--uni-text);
+  --app-text-secondary: var(--uni-text-secondary);
+  --app-text-muted: var(--uni-text-secondary);
   
-  --app-accent-mint: #0E8560;
-  --app-accent-soft: rgba(112, 243, 207, 0.16);
-  --app-accent-glow: rgba(112, 243, 207, 0.25);
+  --app-accent-mint: var(--uni-primary);
+  --app-accent-soft: rgba(15, 118, 110, 0.12);
+  --app-accent-glow: rgba(15, 118, 110, 0.22);
 
   /* Hero Surfaces */
-  --app-fintech-hero-bg: #15181F;
-  --app-fintech-hero-text: #F8F9FB;
-  --app-fintech-hero-sub: #89919D;
-  --app-fintech-hero-border: rgba(255, 255, 255, 0.09);
+  --app-fintech-hero-bg: var(--uni-surface);
+  --app-fintech-hero-text: var(--uni-text);
+  --app-fintech-hero-sub: var(--uni-text-secondary);
+  --app-fintech-hero-border: var(--uni-border);
 
   /* Radii */
-  --app-card-radius: 20px;
+  --app-card-radius: var(--uni-radius-card);
   --app-pill-radius: 9999px;
-  --app-input-radius: 12px;
-  --app-btn-radius: 12px;
+  --app-input-radius: var(--uni-radius-input);
+  --app-btn-radius: var(--uni-radius-btn);
   --app-icon-radius: 12px;
 
   /* Shadows */
-  --app-shadow-card: 0 4px 18px rgba(0, 0, 0, 0.04), 0 1px 3px rgba(0, 0, 0, 0.02);
-  --app-shadow-nav: 0 12px 36px rgba(0, 0, 0, 0.08);
-  --app-shadow-modal: 0 24px 48px rgba(0, 0, 0, 0.12);
+  --app-shadow-card: var(--uni-shadow-card);
+  --app-shadow-nav: var(--uni-shadow-dock);
+  --app-shadow-modal: var(--uni-shadow-dialog);
 
   /* Ionic Overrides */
-  --ion-background-color: var(--app-bg);
-  --ion-text-color: var(--app-text-primary);
-  --ion-item-background: var(--app-surface);
-  --ion-border-color: var(--app-border);
+  --ion-background-color: var(--uni-background);
+  --ion-text-color: var(--uni-text);
+  --ion-item-background: var(--uni-surface);
+  --ion-border-color: var(--uni-border);
 }
 
 /* Dark Theme (Living Interface Graphite & Charcoal) */
-@media (prefers-color-scheme: dark) {
-  :root {
-    --ion-color-primary: #70F3CF;
-    --ion-color-primary-rgb: 112, 243, 207;
-    --ion-color-primary-contrast: #0C1A16;
-    --ion-color-primary-contrast-rgb: 12, 26, 22;
-    --ion-color-primary-shade: #5CD5B2;
-    --ion-color-primary-tint: #8EF6DA;
+:root.dark,
+:root.ion-palette-dark,
+body.dark,
+body.ion-palette-dark {
+  --ion-color-primary: var(--uni-primary);
+  --ion-color-primary-rgb: 94, 234, 212;
+  --ion-color-primary-contrast: var(--uni-primary-contrast);
+  --ion-color-primary-contrast-rgb: 15, 23, 42;
+  --ion-color-primary-shade: var(--uni-primary-hover);
+  --ion-color-primary-tint: #99F6E4;
 
-    --ion-color-success: #70F3CF;
-    --ion-color-warning: #FFB78F;
-    --ion-color-danger: #E85D5D;
+  --ion-color-success: var(--uni-success);
+  --ion-color-warning: var(--uni-warning);
+  --ion-color-danger: var(--uni-danger);
 
-    --app-bg: #111318;
-    --app-bg-elevated: #181B21;
-    --app-surface: #1B1E24;
-    --app-surface-subtle: #242831;
-    --app-surface-elevated: #242831;
-    --app-border: rgba(255, 255, 255, 0.08);
-    --app-border-subtle: rgba(255, 255, 255, 0.05);
-    --app-text-primary: #F8F9FB;
-    --app-text-secondary: #89919D;
-    --app-text-muted: #6B7280;
+  --app-bg: var(--uni-background);
+  --app-bg-elevated: var(--uni-surface);
+  --app-surface: var(--uni-surface);
+  --app-surface-subtle: var(--uni-surface-secondary);
+  --app-surface-elevated: var(--uni-surface-secondary);
+  --app-border: var(--uni-border);
+  --app-border-subtle: var(--uni-border);
+  --app-text-primary: var(--uni-text);
+  --app-text-secondary: var(--uni-text-secondary);
+  --app-text-muted: var(--uni-text-secondary);
 
-    --app-accent-mint: #70F3CF;
-    --app-accent-soft: rgba(112, 243, 207, 0.14);
-    --app-accent-glow: rgba(112, 243, 207, 0.28);
+  --app-accent-mint: var(--uni-primary);
+  --app-accent-soft: rgba(94, 234, 212, 0.14);
+  --app-accent-glow: rgba(94, 234, 212, 0.28);
 
-    --app-fintech-hero-bg: #181B22;
-    --app-fintech-hero-text: #F8F9FB;
-    --app-fintech-hero-sub: #89919D;
-    --app-fintech-hero-border: rgba(255, 255, 255, 0.1);
+  --app-fintech-hero-bg: var(--uni-surface);
+  --app-fintech-hero-text: var(--uni-text);
+  --app-fintech-hero-sub: var(--uni-text-secondary);
+  --app-fintech-hero-border: var(--uni-border);
 
-    --app-shadow-card: 0 6px 20px rgba(0, 0, 0, 0.35);
-    --app-shadow-nav: 0 14px 40px rgba(0, 0, 0, 0.6);
+  --app-shadow-card: var(--uni-shadow-card);
+  --app-shadow-nav: var(--uni-shadow-dock);
 
-    --ion-background-color: var(--app-bg);
-    --ion-text-color: var(--app-text-primary);
-    --ion-item-background: var(--app-surface);
-    --ion-border-color: var(--app-border);
-  }
+  --ion-background-color: var(--uni-background);
+  --ion-text-color: var(--uni-text);
+  --ion-item-background: var(--uni-surface);
+  --ion-border-color: var(--uni-border);
 }

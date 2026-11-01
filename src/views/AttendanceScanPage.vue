@@ -272,6 +272,7 @@ function handleRegisterCard() {
             <ion-select 
               v-model="selectedOccurrenceId" 
               interface="action-sheet" 
+              :interface-options="{ header: 'Target Attendance Session' }"
               class="clean-session-select"
               @ion-change="refreshSessionData"
             >
@@ -729,14 +730,14 @@ function handleRegisterCard() {
 .btn-primary {
   background: var(--ion-color-primary);
   color: #ffffff;
-  box-shadow: 0 2px 10px rgba(59, 130, 246, 0.3);
+  box-shadow: none;
 }
 
 .btn-mint-action {
   background: var(--aurora-mint);
   color: #0A261D;
   font-weight: 700;
-  box-shadow: 0 4px 16px rgba(112, 243, 207, 0.38);
+  box-shadow: none;
 }
 
 .btn-subtle {
@@ -929,23 +930,21 @@ function handleRegisterCard() {
 }
 
 .activity-icon-wrap {
-  width: 30px;
-  height: 30px;
-  border-radius: 50%;
+  width: 24px;
+  height: 24px;
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 15px;
+  font-size: 18px;
   flex-shrink: 0;
+  background: transparent;
 }
 
 .icon-accepted {
-  background: rgba(21, 154, 116, 0.1);
   color: var(--ion-color-success);
 }
 
 .icon-duplicate, .icon-invalid, .icon-unregistered, .icon-not_eligible {
-  background: rgba(217, 149, 34, 0.12);
   color: var(--ion-color-warning);
 }
 
@@ -1001,12 +1000,12 @@ function handleRegisterCard() {
 
 /* UniTap 2.0 Photo Identity Verification Styles */
 .photo-verify-card {
-  background: #ffffff;
-  border: 2px solid var(--uni-primary, #0F766E);
+  background: var(--uni-surface);
+  border: 2px solid var(--uni-primary);
   border-radius: 18px;
   padding: 20px;
   margin-bottom: 20px;
-  box-shadow: 0 10px 28px rgba(15, 118, 110, 0.12);
+  box-shadow: var(--uni-shadow-card);
 }
 
 .verify-header {
@@ -1076,20 +1075,20 @@ function handleRegisterCard() {
 .verify-name {
   font-size: 18px;
   font-weight: 800;
-  color: var(--uni-ink, #0F172A);
+  color: var(--uni-text);
   margin: 0 0 4px;
 }
 
 .verify-meta {
   font-size: 12px;
-  color: var(--uni-muted, #64748B);
+  color: var(--uni-text-secondary);
   margin-bottom: 2px;
 }
 
 .verify-warning-box {
-  background: #fffbeb;
-  border: 1px solid #fef3c7;
-  color: #92400e;
+  background: var(--uni-surface-secondary);
+  border: 1px solid var(--uni-border);
+  color: var(--uni-warning);
   font-size: 12px;
   line-height: 1.5;
   padding: 12px;
@@ -1104,9 +1103,9 @@ function handleRegisterCard() {
 }
 
 .btn-reject-scan {
-  background: #ffffff;
-  color: var(--uni-danger, #B91C1C);
-  border: 1.5px solid #fca5a5;
+  background: var(--uni-surface);
+  color: var(--uni-danger);
+  border: 1.5px solid var(--uni-danger);
   border-radius: 12px;
   padding: 12px 8px;
   font-size: 12px;
@@ -1123,6 +1122,6 @@ function handleRegisterCard() {
   font-size: 12px;
   font-weight: 800;
   cursor: pointer;
-  box-shadow: 0 4px 12px rgba(15, 118, 110, 0.2);
+  box-shadow: none;
 }
 </style>

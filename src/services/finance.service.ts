@@ -1,16 +1,33 @@
-import type { 
-  ChargeTemplate, 
-  StudentCharge, 
-  Wallet, 
-  WalletTransaction, 
+import { getDatabase } from '@/database/database';
+import {
+  FinanceRepository,
+  type StudentObligationWithBalance,
+} from '@/database/repositories/finance.repository';
+import { AcademicRepository } from '@/database/repositories/academic.repository';
+import { StudentsRepository } from '@/database/repositories/students.repository';
+import { generateReferenceNumber, formatCentavosToPesos } from '@/utilities/finance-formatters';
+import type {
+  ObligationRuleItem,
+  StudentObligationItem,
+  PaymentItem,
+  AbsenteeCandidate,
+  OccurrenceAbsenteeSummary,
+  BulkFineAssessmentParams,
+  BulkFineAssessmentResult,
+  BulkContributionParams,
+  BulkContributionResult,
+  PaymentReceipt,
+  FinanceSummary,
+  PaymentMethod,
+  PaymentChannel,
+  ChargeTemplate,
+  StudentCharge,
   Payment,
-  PaymentAllocation,
+  Wallet,
+  WalletTransaction,
   ChargeType,
   ChargeTrigger,
-  FinanceSummary
 } from '@/types/finance';
-import { localFinanceRepository, type IFinanceRepository } from '@/storage/finance-storage.service';
-import { generateReferenceNumber } from '@/utilities/finance-formatters';
 
 function generateId(prefix: string): string {
   if (typeof crypto !== 'undefined' && crypto.randomUUID) {
@@ -20,454 +37,743 @@ function generateId(prefix: string): string {
 }
 
 export class FinanceService {
-  constructor(private repo: IFinanceRepository = localFinanceRepository) {}
+  // ==========================================================================
+  // --- 1. RULES & TEMPLATES ---
+  // ==========================================================================
 
-  // ===================== CHARGE TEMPLATES =====================
-
-  async getTemplates(): Promise<ChargeTemplate[]> {
-    const store = await this.repo.getData();
-    if (store.templates.length === 0) {
-      // Seed default CSG templates
-      const defaults: ChargeTemplate[] = [
-        {
-          id: 'tmpl_cleanup',
-          name: 'Cleanup Drive Absence',
-          chargeType: 'FINE',
-          defaultAmount: 2000, // ₱20.00
-          triggerType: 'ABSENCE',
-          status: 'ACTIVE',
-          createdAt: new Date().toISOString()
-        },
-        {
-          id: 'tmpl_teachers_day',
-          name: "Teacher's Day Contribution",
-          chargeType: 'CONTRIBUTION',
-          defaultAmount: 2500, // ₱25.00
-          triggerType: 'MANUAL',
-          status: 'ACTIVE',
-          createdAt: new Date().toISOString()
-        },
-        {
-          id: 'tmpl_sportsfest',
-          name: 'Sportsfest Contribution',
-          chargeType: 'CONTRIBUTION',
-          defaultAmount: 2500, // ₱25.00
-          triggerType: 'EVENT',
-          status: 'ACTIVE',
-          createdAt: new Date().toISOString()
-        }
-      ];
-      store.templates = defaults;
-      await this.repo.saveData(store);
-    }
-    return [...store.templates];
+  async getRules(semesterId: string): Promise<ObligationRuleItem[]> {
+    const rules = await FinanceRepository.getRulesBySemester(semesterId);
+    return rules.map((r) => ({
+      id: r.id,
+      semesterId: r.semester_id,
+      name: r.name,
+      type: r.type,
+      triggerType: r.trigger_type,
+      defaultAmountCentavos: r.default_amount_centavos,
+      dueOn: r.due_on,
+      status: r.status,
+      createdAt: r.created_at,
+    }));
   }
 
+  async createRule(params: {
+    semesterId: string;
+    name: string;
+    type: 'FINE' | 'CONTRIBUTION';
+    triggerType: 'MANUAL' | 'ABSENCE' | 'LATE' | 'EVENT';
+    defaultAmountCentavos: number;
+    dueOn?: string | null;
+    actorUserId?: string;
+  }): Promise<ObligationRuleItem> {
+    if (!params.name || !params.name.trim()) {
+      throw new Error('Rule name is required.');
+    }
+    if (params.defaultAmountCentavos <= 0) {
+      throw new Error('Default amount must be greater than 0.');
+    }
+
+    const id = generateId('rule');
+    const now = new Date().toISOString();
+    await FinanceRepository.createRule({
+      id,
+      semester_id: params.semesterId,
+      name: params.name.trim(),
+      type: params.type,
+      trigger_type: params.triggerType,
+      default_amount_centavos: Math.round(params.defaultAmountCentavos),
+      due_on: params.dueOn || null,
+      status: 'ACTIVE',
+      created_by_user_id: params.actorUserId || null,
+      created_at: now,
+    });
+
+    return {
+      id,
+      semesterId: params.semesterId,
+      name: params.name.trim(),
+      type: params.type,
+      triggerType: params.triggerType,
+      defaultAmountCentavos: Math.round(params.defaultAmountCentavos),
+      dueOn: params.dueOn || null,
+      status: 'ACTIVE',
+      createdAt: now,
+    };
+  }
+
+  // ==========================================================================
+  // --- 2. EVENT ABSENTEE DETECTION & BULK FINES ---
+  // ==========================================================================
+
+  async getAbsenteeCandidates(
+    occurrenceId: string,
+    ruleId?: string
+  ): Promise<{
+    summary: OccurrenceAbsenteeSummary;
+    candidates: AbsenteeCandidate[];
+  }> {
+    // Ensure authoritative roster is populated from semester enrollments
+    await FinanceRepository.ensureFinalizedRoster(occurrenceId);
+    return FinanceRepository.getAbsenteeCandidates(occurrenceId, ruleId);
+  }
+
+  async assessBulkFines(params: BulkFineAssessmentParams): Promise<BulkFineAssessmentResult> {
+    return FinanceRepository.assessBulkFines(params);
+  }
+
+  async issueManualFine(params: {
+    studentId: string;
+    semesterId: string;
+    title: string;
+    amountCentavos: number;
+    dueDate?: string | null;
+    ruleId?: string;
+    actorUserId?: string;
+  }): Promise<StudentObligationItem> {
+    if (!params.studentId) throw new Error('Student is required.');
+    if (!params.title || !params.title.trim()) throw new Error('Fine title is required.');
+    if (params.amountCentavos <= 0) throw new Error('Fine amount must be greater than zero.');
+
+    const id = generateId('ob');
+    const now = new Date().toISOString();
+
+    await FinanceRepository.assessObligation({
+      id,
+      student_id: params.studentId,
+      semester_id: params.semesterId,
+      rule_id: params.ruleId || null,
+      title: params.title.trim(),
+      type: 'FINE',
+      amount_centavos: Math.round(params.amountCentavos),
+      status: 'ACTIVE',
+      due_date: params.dueDate || null,
+      issued_by_user_id: params.actorUserId || null,
+      issued_at: now,
+      updated_at: now,
+    });
+
+    return {
+      id,
+      studentId: params.studentId,
+      semesterId: params.semesterId,
+      ruleId: params.ruleId || null,
+      title: params.title.trim(),
+      type: 'FINE',
+      amountCentavos: Math.round(params.amountCentavos),
+      paidCentavos: 0,
+      balanceCentavos: Math.round(params.amountCentavos),
+      status: 'UNPAID',
+      dueDate: params.dueDate || null,
+      issuedByUserId: params.actorUserId || null,
+      issuedAt: now,
+      updatedAt: now,
+    };
+  }
+
+  // ==========================================================================
+  // --- 3. CONTRIBUTIONS MANAGEMENT ---
+  // ==========================================================================
+
+  async assessBulkContributions(params: BulkContributionParams): Promise<BulkContributionResult> {
+    return FinanceRepository.assessBulkContributions(params);
+  }
+
+  // ==========================================================================
+  // --- 4. OBLIGATION QUERIES & VOIDING ---
+  // ==========================================================================
+
+  async getStudentObligations(
+    studentId: string,
+    semesterId?: string
+  ): Promise<StudentObligationItem[]> {
+    const records = await FinanceRepository.getStudentObligations(studentId, semesterId);
+    return records.map(this.mapObligationRecordToItem);
+  }
+
+  async getObligationsBySemester(
+    semesterId: string,
+    type?: 'FINE' | 'CONTRIBUTION'
+  ): Promise<StudentObligationItem[]> {
+    const records = await FinanceRepository.getObligationsBySemester(semesterId, type);
+    return records.map(this.mapObligationRecordToItem);
+  }
+
+  async voidObligation(
+    obligationId: string,
+    reason: string,
+    actorUserId: string
+  ): Promise<void> {
+    return FinanceRepository.voidObligation(obligationId, reason, actorUserId);
+  }
+
+  // ==========================================================================
+  // --- 5. DIRECT PAYMENT RECORDING & RECEIPT GENERATION ---
+  // ==========================================================================
+
+  async recordPayment(params: {
+    studentId: string;
+    semesterId: string;
+    amountCentavos: number;
+    source: PaymentMethod;
+    channel?: PaymentChannel;
+    allocations: { obligationId: string; amountCentavos: number }[];
+    notes?: string;
+    actorUserId: string;
+  }): Promise<{ paymentId: string; referenceNumber: string }> {
+    if (params.amountCentavos <= 0) {
+      throw new Error('Payment amount must be greater than zero.');
+    }
+    if (!params.allocations || params.allocations.length === 0) {
+      throw new Error('Payment must be allocated to at least one obligation.');
+    }
+
+    const totalAlloc = params.allocations.reduce((sum, a) => sum + a.amountCentavos, 0);
+    if (totalAlloc !== params.amountCentavos) {
+      throw new Error(`Total allocations (${totalAlloc}) must match payment amount (${params.amountCentavos}).`);
+    }
+
+    const paymentId = generateId('pay');
+    const referenceNumber = generateReferenceNumber('PAY');
+    const idempotencyKey = 'idemp_' + paymentId;
+    const now = new Date().toISOString();
+    const source = (params.source === 'CASH' ? 'CASH_RECORDED' : params.source) as 'CASH_RECORDED' | 'MANUAL_TRANSFER_RECORD' | 'SIMULATED_WALLET';
+
+    await FinanceRepository.recordPayment(
+      {
+        id: paymentId,
+        student_id: params.studentId,
+        semester_id: params.semesterId,
+        reference_number: referenceNumber,
+        idempotency_key: idempotencyKey,
+        amount_centavos: params.amountCentavos,
+        source,
+        channel: params.channel || 'MANUAL',
+        status: 'POSTED',
+        processed_by_user_id: params.actorUserId,
+        notes: params.notes || null,
+        processed_at: now,
+      },
+      params.allocations.map((a) => ({
+        id: generateId('pa'),
+        obligation_id: a.obligationId,
+        amount_centavos: a.amountCentavos,
+      }))
+    );
+
+    return { paymentId, referenceNumber };
+  }
+
+  async reversePayment(
+    paymentId: string,
+    reason: string,
+    actorUserId: string
+  ): Promise<void> {
+    return FinanceRepository.reversePayment(paymentId, reason, actorUserId);
+  }
+
+  async getAllPayments(semesterId?: string): Promise<PaymentItem[]> {
+    const records = await FinanceRepository.getAllPayments(semesterId);
+    return records.map((p) => ({
+      id: p.id,
+      studentId: p.student_id,
+      semesterId: p.semester_id,
+      referenceNumber: p.reference_number,
+      idempotencyKey: p.idempotency_key,
+      amountCentavos: p.amount_centavos,
+      source: p.source as PaymentMethod,
+      channel: p.channel as PaymentChannel,
+      status: p.status as 'POSTED' | 'REVERSED',
+      processedByUserId: p.processed_by_user_id,
+      processedAt: p.processed_at,
+      reversedAt: p.reversed_at,
+      reversedByUserId: p.reversed_by_user_id,
+      reversalReason: p.reversal_reason,
+      notes: p.notes,
+      studentSchoolId: p.school_id,
+      studentName: p.last_name && p.first_name ? `${p.last_name}, ${p.first_name}` : undefined,
+      allocations: (p.allocations || []).map((a) => ({
+        id: a.id,
+        paymentId: p.id,
+        obligationId: a.obligation_id,
+        amountCentavos: a.amount_centavos,
+        obligationTitle: a.obligation_title,
+        obligationType: a.obligation_type as any,
+      })),
+    }));
+  }
+
+  async generatePaymentReceipt(
+    paymentId: string,
+    officerName = 'Authorized Officer'
+  ): Promise<PaymentReceipt> {
+    const payment = await FinanceRepository.getPaymentById(paymentId);
+    if (!payment) throw new Error('Payment not found.');
+
+    const student = await StudentsRepository.getStudentById(payment.student_id);
+    const semester = await AcademicRepository.getSemesterById(payment.semester_id);
+    const year = semester ? await AcademicRepository.getYearById(semester.academic_year_id) : null;
+    const enrollment = await AcademicRepository.getStudentEnrollmentInSemester(payment.student_id, payment.semester_id);
+
+    // Fetch up-to-date balances for allocated obligations
+    const obligations = await FinanceRepository.getStudentObligations(payment.student_id, payment.semester_id);
+    const obMap = new Map(obligations.map((o) => [o.id, o]));
+
+    const items = payment.allocations.map((a) => {
+      const ob = obMap.get(a.obligation_id);
+      return {
+        obligationId: a.obligation_id,
+        title: a.obligation_title || ob?.title || 'Obligation',
+        type: (a.obligation_type || ob?.type || 'FINE') as any,
+        paidAmountCentavos: a.amount_centavos,
+        remainingBalanceCentavos: ob ? ob.balance_centavos : 0,
+      };
+    });
+
+    return {
+      referenceNumber: payment.reference_number,
+      paymentDate: payment.processed_at,
+      student: {
+        id: payment.student_id,
+        schoolId: student?.school_id || 'N/A',
+        fullName: student ? `${student.last_name}, ${student.first_name}` : 'Student',
+        section: enrollment?.section || 'N/A',
+        yearLevel: enrollment?.year_level || 1,
+      },
+      academicTerm: {
+        semesterLabel: semester ? `${semester.term} Semester` : 'Current Semester',
+        academicYearLabel: year?.label || 'Academic Year',
+      },
+      receivedByOfficer: officerName,
+      paymentMethod: (payment.source === 'MANUAL_TRANSFER_RECORD' ? 'MANUAL_TRANSFER_RECORD' : 'CASH') as PaymentMethod,
+      notes: payment.notes || undefined,
+      items,
+      totalPaidCentavos: payment.amount_centavos,
+      isLocallyRecordedPendingSync: true,
+    };
+  }
+
+  generatePrintableReceiptHtml(receipt: PaymentReceipt): string {
+    const itemRows = receipt.items
+      .map(
+        (it) => `
+      <tr>
+        <td style="padding: 6px 0; border-bottom: 1px dashed #cbd5e1; font-size: 13px;">${it.title} (${it.type})</td>
+        <td style="padding: 6px 0; border-bottom: 1px dashed #cbd5e1; text-align: right; font-weight: 700; font-size: 13px;">${formatCentavosToPesos(it.paidAmountCentavos)}</td>
+      </tr>
+      <tr>
+        <td colspan="2" style="padding-bottom: 6px; font-size: 11px; color: #64748b;">Remaining balance: ${formatCentavosToPesos(it.remainingBalanceCentavos)}</td>
+      </tr>
+    `
+      )
+      .join('');
+
+    return `
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <meta charset="utf-8">
+        <title>Receipt - ${receipt.referenceNumber}</title>
+        <style>
+          body { font-family: monospace, system-ui; max-width: 380px; margin: 0 auto; padding: 16px; color: #0f172a; font-size: 13px; }
+          .center { text-align: center; }
+          .brand { font-size: 18px; font-weight: 900; color: #0f766e; margin-bottom: 2px; }
+          .sub { font-size: 11px; color: #64748b; margin-bottom: 12px; }
+          .divider { border-top: 1px dashed #94a3b8; margin: 12px 0; }
+          .row { display: flex; justify-content: space-between; margin: 3px 0; }
+          .bold { font-weight: 700; }
+          .total-box { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 10px; margin: 12px 0; }
+          .badge { display: inline-block; padding: 2px 6px; border-radius: 4px; font-size: 10px; font-weight: 700; background: #fef3c7; color: #b45309; }
+        </style>
+      </head>
+      <body>
+        <div class="center">
+          <div class="brand">UniTap 2.0</div>
+          <div class="sub">CSG Official Payment Receipt</div>
+          ${receipt.isLocallyRecordedPendingSync ? '<div class="badge">Locally Recorded • Sync Pending</div>' : ''}
+        </div>
+        <div class="divider"></div>
+        <div class="row"><span>Ref #:</span><span class="bold">${receipt.referenceNumber}</span></div>
+        <div class="row"><span>Date:</span><span>${new Date(receipt.paymentDate).toLocaleString()}</span></div>
+        <div class="row"><span>Term:</span><span>${receipt.academicTerm.semesterLabel} (${receipt.academicTerm.academicYearLabel})</span></div>
+        <div class="divider"></div>
+        <div class="row"><span>Student ID:</span><span class="bold">${receipt.student.schoolId}</span></div>
+        <div class="row"><span>Student:</span><span>${receipt.student.fullName}</span></div>
+        <div class="row"><span>Section:</span><span>${receipt.student.yearLevel} - ${receipt.student.section}</span></div>
+        <div class="row"><span>Method:</span><span>${receipt.paymentMethod === 'CASH' ? 'Cash Collection' : 'Bank/Transfer Record'}</span></div>
+        <div class="divider"></div>
+        <table style="width: 100%; border-collapse: collapse;">
+          ${itemRows}
+        </table>
+        <div class="total-box">
+          <div class="row" style="font-size: 15px;">
+            <span class="bold">TOTAL PAID:</span>
+            <span class="bold" style="color: #047857;">${formatCentavosToPesos(receipt.totalPaidCentavos)}</span>
+          </div>
+        </div>
+        <div class="row" style="font-size: 11px; color: #64748b;">
+          <span>Officer:</span>
+          <span>${receipt.receivedByOfficer}</span>
+        </div>
+        ${receipt.notes ? `<div style="font-size: 11px; color: #64748b; margin-top: 6px;">Notes: ${receipt.notes}</div>` : ''}
+        <div class="divider"></div>
+        <div class="center" style="font-size: 11px; color: #64748b;">
+          Thank you for supporting the CSG community.<br>UniTap Offline-First System
+        </div>
+      </body>
+      </html>
+    `;
+  }
+
+  // ==========================================================================
+  // --- 6. AGGREGATE SUMMARY ---
+  // ==========================================================================
+
+  async getFinanceSummary(semesterId?: string): Promise<FinanceSummary> {
+    const db = await getDatabase();
+
+    let semId = semesterId;
+    if (!semId) {
+      const activeSem = await db.queryOne<{ id: string }>('SELECT id FROM semesters WHERE status = ?', ['ACTIVE']);
+      semId = activeSem?.id;
+    }
+
+    if (!semId) {
+      return {
+        totalOutstandingCentavos: 0,
+        totalPaymentsCollectedCentavos: 0,
+        totalAssessedCentavos: 0,
+        unpaidFinesCount: 0,
+        unpaidContributionsCount: 0,
+        activeFinesCount: 0,
+        activeContributionsCount: 0,
+        totalSimulatedWalletCreditsCentavos: 0,
+        unpaidChargesCount: 0,
+        activeWalletsCount: 0,
+      };
+    }
+
+    // Assessed & breakdown
+    const obligations = await FinanceRepository.getObligationsBySemester(semId);
+
+    let totalAssessed = 0;
+    let totalOutstanding = 0;
+    let unpaidFines = 0;
+    let unpaidContribs = 0;
+    let activeFines = 0;
+    let activeContribs = 0;
+
+    for (const ob of obligations) {
+      totalAssessed += ob.assessed_centavos;
+      totalOutstanding += ob.balance_centavos;
+
+      if (ob.type === 'FINE') {
+        activeFines++;
+        if (ob.balance_centavos > 0) unpaidFines++;
+      } else {
+        activeContribs++;
+        if (ob.balance_centavos > 0) unpaidContribs++;
+      }
+    }
+
+    // Collected payments
+    const collectedRow = await db.queryOne<{ collected: number }>(
+      `SELECT COALESCE(SUM(amount_centavos), 0) as collected
+       FROM payments
+       WHERE semester_id = ? AND status = 'POSTED'`,
+      [semId]
+    );
+    const totalCollected = collectedRow?.collected || 0;
+
+    return {
+      totalOutstandingCentavos: Math.max(0, totalOutstanding),
+      totalPaymentsCollectedCentavos: totalCollected,
+      totalAssessedCentavos: totalAssessed,
+      unpaidFinesCount: unpaidFines,
+      unpaidContributionsCount: unpaidContribs,
+      activeFinesCount: activeFines,
+      activeContributionsCount: activeContribs,
+      // Backward compatibility:
+      totalSimulatedWalletCreditsCentavos: 0,
+      unpaidChargesCount: unpaidFines + unpaidContribs,
+      activeWalletsCount: 0,
+    };
+  }
+
+  // ==========================================================================
+  // --- 7. BACKWARD COMPATIBILITY HELPERS ---
+  // ==========================================================================
+
+  private mapObligationRecordToItem(r: StudentObligationWithBalance): StudentObligationItem {
+    let status: any = 'UNPAID';
+    if (r.status === 'VOID') {
+      status = 'VOID';
+    } else if (r.balance_centavos === 0 && r.assessed_centavos > 0) {
+      status = 'PAID';
+    } else if (r.paid_centavos > 0 && r.balance_centavos > 0) {
+      status = 'PARTIALLY_PAID';
+    }
+
+    return {
+      id: r.id,
+      studentId: r.student_id,
+      semesterId: r.semester_id,
+      ruleId: r.rule_id,
+      relatedEventId: r.related_event_id,
+      relatedOccurrenceId: r.related_occurrence_id,
+      title: r.title,
+      type: r.type,
+      amountCentavos: r.assessed_centavos,
+      paidCentavos: r.paid_centavos,
+      balanceCentavos: r.balance_centavos,
+      status,
+      dueDate: r.due_date,
+      batchId: r.batch_id,
+      issuedByUserId: r.issued_by_user_id,
+      issuedAt: r.issued_at,
+      updatedAt: r.updated_at,
+      voidReason: r.void_reason || undefined,
+      schoolId: r.school_id,
+      studentName: r.last_name && r.first_name ? `${r.last_name}, ${r.first_name}` : undefined,
+      yearLevel: r.year_level,
+      section: r.section,
+    };
+  }
+
+  /** @deprecated Kept for backward compatibility with legacy tests */
+  async getTemplates(): Promise<ChargeTemplate[]> {
+    const db = await getDatabase();
+    const activeSem = await db.queryOne<{ id: string }>('SELECT id FROM semesters WHERE status = ?', ['ACTIVE']);
+    if (!activeSem) return [];
+    const rules = await this.getRules(activeSem.id);
+    return rules.map((r) => ({
+      ...r,
+      chargeType: r.type,
+      defaultAmount: r.defaultAmountCentavos,
+    }));
+  }
+
+  /** @deprecated Kept for backward compatibility with legacy tests */
   async createTemplate(params: {
     name: string;
     chargeType: ChargeType;
     defaultAmount: number;
     triggerType: ChargeTrigger;
   }): Promise<ChargeTemplate> {
-    if (!params.name || !params.name.trim()) {
-      throw new Error('Template name is required.');
-    }
-    if (params.defaultAmount <= 0) {
-      throw new Error('Default amount must be greater than 0.');
-    }
-
-    const store = await this.repo.getData();
-    const newTmpl: ChargeTemplate = {
-      id: generateId('tmpl'),
-      name: params.name.trim(),
-      chargeType: params.chargeType,
-      defaultAmount: Math.round(params.defaultAmount),
+    const db = await getDatabase();
+    const activeSem = await db.queryOne<{ id: string }>('SELECT id FROM semesters WHERE status = ?', ['ACTIVE']);
+    const semesterId = activeSem?.id || 'sem_default';
+    return this.createRule({
+      semesterId,
+      name: params.name,
+      type: params.chargeType === 'CONTRIBUTION' ? 'CONTRIBUTION' : 'FINE',
       triggerType: params.triggerType,
-      status: 'ACTIVE',
-      createdAt: new Date().toISOString()
-    };
-
-    store.templates.unshift(newTmpl);
-    await this.repo.saveData(store);
-    return newTmpl;
+      defaultAmountCentavos: params.defaultAmount,
+    });
   }
 
-  // ===================== STUDENT CHARGES =====================
-
+  /** @deprecated Kept for backward compatibility with legacy tests */
   async getCharges(studentId?: string): Promise<StudentCharge[]> {
-    const store = await this.repo.getData();
     if (studentId) {
-      return store.charges.filter(c => c.studentId === studentId);
+      const items = await this.getStudentObligations(studentId);
+      return items.map((it) => ({
+        id: it.id,
+        studentId: it.studentId,
+        chargeTemplateId: it.ruleId || undefined,
+        title: it.title,
+        chargeType: it.type,
+        issuedAmount: it.amountCentavos,
+        paidAmount: it.paidCentavos,
+        status: it.status,
+        relatedEventId: it.relatedEventId || undefined,
+        relatedOccurrenceId: it.relatedOccurrenceId || undefined,
+        issuedAt: it.issuedAt,
+        updatedAt: it.updatedAt,
+        voidReason: it.voidReason,
+      }));
     }
-    return [...store.charges];
+    const db = await getDatabase();
+    const activeSem = await db.queryOne<{ id: string }>('SELECT id FROM semesters WHERE status = ?', ['ACTIVE']);
+    if (!activeSem) return [];
+    const items = await this.getObligationsBySemester(activeSem.id);
+    return items.map((it) => ({
+      id: it.id,
+      studentId: it.studentId,
+      chargeTemplateId: it.ruleId || undefined,
+      title: it.title,
+      chargeType: it.type,
+      issuedAmount: it.amountCentavos,
+      paidAmount: it.paidCentavos,
+      status: it.status,
+      relatedEventId: it.relatedEventId || undefined,
+      relatedOccurrenceId: it.relatedOccurrenceId || undefined,
+      issuedAt: it.issuedAt,
+      updatedAt: it.updatedAt,
+      voidReason: it.voidReason,
+    }));
   }
 
+  /** @deprecated Kept for backward compatibility with legacy tests */
   async issueCharge(params: {
     studentId: string;
     chargeTemplateId?: string;
     title: string;
     chargeType: ChargeType;
-    issuedAmount: number; // in centavos
+    issuedAmount: number;
     relatedEventId?: string;
     relatedOccurrenceId?: string;
     remarks?: string;
   }): Promise<StudentCharge> {
-    if (!params.studentId) {
-      throw new Error('Target student is required.');
-    }
-    if (!params.title || !params.title.trim()) {
-      throw new Error('Charge title is required.');
-    }
-    if (params.issuedAmount <= 0) {
-      throw new Error('Issued charge amount must be greater than 0.');
-    }
-
-    const store = await this.repo.getData();
-    const now = new Date().toISOString();
-
-    const charge: StudentCharge = {
-      id: generateId('chg'),
+    const db = await getDatabase();
+    const activeSem = await db.queryOne<{ id: string }>('SELECT id FROM semesters WHERE status = ?', ['ACTIVE']);
+    const semesterId = activeSem?.id || 'sem_default';
+    const ob = await this.issueManualFine({
       studentId: params.studentId,
-      chargeTemplateId: params.chargeTemplateId,
-      title: params.title.trim(),
-      chargeType: params.chargeType,
-      issuedAmount: Math.round(params.issuedAmount),
+      semesterId,
+      title: params.title,
+      amountCentavos: params.issuedAmount,
+      ruleId: params.chargeTemplateId,
+    });
+    return {
+      id: ob.id,
+      studentId: ob.studentId,
+      chargeTemplateId: ob.ruleId || undefined,
+      title: ob.title,
+      chargeType: ob.type,
+      issuedAmount: ob.amountCentavos,
       paidAmount: 0,
       status: 'UNPAID',
-      relatedEventId: params.relatedEventId,
-      relatedOccurrenceId: params.relatedOccurrenceId,
-      remarks: params.remarks?.trim() || undefined,
-      issuedAt: now,
-      updatedAt: now
+      issuedAt: ob.issuedAt,
+      updatedAt: ob.updatedAt,
     };
-
-    store.charges.unshift(charge);
-    await this.repo.saveData(store);
-    return charge;
   }
 
+  /** @deprecated Kept for backward compatibility with legacy tests */
   async voidCharge(chargeId: string, reason: string): Promise<StudentCharge> {
-    if (!reason || !reason.trim()) {
-      throw new Error('Reason is required to void a charge.');
-    }
-
-    const store = await this.repo.getData();
-    const target = store.charges.find(c => c.id === chargeId);
-    if (!target) {
-      throw new Error('Charge not found.');
-    }
-    if (target.status === 'PAID') {
-      throw new Error('Cannot void a fully paid charge.');
-    }
-
-    target.status = 'VOID';
-    target.voidReason = reason.trim();
-    target.updatedAt = new Date().toISOString();
-
-    await this.repo.saveData(store);
-    return target;
-  }
-
-  // ===================== WALLETS & LEDGER =====================
-
-  async getOrCreateWallet(studentId: string): Promise<Wallet> {
-    const store = await this.repo.getData();
-    let wallet = store.wallets.find(w => w.studentId === studentId);
-
-    if (!wallet) {
-      const now = new Date().toISOString();
-      wallet = {
-        id: generateId('wal'),
-        studentId,
-        status: 'ACTIVE',
-        createdAt: now,
-        updatedAt: now
-      };
-      store.wallets.push(wallet);
-      await this.repo.saveData(store);
-    }
-
-    return wallet;
-  }
-
-  async getWalletTransactions(walletId: string): Promise<WalletTransaction[]> {
-    const store = await this.repo.getData();
-    return store.transactions.filter(t => t.walletId === walletId);
-  }
-
-  async getStudentTransactions(studentId: string): Promise<WalletTransaction[]> {
-    const store = await this.repo.getData();
-    return store.transactions.filter(t => t.studentId === studentId);
-  }
-
-  async calculateWalletBalance(studentId: string): Promise<number> {
-    const store = await this.repo.getData();
-    const studentTxns = store.transactions.filter(t => t.studentId === studentId);
-
-    let balance = 0;
-    for (const txn of studentTxns) {
-      switch (txn.type) {
-        case 'TOP_UP':
-        case 'ADJUSTMENT_ADD':
-        case 'PAYMENT_REVERSAL':
-          balance += txn.amount;
-          break;
-        case 'PAYMENT':
-        case 'ADJUSTMENT_DEDUCT':
-        case 'TOPUP_REVERSAL':
-          balance -= txn.amount;
-          break;
-      }
-    }
-    return balance;
-  }
-
-  async topUpWallet(studentId: string, amountCentavos: number, note?: string): Promise<WalletTransaction> {
-    if (amountCentavos <= 0) {
-      throw new Error('Top-up amount must be strictly positive.');
-    }
-
-    const store = await this.repo.getData();
-    let wallet = store.wallets.find(w => w.studentId === studentId);
-    if (!wallet) {
-      wallet = await this.getOrCreateWallet(studentId);
-      // reload store
-      return this.topUpWallet(studentId, amountCentavos, note);
-    }
-
-    if (wallet.status === 'FROZEN') {
-      throw new Error('Cannot top up a FROZEN wallet.');
-    }
-
-    const ref = generateReferenceNumber('TOP');
-    const transaction: WalletTransaction = {
-      id: generateId('txn'),
-      walletId: wallet.id,
-      studentId,
-      type: 'TOP_UP',
-      amount: Math.round(amountCentavos),
-      referenceNumber: ref,
-      description: note?.trim() || 'Simulated Cash Top-up',
-      createdAt: new Date().toISOString()
+    await this.voidObligation(chargeId, reason, 'officer_default');
+    return {
+      id: chargeId,
+      studentId: '',
+      title: '',
+      chargeType: 'FINE',
+      issuedAmount: 0,
+      paidAmount: 0,
+      status: 'VOID',
+      voidReason: reason,
+      issuedAt: '',
+      updatedAt: new Date().toISOString(),
     };
-
-    store.transactions.unshift(transaction);
-    await this.repo.saveData(store);
-    return transaction;
   }
 
-  // ===================== PAYMENTS & ALLOCATIONS =====================
-
+  /** @deprecated Kept for backward compatibility with legacy tests */
   async getPayments(studentId?: string): Promise<Payment[]> {
-    const store = await this.repo.getData();
-    if (studentId) {
-      return store.payments.filter(p => p.studentId === studentId);
-    }
-    return [...store.payments];
+    const list = await this.getAllPayments();
+    const filtered = studentId ? list.filter((p) => p.studentId === studentId) : list;
+    return filtered.map((p) => ({
+      id: p.id,
+      studentId: p.studentId,
+      referenceNumber: p.referenceNumber,
+      amount: p.amountCentavos,
+      paymentSource: p.source,
+      paymentChannel: p.channel,
+      status: p.status === 'POSTED' ? 'COMPLETED' : 'REVERSED',
+      processedAt: p.processedAt,
+      allocations: p.allocations.map((a) => ({
+        id: a.id,
+        paymentId: a.paymentId,
+        studentChargeId: a.obligationId,
+        amountApplied: a.amountCentavos,
+      })),
+    }));
   }
 
+  /** @deprecated Kept for backward compatibility with legacy tests */
   async processPayment(params: {
     studentId: string;
-    allocations: Array<{ chargeId: string; amountCentavos: number }>;
-    channel: 'NFC' | 'MANUAL';
+    allocations: { chargeId: string; amountCentavos: number }[];
+    channel?: PaymentChannel;
+    notes?: string;
   }): Promise<Payment> {
-    const { studentId, allocations, channel } = params;
+    const total = params.allocations.reduce((sum, a) => sum + a.amountCentavos, 0);
+    const db = await getDatabase();
+    const activeSem = await db.queryOne<{ id: string }>('SELECT id FROM semesters WHERE status = ?', ['ACTIVE']);
+    const semesterId = activeSem?.id || 'sem_default';
 
-    if (!studentId) {
-      throw new Error('Student is required.');
-    }
-    if (!allocations || allocations.length === 0) {
-      throw new Error('At least one charge allocation is required.');
-    }
-
-    const totalToPay = allocations.reduce((sum, a) => sum + Math.round(a.amountCentavos), 0);
-    if (totalToPay <= 0) {
-      throw new Error('Total payment amount must be greater than 0.');
-    }
-
-    const store = await this.repo.getData();
-    const wallet = store.wallets.find(w => w.studentId === studentId);
-    if (!wallet) {
-      throw new Error('Student does not have an active wallet.');
-    }
-    if (wallet.status === 'FROZEN') {
-      throw new Error('Cannot process payment from a FROZEN wallet.');
-    }
-
-    // Verify balance
-    const currentBalance = await this.calculateWalletBalance(studentId);
-    if (currentBalance < totalToPay) {
-      throw new Error(
-        `Insufficient wallet balance. Available: ₱${(currentBalance / 100).toFixed(2)}, Required: ₱${(totalToPay / 100).toFixed(2)}.`
-      );
-    }
-
-    // Verify charges
-    const paymentAllocations: PaymentAllocation[] = [];
-    const paymentId = generateId('pay');
-    const ref = generateReferenceNumber('PAY');
-    const now = new Date().toISOString();
-
-    for (const alloc of allocations) {
-      const charge = store.charges.find(c => c.id === alloc.chargeId);
-      if (!charge) {
-        throw new Error(`Charge [${alloc.chargeId}] not found.`);
-      }
-      if (charge.studentId !== studentId) {
-        throw new Error('Cannot pay a charge belonging to another student.');
-      }
-      if (charge.status === 'VOID') {
-        throw new Error(`Cannot pay voided charge: "${charge.title}".`);
-      }
-      if (charge.status === 'PAID') {
-        throw new Error(`Charge "${charge.title}" is already fully paid.`);
-      }
-
-      const remaining = charge.issuedAmount - charge.paidAmount;
-      if (alloc.amountCentavos > remaining) {
-        throw new Error(`Allocation for "${charge.title}" exceeds remaining balance of ₱${(remaining / 100).toFixed(2)}.`);
-      }
-
-      // Update charge
-      charge.paidAmount += Math.round(alloc.amountCentavos);
-      charge.status = charge.paidAmount >= charge.issuedAmount ? 'PAID' : 'PARTIALLY_PAID';
-      charge.updatedAt = now;
-
-      paymentAllocations.push({
-        id: generateId('alc'),
-        paymentId,
-        studentChargeId: charge.id,
-        amountApplied: Math.round(alloc.amountCentavos)
-      });
-    }
-
-    // Create payment record
-    const payment: Payment = {
-      id: paymentId,
-      studentId,
-      referenceNumber: ref,
-      amount: totalToPay,
-      paymentSource: 'WALLET',
-      paymentChannel: channel,
-      status: 'COMPLETED',
-      processedAt: now,
-      allocations: paymentAllocations
-    };
-
-    // Create wallet debit ledger entry
-    const debitTxn: WalletTransaction = {
-      id: generateId('txn'),
-      walletId: wallet.id,
-      studentId,
-      type: 'PAYMENT',
-      amount: totalToPay,
-      referenceNumber: ref,
-      relatedPaymentId: paymentId,
-      description: `Payment for ${allocations.length} charge(s)`,
-      createdAt: now
-    };
-
-    store.payments.unshift(payment);
-    store.transactions.unshift(debitTxn);
-
-    // Atomic commit
-    await this.repo.saveData(store);
-    return payment;
-  }
-
-  async reversePayment(paymentId: string, reason: string, _reversedByUserId = 'officer'): Promise<Payment> {
-    void _reversedByUserId;
-    if (!reason || !reason.trim()) {
-      throw new Error('A reversal reason is mandatory.');
-    }
-
-    const store = await this.repo.getData();
-    const payment = store.payments.find(p => p.id === paymentId);
-    if (!payment) {
-      throw new Error('Payment not found.');
-    }
-    if (payment.status === 'REVERSED') {
-      throw new Error('Payment is already reversed.');
-    }
-
-    const now = new Date().toISOString();
-    payment.status = 'REVERSED';
-    (payment as any).reversedAt = now;
-    (payment as any).reversalReason = reason.trim();
-
-    // Revert charge paid amounts
-    for (const alloc of payment.allocations) {
-      const charge = store.charges.find(c => c.id === alloc.studentChargeId);
-      if (charge) {
-        charge.paidAmount = Math.max(0, charge.paidAmount - alloc.amountApplied);
-        if (charge.paidAmount === 0) {
-          charge.status = 'UNPAID';
-        } else if (charge.paidAmount < charge.issuedAmount) {
-          charge.status = 'PARTIALLY_PAID';
-        }
-        charge.updatedAt = now;
-      }
-    }
-
-    // Refund wallet if payment was from wallet
-    if (payment.paymentSource === 'WALLET') {
-      const wallet = store.wallets.find(w => w.studentId === payment.studentId);
-      if (wallet) {
-        const refundTxn: WalletTransaction = {
-          id: generateId('txn_rev'),
-          walletId: wallet.id,
-          studentId: payment.studentId,
-          type: 'PAYMENT_REVERSAL',
-          amount: payment.amount,
-          referenceNumber: 'REV-' + payment.referenceNumber,
-          relatedPaymentId: payment.id,
-          description: `Payment Reversal: ${reason.trim()}`,
-          createdAt: now
-        };
-        store.transactions.unshift(refundTxn);
-      }
-    }
-
-    await this.repo.saveData(store);
-    return payment;
-  }
-
-  async getFinanceSummary(): Promise<FinanceSummary> {
-    const store = await this.repo.getData();
-
-    let totalOutstanding = 0;
-    let unpaidCount = 0;
-    for (const c of store.charges) {
-      if (c.status === 'UNPAID' || c.status === 'PARTIALLY_PAID') {
-        totalOutstanding += (c.issuedAmount - c.paidAmount);
-        unpaidCount++;
-      }
-    }
-
-    let totalPayments = 0;
-    for (const p of store.payments) {
-      if (p.status === 'COMPLETED') {
-        totalPayments += p.amount;
-      }
-    }
-
-    // Sum active wallet credits across all students
-    let totalCredits = 0;
-    for (const t of store.transactions) {
-      if (t.type === 'TOP_UP' || t.type === 'ADJUSTMENT_ADD' || t.type === 'PAYMENT_REVERSAL') {
-        totalCredits += t.amount;
-      } else if (t.type === 'PAYMENT' || t.type === 'ADJUSTMENT_DEDUCT' || t.type === 'TOPUP_REVERSAL') {
-        totalCredits -= t.amount;
-      }
-    }
+    const result = await this.recordPayment({
+      studentId: params.studentId,
+      semesterId,
+      amountCentavos: total,
+      source: 'CASH',
+      channel: params.channel || 'MANUAL',
+      allocations: params.allocations.map((a) => ({
+        obligationId: a.chargeId,
+        amountCentavos: a.amountCentavos,
+      })),
+      notes: params.notes,
+      actorUserId: 'officer_default',
+    });
 
     return {
-      totalOutstandingCentavos: totalOutstanding,
-      totalSimulatedWalletCreditsCentavos: Math.max(0, totalCredits),
-      totalPaymentsCollectedCentavos: totalPayments,
-      unpaidChargesCount: unpaidCount,
-      activeWalletsCount: store.wallets.filter(w => w.status === 'ACTIVE').length
+      id: result.paymentId,
+      studentId: params.studentId,
+      referenceNumber: result.referenceNumber,
+      amount: total,
+      paymentSource: 'CASH',
+      paymentChannel: params.channel || 'MANUAL',
+      status: 'COMPLETED',
+      processedAt: new Date().toISOString(),
+      allocations: params.allocations.map((a) => ({
+        id: generateId('pa'),
+        paymentId: result.paymentId,
+        studentChargeId: a.chargeId,
+        amountApplied: a.amountCentavos,
+      })),
     };
+  }
+
+  /** @deprecated UniTap 2.0 retired wallet. Always returns 0. */
+  async calculateWalletBalance(_studentId: string): Promise<number> {
+    void _studentId;
+    return 0;
+  }
+
+  /** @deprecated UniTap 2.0 retired wallet */
+  async getOrCreateWallet(studentId: string): Promise<Wallet> {
+    return {
+      id: 'wal_' + studentId,
+      studentId,
+      status: 'ACTIVE',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+  }
+
+  /** @deprecated UniTap 2.0 retired wallet */
+  async topUpWallet(
+    studentId: string,
+    amountCentavos: number,
+    note?: string
+  ): Promise<WalletTransaction> {
+    return {
+      id: 'txn_' + Date.now(),
+      walletId: 'wal_' + studentId,
+      studentId,
+      type: 'TOP_UP',
+      amount: amountCentavos,
+      referenceNumber: generateReferenceNumber('TOP'),
+      description: note || 'Deprecated Top-up',
+      createdAt: new Date().toISOString(),
+    };
+  }
+
+  /** @deprecated UniTap 2.0 retired wallet */
+  async getWalletTransactions(_walletId: string): Promise<WalletTransaction[]> {
+    void _walletId;
+    return [];
+  }
+
+  /** @deprecated UniTap 2.0 retired wallet */
+  async getStudentTransactions(_studentId: string): Promise<WalletTransaction[]> {
+    void _studentId;
+    return [];
   }
 }
 

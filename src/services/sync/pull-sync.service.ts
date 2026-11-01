@@ -20,7 +20,76 @@ export class PullSyncService {
     try {
       SyncStatusService.setState('SYNCING');
 
-      // 2. Attempt RPC pull if available
+      // 2. Attempt single-request batch pull via sync_pull_batch RPC
+      try {
+        const { data: batchData, error: batchErr } = await supabase.rpc('sync_pull_batch', {
+          p_since: lastSyncAt,
+          p_limit: 500,
+        });
+
+        if (!batchErr && batchData && typeof batchData === 'object') {
+          const tableKeys = [
+            'academic_years',
+            'semesters',
+            'programs',
+            'year_levels',
+            'sections',
+            'event_categories',
+            'obligation_rules',
+            'events',
+            'event_occurrences',
+            'event_participants',
+            'students',
+            'student_enrollments',
+            'nfc_cards',
+            'attendance_records',
+            'student_obligations',
+            'payments',
+            'payment_allocations',
+          ];
+
+          await db.transaction(async (tx) => {
+            for (const table of tableKeys) {
+              const rows = batchData[table];
+              if (Array.isArray(rows) && rows.length > 0) {
+                for (const row of rows) {
+                  const keys = Object.keys(row);
+                  const placeholders = keys.map(() => '?').join(', ');
+                  const values = keys.map((k) => {
+                    const val = row[k];
+                    if (val === null || val === undefined) return null;
+                    if (typeof val === 'boolean') return val ? 1 : 0;
+                    if (typeof val === 'object') return JSON.stringify(val);
+                    return val;
+                  });
+                  await tx.execute(
+                    `INSERT OR REPLACE INTO ${table} (${keys.join(', ')}) VALUES (${placeholders})`,
+                    values
+                  );
+                  appliedCount++;
+                }
+              }
+            }
+
+            const now = batchData.server_time || new Date().toISOString();
+            await tx.execute(
+              `INSERT INTO sync_state (device_id, server_cursor, last_pull_at, last_success_at)
+               VALUES ('dev_default', '0', ?, ?)
+               ON CONFLICT(device_id) DO UPDATE SET last_pull_at = excluded.last_pull_at, last_success_at = excluded.last_success_at`,
+              [now, now]
+            );
+          });
+
+          const syncTime = batchData.server_time || new Date().toISOString();
+          SyncStatusService.setLastSync(syncTime);
+          SyncStatusService.setState('SYNCED');
+          return { appliedCount };
+        }
+      } catch {
+        // Fallback to cursor-based or table-by-table REST queries
+      }
+
+      // 3. Fallback: Attempt cursor-based RPC pull if available
       const { data, error } = await supabase.rpc('sync_pull_changes', {
         p_since_cursor: lastCursor,
         p_limit: 100,
@@ -67,13 +136,24 @@ export class PullSyncService {
       }
 
       // 3. Fallback: Incremental polling on active tables for updated records
+      const { authService } = await import('@/services/auth.service');
+      const studentId = authService.user.value?.student_id;
+      const role = authService.role.value;
+
       const syncTables = ['events', 'event_occurrences', 'attendance_records', 'student_obligations', 'payments'];
       for (const t of syncTables) {
-        const { data: updatedRows, error: qErr } = await supabase
+        const timeColumn = t === 'payments' ? 'processed_at' : 'updated_at';
+        let q = supabase
           .from(t)
           .select('*')
-          .gt('updated_at', lastSyncAt)
+          .gt(timeColumn, lastSyncAt)
           .limit(100);
+
+        if (role === 'STUDENT' && studentId && ['attendance_records', 'student_obligations', 'payments'].includes(t)) {
+          q = q.eq('student_id', studentId);
+        }
+
+        const { data: updatedRows, error: qErr } = await q;
 
         if (!qErr && updatedRows && updatedRows.length > 0) {
           await db.transaction(async (tx) => {

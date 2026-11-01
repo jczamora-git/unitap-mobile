@@ -3,7 +3,7 @@ export interface AcademicYear {
   label: string; // e.g. '2026-2027'
   starts_on: string;
   ends_on: string;
-  status: 'PLANNED' | 'ACTIVE' | 'ARCHIVED';
+  status: 'PLANNED' | 'UPCOMING' | 'ACTIVE' | 'CLOSED' | 'ARCHIVED';
 }
 
 export interface Semester {
@@ -13,6 +13,39 @@ export interface Semester {
   starts_on: string;
   ends_on: string;
   status: 'PLANNED' | 'ACTIVE' | 'CLOSED';
+}
+
+export interface EventCategory {
+  id: string;
+  name: string;
+  description?: string | null;
+  code: string;
+  status: 'ACTIVE' | 'INACTIVE';
+  sort_order: number;
+  created_by_user_id?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface YearLevel {
+  id: string;
+  level_number: number;
+  display_name: string;
+  status: 'ACTIVE' | 'INACTIVE';
+  sort_order: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface SectionRecord {
+  id: string;
+  section_name: string;
+  year_level_id: string;
+  program_id?: string | null;
+  academic_year_id?: string | null;
+  status: 'ACTIVE' | 'INACTIVE';
+  created_at: string;
+  updated_at: string;
 }
 
 export interface Program {
@@ -43,6 +76,8 @@ export interface StudentEnrollment {
   program_id?: string | null;
   year_level: number;
   section: string;
+  year_level_id?: string | null;
+  section_id?: string | null;
   enrollment_status: 'ENROLLED' | 'TRANSFERRED' | 'DROPPED' | 'COMPLETED';
   first_name_snapshot: string;
   middle_name_snapshot?: string | null;
@@ -90,6 +125,35 @@ export interface UserRoleRecord {
   revoked_at?: string | null;
 }
 
+export type OfficerPermissionPreset = 'ATTENDANCE' | 'FINANCE' | 'FULL' | 'CUSTOM';
+export type OfficerScopeType = 'ORGANIZATION' | 'PROGRAM' | 'SECTION' | 'EVENT';
+export type OfficerStatus = 'ACTIVE' | 'PENDING' | 'SUSPENDED' | 'REVOKED';
+
+export interface OfficerAppointmentRecord {
+  id: string;
+  user_id?: string | null;
+  student_id?: string | null;
+  full_name: string;
+  email: string;
+  permission_preset: OfficerPermissionPreset;
+  custom_permissions_json?: string;
+  academic_year_id?: string | null;
+  semester_id?: string | null;
+  appointment_start: string;
+  appointment_end: string;
+  scope_type: OfficerScopeType;
+  scope_id?: string | null;
+  status: OfficerStatus;
+  invitation_code?: string | null;
+  invitation_sent_at?: string | null;
+  assigned_by_user_id: string;
+  created_at: string;
+  updated_at: string;
+  suspended_at?: string | null;
+  revoked_at?: string | null;
+  last_activity_at?: string | null;
+}
+
 export interface DeviceRecord {
   id: string;
   device_name: string;
@@ -100,6 +164,8 @@ export interface DeviceRecord {
   last_sync_at?: string | null;
 }
 
+export type StudentActivationStatus = 'NOT_ACTIVATED' | 'ACTIVATION_PENDING' | 'ACTIVATED' | 'REQUIRES_ATTENTION';
+
 export interface ActivationClaim {
   id: string;
   student_id: string;
@@ -108,6 +174,20 @@ export interface ActivationClaim {
   expires_at: string;
   used_at?: string | null;
   revoked_at?: string | null;
+  created_at: string;
+  attempt_count?: number;
+  max_attempts?: number;
+  claimed_by_user_id?: string | null;
+  last_attempt_at?: string | null;
+}
+
+export interface ActivationClaimAuditRecord {
+  id: string;
+  claim_id?: string | null;
+  student_id: string;
+  action: 'ISSUED' | 'REISSUED' | 'REVOKED' | 'ATTEMPT_FAILED' | 'CLAIMED';
+  performed_by_user_id?: string | null;
+  notes?: string | null;
   created_at: string;
 }
 
@@ -129,6 +209,7 @@ export interface EventRecord {
   title: string;
   description?: string | null;
   event_type: string;
+  category_id?: string | null;
   audience_type: 'ALL' | 'YEAR' | 'SECTION';
   audience_json: string;
   attendance_required: number;
@@ -194,17 +275,33 @@ export interface ObligationRule {
   created_at: string;
 }
 
+export interface EventParticipantRecord {
+  id: string;
+  occurrence_id: string;
+  student_id: string;
+  enrollment_id?: string;
+  attendance_required: number;
+  excused: number;
+  excuse_reason?: string | null;
+  excused_by_user_id?: string | null;
+  expected?: number;
+  added_at: string;
+}
+
 export interface StudentObligation {
   id: string;
   student_id: string;
   semester_id: string;
   rule_id?: string | null;
+  related_event_id?: string | null;
   related_occurrence_id?: string | null;
   title: string;
   type: 'FINE' | 'CONTRIBUTION';
   amount_centavos: number;
   status: 'ACTIVE' | 'VOID';
+  due_date?: string | null;
   issued_by_user_id?: string | null;
+  batch_id?: string | null;
   issued_at: string;
   voided_at?: string | null;
   void_reason?: string | null;
@@ -218,11 +315,12 @@ export interface PaymentRecord {
   reference_number: string;
   idempotency_key: string;
   amount_centavos: number;
-  source: 'SIMULATED_WALLET' | 'CASH_RECORDED';
+  source: 'CASH_RECORDED' | 'MANUAL_TRANSFER_RECORD' | 'SIMULATED_WALLET';
   channel: 'NFC' | 'MANUAL';
   status: 'POSTED' | 'REVERSED';
   processed_by_user_id: string;
   device_id?: string | null;
+  notes?: string | null;
   processed_at: string;
   reversed_at?: string | null;
   reversed_by_user_id?: string | null;

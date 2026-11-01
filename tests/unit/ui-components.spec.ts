@@ -4,6 +4,10 @@ import UniButton from '@/components/ui/UniButton.vue';
 import UniPageHeader from '@/components/ui/UniPageHeader.vue';
 import UniDock from '@/components/navigation/UniDock.vue';
 import UniDialog from '@/components/ui/UniDialog.vue';
+import UniPagination from '@/components/ui/UniPagination.vue';
+import UniExpandableRow from '@/components/ui/UniExpandableRow.vue';
+import UniTreeView from '@/components/ui/UniTreeView.vue';
+
 
 // Mock vue-router for components calling useRouter
 vi.mock('vue-router', () => ({
@@ -162,6 +166,97 @@ describe('UI Component Regression Suite', () => {
       expect(wrapper.emitted('cancel')).toBeTruthy();
       expect(wrapper.emitted('close')).toBeTruthy();
       expect(wrapper.emitted('update:isOpen')?.[0]).toEqual([false]);
+    });
+  });
+
+  describe('UniPagination', () => {
+    it('calculates range and page count correctly', () => {
+      const wrapper = mount(UniPagination, {
+        props: {
+          totalItems: 45,
+          pageSize: 10,
+          currentPage: 2,
+        },
+      });
+
+      expect(wrapper.find('.range-text').text()).toContain('Showing 11–20 of 45');
+      expect(wrapper.find('.page-indicator').text()).toBe('Page 2 of 5');
+    });
+
+    it('emits page update when clicking next and prev', async () => {
+      const wrapper = mount(UniPagination, {
+        props: {
+          totalItems: 30,
+          pageSize: 10,
+          currentPage: 2,
+        },
+      });
+
+      const buttons = wrapper.findAll('.pagination-btn');
+      const prevBtn = buttons[0];
+      const nextBtn = buttons[1];
+
+      await nextBtn.trigger('click');
+      expect(wrapper.emitted('update:currentPage')?.[0]).toEqual([3]);
+
+      await prevBtn.trigger('click');
+      expect(wrapper.emitted('update:currentPage')?.[1]).toEqual([1]);
+    });
+  });
+
+  describe('UniExpandableRow', () => {
+    it('toggles expansion state and emits events', async () => {
+      const wrapper = mount(UniExpandableRow, {
+        props: {
+          title: 'Juan Dela Cruz',
+          subtitle: '2023-0001 • BSIT 2A',
+          badge: 'Unpaid',
+          amount: '₱100.00',
+        },
+        slots: {
+          content: '<div class="test-details">Fine details</div>',
+        },
+      });
+
+      expect(wrapper.find('.row-title').text()).toBe('Juan Dela Cruz');
+      expect(wrapper.find('.row-badge').text()).toBe('Unpaid');
+      expect(wrapper.find('.row-amount').text()).toBe('₱100.00');
+
+      // Click to expand
+      await wrapper.find('.row-header').trigger('click');
+      expect(wrapper.emitted('toggle')?.[0]).toEqual([true]);
+      expect(wrapper.classes()).toContain('is-open');
+    });
+  });
+
+  describe('UniTreeView', () => {
+    it('renders parent nodes and children with expand/collapse', async () => {
+      const sampleNodes = [
+        {
+          id: 'yl_1',
+          label: '1st Year',
+          count: 2,
+          children: [
+            { id: 'sec_1', label: '1F1', meta: '35 enrolled' },
+            { id: 'sec_2', label: '1F2', meta: '40 enrolled' },
+          ],
+        },
+      ];
+
+      const wrapper = mount(UniTreeView, {
+        props: {
+          nodes: sampleNodes,
+          defaultExpandAll: true,
+        },
+      });
+
+      expect(wrapper.find('.node-label').text()).toBe('1st Year');
+      expect(wrapper.find('.node-count-pill').text()).toBe('2');
+      expect(wrapper.findAll('.tree-child-item')).toHaveLength(2);
+
+      // Toggle collapse
+      await wrapper.find('.node-header').trigger('click');
+      expect(wrapper.emitted('node-toggle')?.[0]).toEqual(['yl_1', false]);
     });
   });
 });

@@ -3,7 +3,7 @@ import { localEventRepository } from '@/storage/event-storage.service';
 import { localFinanceRepository } from '@/storage/finance-storage.service';
 import type { Student } from '@/types/student';
 import type { Event, EventOccurrence, OccurrenceParticipant } from '@/types/event';
-import type { StudentCharge, Wallet, WalletTransaction } from '@/types/finance';
+import type { StudentCharge } from '@/types/finance';
 
 export class DemoDataService {
   async isDemoDataLoaded(): Promise<boolean> {
@@ -275,31 +275,7 @@ export class DemoDataService {
         }
       ];
 
-      // Give demo_stu_1 a wallet with ₱100.00 credits
-      const demoWallet: Wallet = {
-        id: 'demo_wal_1',
-        studentId: 'demo_stu_1',
-        status: 'ACTIVE',
-        createdAt: now,
-        updatedAt: now
-      };
-
-      const demoTxn: WalletTransaction = {
-        id: 'demo_txn_topup_1',
-        walletId: 'demo_wal_1',
-        studentId: 'demo_stu_1',
-        type: 'TOP_UP',
-        amount: 10000, // ₱100.00
-        referenceNumber: 'DEMO-TOPUP-100',
-        description: 'Initial Demo Credits',
-        createdAt: now
-      };
-
       finStore.charges.unshift(...demoCharges);
-      if (!finStore.wallets.some(w => w.studentId === 'demo_stu_1')) {
-        finStore.wallets.unshift(demoWallet);
-        finStore.transactions.unshift(demoTxn);
-      }
       await localFinanceRepository.saveData(finStore);
     }
 

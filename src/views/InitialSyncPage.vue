@@ -1,246 +1,199 @@
-<template>
-  <ion-page>
-    <ion-content class="ion-padding sync-content">
-      <div class="sync-card">
-        <div class="sync-header">
-          <div class="sync-icon-circle">
-            <ion-icon :icon="cloudDownloadOutline" class="sync-icon" />
-          </div>
-          <h1 class="sync-title">Initializing UniTap 2.0</h1>
-          <p class="sync-subtitle">Downloading your authorized records for offline access...</p>
-        </div>
-
-        <div class="progress-bar-wrap">
-          <div class="progress-bar-fill" :style="{ width: progress.percent + '%' }"></div>
-        </div>
-        <div class="progress-stats">
-          <span>{{ progress.currentTable ? 'Table: ' + progress.currentTable : 'Preparing...' }}</span>
-          <span>{{ progress.percent }}%</span>
-        </div>
-
-        <div class="sync-checklist">
-          <div class="check-item" :class="{ done: progress.percent >= 20 }">
-            <ion-icon :icon="progress.percent >= 20 ? checkmarkCircle : ellipseOutline" />
-            <span>Academic Calendars & Semesters</span>
-          </div>
-          <div class="check-item" :class="{ done: progress.percent >= 50 }">
-            <ion-icon :icon="progress.percent >= 50 ? checkmarkCircle : ellipseOutline" />
-            <span>Student Profiles & Enrollments</span>
-          </div>
-          <div class="check-item" :class="{ done: progress.percent >= 75 }">
-            <ion-icon :icon="progress.percent >= 75 ? checkmarkCircle : ellipseOutline" />
-            <span>NFC Cards & Attendance Sessions</span>
-          </div>
-          <div class="check-item" :class="{ done: progress.percent >= 90 }">
-            <ion-icon :icon="progress.percent >= 90 ? checkmarkCircle : ellipseOutline" />
-            <span>Fines, Contributions & Balances</span>
-          </div>
-          <div class="check-item" :class="{ done: hydration === 'READY' }">
-            <ion-icon :icon="hydration === 'READY' ? checkmarkCircle : ellipseOutline" />
-            <span>Database Integrity & Offline Readiness</span>
-          </div>
-        </div>
-
-        <div v-if="hydration === 'FAILED'" class="error-banner">
-          <ion-icon :icon="alertCircle" />
-          <span>{{ progress.error || 'Sync interrupted. Please check internet connection.' }}</span>
-          <button class="btn-retry" @click="startHydration">Retry Download</button>
-        </div>
-
-        <div v-if="hydration === 'READY'" class="ready-banner">
-          <button class="btn-proceed" @click="proceedToDashboard">
-            Open Dashboard
-          </button>
-        </div>
-      </div>
-    </ion-content>
-  </ion-page>
-</template>
-
 <script setup lang="ts">
-import { onMounted } from 'vue';
-import { useRouter } from 'vue-router';
-import { IonPage, IonContent, IonIcon } from '@ionic/vue';
-import {
-  cloudDownloadOutline,
-  checkmarkCircle,
-  ellipseOutline,
-  alertCircle,
-} from 'ionicons/icons';
+import { ref, computed, onMounted } from 'vue';
+import { useRouter, useRoute } from 'vue-router';
+import { IonPage, IonContent } from '@ionic/vue';
 import { useSyncStatus } from '@/composables/useSyncStatus';
 import { useAuth } from '@/composables/useAuth';
 import { SupabaseAuthService } from '@/integrations/supabase/auth.service';
 import { InitialSyncService } from '@/services/sync/initial-sync.service';
+import { onboardingService } from '@/services/onboarding.service';
+import { useOnboarding } from '@/composables/useOnboarding';
+import { getDatabase } from '@/database/database';
+import {
+  UniWelcomeSetup,
+  UniDataUpdateScreen,
+  type SetupStage,
+  type UpdateStage,
+} from '@/components/ui';
 
 const router = useRouter();
+const route = useRoute();
 const { role, user } = useAuth();
 const { hydration, progress } = useSyncStatus();
 
-async function startHydration() {
-  if (!role.value) {
-    await SupabaseAuthService.initialize();
+const isValidatingSession = ref(true);
+const isNavigating = ref(false);
+const isReturningUser = ref(false);
+const hasCachedOfflineData = ref(false);
+
+/**
+ * Maps genuine synchronization & session milestones for returning user updates.
+ */
+const returningUpdateStage = computed<UpdateStage>(() => {
+  if (hydration.value === 'FAILED') {
+    return 'FAILED';
   }
-  const currentRole = role.value || 'DEVADMIN';
-  const userId = user.value?.id || 'devadmin';
-  const studentId = user.value?.student_id;
+  if (hydration.value === 'READY') {
+    return 'COMPLETE';
+  }
+  if (hydration.value === 'VERIFYING') {
+    return 'FINALIZING';
+  }
+  if (hydration.value === 'DOWNLOADING') {
+    return progress.value.percent < 45 ? 'PREPARING' : 'UPDATING';
+  }
+  return 'PREPARING';
+});
 
-  const success = await InitialSyncService.performInitialHydration(
-    currentRole,
-    userId,
-    studentId
-  );
+/**
+ * Maps genuine synchronization & session milestones to friendly Windows OOBE-style stages.
+ * Strictly driven by real system state (never arbitrary time intervals alone).
+ */
+const currentStage = computed<SetupStage>(() => {
+  if (hydration.value === 'FAILED') {
+    return 'ERROR';
+  }
 
-  if (success) {
-    setTimeout(() => {
-      proceedToDashboard();
-    }, 800);
+  if (hydration.value === 'READY') {
+    return 'COMPLETE';
+  }
+
+  if (hydration.value === 'VERIFYING') {
+    return 'FINALIZING';
+  }
+
+  if (hydration.value === 'DOWNLOADING') {
+    // Stage 2 vs Stage 3 transition based on actual table download progress
+    if (progress.value.percent < 45) {
+      return 'PREPARING';
+    }
+    return 'HYDRATING';
+  }
+
+  // Initial authentication & session validation
+  if (isValidatingSession.value || hydration.value === 'NOT_INITIALIZED') {
+    return 'WELCOME';
+  }
+
+  return 'PREPARING';
+});
+
+/**
+ * Real progress percentage from SyncStatusService.
+ */
+const realProgressPercent = computed(() => {
+  if (currentStage.value === 'WELCOME') return 0;
+  if (currentStage.value === 'FINALIZING') return 95;
+  if (currentStage.value === 'COMPLETE') return 100;
+  return progress.value.percent;
+});
+
+/**
+ * Performs actual Supabase authentication check, SQLite database preparation,
+ * and initial data hydration.
+ */
+async function startHydration() {
+  isValidatingSession.value = true;
+
+  try {
+    if (!role.value) {
+      await SupabaseAuthService.initialize();
+    }
+
+    const currentRole = role.value || SupabaseAuthService.role.value || 'DEVADMIN';
+    const userId = user.value?.id || SupabaseAuthService.user.value?.id || 'devadmin';
+    const studentId = user.value?.student_id;
+
+    isValidatingSession.value = false;
+
+    const success = await InitialSyncService.performInitialHydration(
+      currentRole,
+      userId,
+      studentId
+    );
+
+    if (success) {
+      // Reassuring brief transition to "You're all set!" before navigating
+      setTimeout(() => {
+        proceedToDestination();
+      }, 950);
+    }
+  } catch (err: unknown) {
+    console.error('[InitialSyncPage] Setup error:', err);
+    isValidatingSession.value = false;
   }
 }
 
-function proceedToDashboard() {
+/**
+ * Role-aware destination navigation after successful initialization.
+ */
+async function proceedToDestination() {
+  if (isNavigating.value) return;
+  isNavigating.value = true;
+
+  const currentRole = role.value || SupabaseAuthService.role.value;
+
+  if (currentRole === 'STUDENT') {
+    const hasCompleted = await onboardingService.hasCompletedOnboarding();
+    if (!hasCompleted) {
+      useOnboarding().startOnboardingTour();
+    }
+  }
+
   router.replace('/tabs/home');
 }
 
-onMounted(() => {
+onMounted(async () => {
+  try {
+    const hasOnboarded = await onboardingService.hasCompletedOnboarding();
+    const isRehydrate = route.query.mode === 'rehydrate';
+    isReturningUser.value = hasOnboarded || isRehydrate;
+
+    // Check if offline cached data exists
+    const db = await getDatabase();
+    const st = await db.queryOne<{ count: number }>('SELECT count(*) as count FROM students');
+    hasCachedOfflineData.value = (st?.count || 0) > 0;
+  } catch {
+    hasCachedOfflineData.value = false;
+  }
+
   startHydration();
 });
 </script>
 
+<template>
+  <ion-page>
+    <ion-content :fullscreen="true" class="welcome-page-content">
+      <!-- Returning User Update Screen -->
+      <UniDataUpdateScreen
+        v-if="isReturningUser"
+        :stage="returningUpdateStage"
+        :progress-percent="realProgressPercent"
+        :error-message="progress.error || 'Check your connection and try again.'"
+        :allow-continue-offline="hasCachedOfflineData"
+        @retry="startHydration"
+        @continue-offline="proceedToDestination"
+        @complete="proceedToDestination"
+      />
+
+      <!-- First-Time Onboarding Screen (Windows OOBE Style) -->
+      <UniWelcomeSetup
+        v-else
+        :stage="currentStage"
+        :progress-percent="realProgressPercent"
+        :error-message="progress.error || 'Unable to establish local workspace'"
+        :error-details="progress.currentTable ? `Operation interrupted at stage: ${progress.currentTable}` : undefined"
+        :show-proceed-button="false"
+        @retry="startHydration"
+        @proceed="proceedToDestination"
+      />
+    </ion-content>
+  </ion-page>
+</template>
+
 <style scoped>
-.sync-content {
+.welcome-page-content {
   --background: var(--uni-background, #F8FAFC);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-
-.sync-card {
-  max-width: 480px;
-  margin: 40px auto;
-  background: #FFFFFF;
-  border: 1px solid var(--uni-border, #CBD5E1);
-  border-radius: 16px;
-  padding: 32px 24px;
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.05);
-}
-
-.sync-header {
-  text-align: center;
-  margin-bottom: 24px;
-}
-
-.sync-icon-circle {
-  width: 64px;
-  height: 64px;
-  background: #E6FFFA;
-  color: var(--uni-primary, #0F766E);
-  border-radius: 50%;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  margin: 0 auto 16px;
-}
-
-.sync-icon {
-  font-size: 32px;
-}
-
-.sync-title {
-  font-size: 1.4rem;
-  font-weight: 700;
-  color: var(--uni-ink, #0F172A);
-  margin-bottom: 8px;
-}
-
-.sync-subtitle {
-  font-size: 0.9rem;
-  color: var(--uni-muted, #64748B);
-}
-
-.progress-bar-wrap {
-  width: 100%;
-  height: 10px;
-  background: #E2E8F0;
-  border-radius: 5px;
-  overflow: hidden;
-  margin: 20px 0 8px;
-}
-
-.progress-bar-fill {
-  height: 100%;
-  background: var(--uni-primary, #0F766E);
-  transition: width 0.3s ease;
-}
-
-.progress-stats {
-  display: flex;
-  justify-content: space-between;
-  font-size: 0.8rem;
-  color: var(--uni-muted, #64748B);
-  font-family: monospace;
-}
-
-.sync-checklist {
-  margin: 24px 0;
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
-
-.check-item {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  font-size: 0.88rem;
-  color: var(--uni-muted, #64748B);
-}
-
-.check-item.done {
-  color: var(--uni-ink, #0F172A);
-  font-weight: 600;
-}
-
-.check-item.done ion-icon {
-  color: #059669;
-}
-
-.ready-banner, .error-banner {
-  margin-top: 24px;
-}
-
-.btn-proceed {
-  width: 100%;
-  padding: 14px;
-  background: var(--uni-primary, #0F766E);
-  color: #FFFFFF;
-  border: none;
-  border-radius: 8px;
-  font-weight: 700;
-  font-size: 1rem;
-  cursor: pointer;
-}
-
-.error-banner {
-  background: #FEF2F2;
-  border: 1px solid #FCA5A5;
-  color: #991B1B;
-  padding: 14px;
-  border-radius: 8px;
-  font-size: 0.88rem;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  align-items: center;
-}
-
-.btn-retry {
-  padding: 8px 16px;
-  background: #DC2626;
-  color: #FFFFFF;
-  border: none;
-  border-radius: 6px;
-  font-weight: 600;
-  cursor: pointer;
+  --color: var(--uni-text, #0F172A);
 }
 </style>
-

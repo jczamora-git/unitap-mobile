@@ -15,28 +15,35 @@ import {
   swapHorizontalOutline,
   closeCircleOutline,
   copyOutline,
-  walletOutline,
   receiptOutline,
   calendarOutline,
   alertCircleOutline,
-  addOutline
+  addOutline,
+  keyOutline,
+  shieldCheckmarkOutline,
+  refreshOutline,
 } from 'ionicons/icons';
 import { useStudents } from '@/composables/useStudents';
 import { useToast } from '@/composables/useToast';
 import { financeService } from '@/services/finance.service';
 import { attendanceService } from '@/services/attendance.service';
+import { StudentActivationService, type StudentActivationDetails } from '@/services/student-activation.service';
+import { SupabaseAuthService } from '@/integrations/supabase/auth.service';
+import { authService } from '@/services/auth.service';
 import { formatFullName, formatStudentAcademicSummary, formatYearLevel } from '@/utilities/student-formatters';
 import { formatPeso } from '@/utilities/finance-formatters';
 import { formatDate, formatTime } from '@/utilities/date-formatters';
-import type { StudentCharge, WalletTransaction } from '@/types/finance';
+import type { StudentCharge } from '@/types/finance';
 import EditStudentModal from '@/components/EditStudentModal.vue';
 import ReplaceRfidModal from '@/components/ReplaceRfidModal.vue';
 import { 
   UniPageHeader, 
   UniSegmentedControl, 
   UniDialog,
-  UniButton
+  UniButton,
+  UniSheet,
 } from '@/components/ui';
+import { haptics } from '@/utilities/haptics';
 
 const route = useRoute();
 const router = useRouter();
@@ -47,10 +54,22 @@ const isEditModalOpen = ref(false);
 const isReplaceModalOpen = ref(false);
 const activeTab = ref<'OVERVIEW' | 'ATTENDANCE' | 'FINANCE'>('OVERVIEW');
 
+// Activation details
+const activationDetails = ref<StudentActivationDetails | null>(null);
+const showCodeSheet = ref(false);
+const newlyIssuedCode = ref('');
+const isIssuingCode = ref(false);
+const showAuditHistory = ref(false);
+
 // Financial context
-const walletBalanceCentavos = ref(0);
+const totalBalanceCentavos = computed(() => {
+  return studentCharges.value.reduce((sum, c) => {
+    if (c.status === 'VOID') return sum;
+    return sum + Math.max(0, c.issuedAmount - c.paidAmount);
+  }, 0);
+});
 const studentCharges = ref<StudentCharge[]>([]);
-const studentTxns = ref<WalletTransaction[]>([]);
+const studentPayments = ref<import('@/types/finance').Payment[]>([]);
 
 // Attendance history
 const attendanceHistory = ref<Array<{
@@ -71,16 +90,77 @@ async function loadProfile() {
   if (id) {
     await getStudentById(id);
     if (currentStudent.value) {
-      walletBalanceCentavos.value = await financeService.calculateWalletBalance(id);
       studentCharges.value = await financeService.getCharges(id);
-      studentTxns.value = await financeService.getStudentTransactions(id);
+      studentPayments.value = await financeService.getPayments(id);
       attendanceHistory.value = await attendanceService.getStudentAttendanceHistory(id);
+      activationDetails.value = await StudentActivationService.getStudentActivationStatus(id);
     }
   }
 }
 
 onMounted(loadProfile);
 onIonViewWillEnter(loadProfile);
+
+const currentOfficerUserId = computed(() => {
+  return SupabaseAuthService.user.value?.id || authService.user.value?.id || 'officer_local';
+});
+
+async function handleIssueCode() {
+  if (!currentStudent.value) return;
+  haptics.medium();
+  isIssuingCode.value = true;
+
+  try {
+    const res = await StudentActivationService.issueActivationCode(
+      currentStudent.value.id,
+      currentOfficerUserId.value,
+      48
+    );
+
+    if (res.success && res.rawCode) {
+      newlyIssuedCode.value = res.rawCode;
+      showCodeSheet.value = true;
+      haptics.success();
+      await loadProfile();
+    } else {
+      await showToast(res.error || 'Failed to issue code', 'error');
+    }
+  } catch (err: unknown) {
+    await showToast((err as Error).message || 'Failed to issue code', 'error');
+  } finally {
+    isIssuingCode.value = false;
+  }
+}
+
+async function handleRevokeCode() {
+  if (!currentStudent.value || !activationDetails.value?.claimId) return;
+  haptics.warning();
+
+  try {
+    const res = await StudentActivationService.revokeActivationCode(
+      activationDetails.value.claimId,
+      currentStudent.value.id,
+      currentOfficerUserId.value,
+      'Officer manual revocation'
+    );
+
+    if (res.success) {
+      await showToast('Activation code revoked', 'info');
+      await loadProfile();
+    } else {
+      await showToast(res.error || 'Failed to revoke code', 'error');
+    }
+  } catch (err: unknown) {
+    await showToast((err as Error).message || 'Failed to revoke code', 'error');
+  }
+}
+
+function handleCopyIssuedCode() {
+  if (newlyIssuedCode.value) {
+    copyToClipboard(newlyIssuedCode.value, 'Activation Code');
+    haptics.light();
+  }
+}
 
 function handleCopyUid() {
   if (currentStudent.value?.rfidUid) {
@@ -256,7 +336,7 @@ async function handleDeleteStudent() {
             <div class="minimal-card overview-card">
               <div class="card-head-row">
                 <span class="card-title-text">Student Information</span>
-                <button class="edit-link-btn" @click="isEditModalOpen = true">
+                <button class="edit-link-btn" @click="router.push(`/students/${currentStudent.id}/edit`)">
                   <ion-icon :icon="createOutline" /> Edit
                 </button>
               </div>
@@ -281,6 +361,156 @@ async function handleDeleteStudent() {
                 <div class="info-row">
                   <span class="info-lbl">Section</span>
                   <span class="info-val font-mono">{{ currentStudent.section }}</span>
+                </div>
+              </div>
+            </div>
+
+            <!-- Account & Activation Status Card -->
+            <div class="minimal-card overview-card activation-card">
+              <div class="card-head-row">
+                <div class="activation-title-wrap">
+                  <ion-icon :icon="keyOutline" class="text-primary text-base" />
+                  <span class="card-title-text">Account &amp; Activation</span>
+                </div>
+                <span
+                  class="status-badge"
+                  :class="{
+                    'badge-success': activationDetails?.status === 'ACTIVATED',
+                    'badge-warning': activationDetails?.status === 'ACTIVATION_PENDING',
+                    'badge-danger': activationDetails?.status === 'REQUIRES_ATTENTION',
+                    'badge-neutral': activationDetails?.status === 'NOT_ACTIVATED' || !activationDetails
+                  }"
+                >
+                  {{
+                    activationDetails?.status === 'ACTIVATED' ? 'Activated' :
+                    activationDetails?.status === 'ACTIVATION_PENDING' ? 'Activation Pending' :
+                    activationDetails?.status === 'REQUIRES_ATTENTION' ? 'Requires Attention' :
+                    'Not Activated'
+                  }}
+                </span>
+              </div>
+
+              <div class="info-table">
+                <!-- If Activated -->
+                <template v-if="activationDetails?.status === 'ACTIVATED'">
+                  <div class="info-row">
+                    <span class="info-lbl">Auth Status</span>
+                    <span class="info-val text-success font-semibold">Linked &amp; Active</span>
+                  </div>
+                  <div v-if="activationDetails.linkedUsername" class="info-row">
+                    <span class="info-lbl">Username / School ID</span>
+                    <span class="info-val font-mono">{{ activationDetails.linkedUsername }}</span>
+                  </div>
+                  <div v-if="activationDetails.linkedUserId" class="info-row">
+                    <span class="info-lbl">Account UID</span>
+                    <span class="info-val font-mono text-xs">{{ activationDetails.linkedUserId.slice(0, 12) }}...</span>
+                  </div>
+                </template>
+
+                <!-- If Pending -->
+                <template v-else-if="activationDetails?.status === 'ACTIVATION_PENDING'">
+                  <div class="info-row">
+                    <span class="info-lbl">Code Status</span>
+                    <span class="info-val text-warning font-semibold">Active (Pending Claim)</span>
+                  </div>
+                  <div v-if="activationDetails.expiresAt" class="info-row">
+                    <span class="info-lbl">Expires</span>
+                    <span class="info-val">{{ formatDate(activationDetails.expiresAt) }} {{ formatTime(activationDetails.expiresAt) }}</span>
+                  </div>
+                  <div class="info-row">
+                    <span class="info-lbl">Attempt Limits</span>
+                    <span class="info-val font-mono">{{ activationDetails.attemptCount ?? 0 }} / {{ activationDetails.maxAttempts ?? 5 }} attempts</span>
+                  </div>
+                </template>
+
+                <!-- If Requires Attention -->
+                <template v-else-if="activationDetails?.status === 'REQUIRES_ATTENTION'">
+                  <div class="info-row">
+                    <span class="info-lbl">Alert</span>
+                    <span class="info-val text-danger font-semibold">Code Expired or Locked</span>
+                  </div>
+                  <div class="info-row">
+                    <span class="info-lbl">Reason</span>
+                    <span class="info-val text-xs text-muted">
+                      {{ (activationDetails.attemptCount ?? 0) >= (activationDetails.maxAttempts ?? 5) ? 'Max failed attempts exceeded' : 'Activation code has expired' }}
+                    </span>
+                  </div>
+                </template>
+
+                <!-- If Not Activated -->
+                <template v-else>
+                  <div class="info-row">
+                    <span class="info-lbl">Eligibility</span>
+                    <span class="info-val text-success">Imported &amp; Eligible for Activation</span>
+                  </div>
+                </template>
+              </div>
+
+              <!-- Officer Actions -->
+              <div class="activation-actions-row">
+                <UniButton
+                  v-if="activationDetails?.status === 'NOT_ACTIVATED' || !activationDetails"
+                  variant="primary"
+                  size="sm"
+                  :disabled="isIssuingCode"
+                  @click="handleIssueCode"
+                >
+                  <ion-icon :icon="keyOutline" slot="start" />
+                  Issue Activation Code
+                </UniButton>
+
+                <template v-else-if="activationDetails?.status === 'ACTIVATION_PENDING'">
+                  <UniButton
+                    variant="outline"
+                    size="sm"
+                    :disabled="isIssuingCode"
+                    @click="handleIssueCode"
+                  >
+                    <ion-icon :icon="refreshOutline" slot="start" />
+                    Reissue Code
+                  </UniButton>
+                  <UniButton
+                    variant="destructive"
+                    size="sm"
+                    @click="handleRevokeCode"
+                  >
+                    <ion-icon :icon="closeCircleOutline" slot="start" />
+                    Revoke Code
+                  </UniButton>
+                </template>
+
+                <UniButton
+                  v-else-if="activationDetails?.status === 'REQUIRES_ATTENTION'"
+                  variant="primary"
+                  size="sm"
+                  :disabled="isIssuingCode"
+                  @click="handleIssueCode"
+                >
+                  <ion-icon :icon="refreshOutline" slot="start" />
+                  Reissue New Code
+                </UniButton>
+
+                <UniButton
+                  v-if="activationDetails?.auditHistory && activationDetails.auditHistory.length > 0"
+                  variant="ghost"
+                  size="sm"
+                  @click="showAuditHistory = !showAuditHistory"
+                >
+                  {{ showAuditHistory ? 'Hide History' : 'Audit Trail' }} ({{ activationDetails.auditHistory.length }})
+                </UniButton>
+              </div>
+
+              <!-- Collapsible Audit Trail -->
+              <div v-if="showAuditHistory && activationDetails?.auditHistory?.length" class="audit-history-box">
+                <span class="metadata-text">ACTIVATION AUDIT LOG</span>
+                <div class="audit-records-list">
+                  <div v-for="aud in activationDetails.auditHistory" :key="aud.id" class="audit-record-item">
+                    <div class="audit-action-line">
+                      <span class="audit-action-badge" :class="'audit-' + aud.action.toLowerCase()">{{ aud.action }}</span>
+                      <span class="audit-time font-mono">{{ formatDate(aud.created_at) }}</span>
+                    </div>
+                    <span v-if="aud.notes" class="audit-notes">{{ aud.notes }}</span>
+                  </div>
                 </div>
               </div>
             </div>
@@ -324,26 +554,29 @@ async function handleDeleteStudent() {
             </div>
           </template>
 
-          <!-- TAB 3: FINANCE & WALLET -->
+          <!-- TAB 3: OBLIGATIONS & PAYMENTS -->
           <template v-if="activeTab === 'FINANCE'">
-            <!-- Wallet Summary Card -->
+            <!-- Balance Summary Card -->
             <div class="minimal-card overview-card">
               <div class="card-head-row">
                 <div class="head-lead">
-                  <ion-icon :icon="walletOutline" class="head-icon text-primary" />
-                  <span class="card-title-text">Simulated Wallet</span>
+                  <ion-icon :icon="receiptOutline" class="head-icon text-primary" />
+                  <span class="card-title-text">Outstanding Balance</span>
                 </div>
                 <button 
+                  v-if="totalBalanceCentavos > 0"
                   class="action-subtle-btn"
-                  @click="router.push(`/finance/wallet/${currentStudent.id}`)"
+                  @click="router.push({ path: '/finance/pay', query: { studentId: currentStudent.id } })"
                 >
-                  Manage Wallet
+                  Record Payment
                 </button>
               </div>
 
               <div class="balance-inline-box">
-                <span class="secondary-text">Available Credits</span>
-                <span class="balance-amt text-primary font-mono tabular-nums">{{ formatPeso(walletBalanceCentavos) }}</span>
+                <span class="secondary-text">Total Unpaid Balance</span>
+                <span class="balance-amt font-mono tabular-nums" :class="totalBalanceCentavos > 0 ? 'text-danger' : 'text-success'">
+                  {{ formatPeso(totalBalanceCentavos) }}
+                </span>
               </div>
             </div>
 
@@ -380,6 +613,26 @@ async function handleDeleteStudent() {
                 <ion-icon :icon="receiptOutline" class="empty-state-icon" />
                 <p class="empty-state-title">No Obligations</p>
                 <p class="empty-state-sub">Student is clear of fees.</p>
+              </div>
+            </div>
+
+            <!-- Payment Records Card -->
+            <div class="minimal-card overview-card" v-if="studentPayments.length > 0">
+              <div class="card-head-row">
+                <span class="card-title-text">Payment Records</span>
+              </div>
+              <div class="charges-simple-list">
+                <div v-for="pay in studentPayments" :key="pay.id" class="charge-mini-row">
+                  <div class="charge-mini-text">
+                    <span class="charge-mini-title font-mono">{{ pay.referenceNumber }}</span>
+                    <span class="metadata-text">
+                      {{ new Date(pay.processedAt).toLocaleDateString() }}
+                    </span>
+                  </div>
+                  <span class="font-mono text-success font-bold">
+                    {{ formatPeso(pay.amount) }}
+                  </span>
+                </div>
               </div>
             </div>
           </template>
@@ -432,6 +685,41 @@ async function handleDeleteStudent() {
       @confirm="handleDeactivateRfid"
       @cancel="showRemoveRfidDialog = false"
     />
+
+    <!-- Single-Use Plaintext Code Presentation Sheet -->
+    <UniSheet
+      :is-open="showCodeSheet"
+      title="Activation Code Issued"
+      @close="showCodeSheet = false"
+    >
+      <div class="issued-code-content">
+        <div class="code-security-alert">
+          <ion-icon :icon="shieldCheckmarkOutline" class="security-shield-icon" />
+          <div class="alert-desc">
+            <strong>Single-Use Activation Credential</strong>
+            <p>Provide this 8-character code directly to the verified student. For security, this plaintext code is stored only as a cryptographic hash and will <strong>never</strong> be shown again.</p>
+          </div>
+        </div>
+
+        <div class="plaintext-code-box">
+          <span class="code-label">ACTIVATION CODE</span>
+          <div class="plaintext-code-display font-mono" @click="handleCopyIssuedCode">
+            {{ newlyIssuedCode }}
+          </div>
+          <span class="code-hint">Tap code to copy • Expires in 48 hours</span>
+        </div>
+
+        <div class="code-actions">
+          <UniButton variant="outline" size="md" @click="handleCopyIssuedCode">
+            <ion-icon :icon="copyOutline" slot="start" />
+            Copy Code
+          </UniButton>
+          <UniButton variant="primary" size="md" @click="showCodeSheet = false">
+            Done
+          </UniButton>
+        </div>
+      </div>
+    </UniSheet>
   </ion-page>
 </template>
 
@@ -783,27 +1071,39 @@ async function handleDeleteStudent() {
 }
 
 .activity-icon-wrap {
-  width: 32px;
-  height: 32px;
-  border-radius: 50%;
+  width: 24px;
+  height: 24px;
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 16px;
+  font-size: 18px;
   flex-shrink: 0;
+  background: transparent;
 }
 
-.icon-present, .badge-present {
+.icon-present {
+  color: var(--ion-color-success);
+}
+
+.icon-late {
+  color: var(--ion-color-warning);
+}
+
+.icon-absent {
+  color: var(--ion-color-danger);
+}
+
+.badge-present {
   background: rgba(21, 154, 116, 0.1);
   color: var(--ion-color-success);
 }
 
-.icon-late, .badge-late {
+.badge-late {
   background: rgba(217, 149, 34, 0.12);
   color: var(--ion-color-warning);
 }
 
-.icon-absent, .badge-absent {
+.badge-absent {
   background: rgba(220, 75, 75, 0.1);
   color: var(--ion-color-danger);
 }
@@ -851,5 +1151,197 @@ async function handleDeleteStudent() {
   font-size: 13px;
   font-weight: 600;
   cursor: pointer;
+}
+
+/* Activation Card & Officer Actions */
+.activation-title-wrap {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.activation-actions-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px dashed var(--uni-border, rgba(0, 0, 0, 0.08));
+}
+
+.audit-history-box {
+  margin-top: 12px;
+  padding: 10px 12px;
+  background: var(--uni-surface-secondary, rgba(0, 0, 0, 0.03));
+  border: 1px solid var(--uni-border, rgba(0, 0, 0, 0.08));
+  border-radius: var(--uni-radius-btn, 10px);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.audit-records-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.audit-record-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 4px 0;
+  border-bottom: 1px solid var(--uni-border, rgba(0, 0, 0, 0.04));
+}
+
+.audit-record-item:last-child {
+  border-bottom: none;
+}
+
+.audit-action-line {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.audit-action-badge {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  padding: 1px 6px;
+  border-radius: 4px;
+}
+
+.audit-issued {
+  background: rgba(15, 118, 110, 0.12);
+  color: var(--uni-primary, #0f766e);
+}
+
+.audit-reissued {
+  background: rgba(217, 119, 6, 0.12);
+  color: var(--uni-warning, #d97706);
+}
+
+.audit-claimed {
+  background: rgba(16, 185, 129, 0.12);
+  color: var(--uni-success, #10b981);
+}
+
+.audit-revoked, .audit-attempt_failed {
+  background: rgba(239, 68, 68, 0.12);
+  color: var(--uni-danger, #ef4444);
+}
+
+.audit-time {
+  font-size: 11px;
+  color: var(--uni-text-secondary, #64748b);
+}
+
+.audit-notes {
+  font-size: 11px;
+  color: var(--uni-text-secondary, #64748b);
+}
+
+/* Code Sheet Display */
+.issued-code-content {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 8px 0;
+}
+
+.code-security-alert {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 12px 14px;
+  background: rgba(15, 118, 110, 0.08);
+  border: 1px solid rgba(15, 118, 110, 0.2);
+  border-radius: var(--uni-radius-card, 12px);
+  color: var(--uni-text, #0f172a);
+}
+
+:global(.dark) .code-security-alert,
+:global(.ion-palette-dark) .code-security-alert {
+  background: rgba(94, 234, 212, 0.1);
+  border-color: rgba(94, 234, 212, 0.25);
+  color: var(--uni-text, #f8fafc);
+}
+
+.security-shield-icon {
+  font-size: 24px;
+  color: var(--uni-primary, #0f766e);
+  flex-shrink: 0;
+}
+
+:global(.dark) .security-shield-icon,
+:global(.ion-palette-dark) .security-shield-icon {
+  color: var(--uni-primary, #5EEAD4);
+}
+
+.alert-desc strong {
+  display: block;
+  font-size: 13px;
+  font-weight: 700;
+  margin-bottom: 2px;
+}
+
+.alert-desc p {
+  font-size: 12px;
+  line-height: 1.4;
+  margin: 0;
+  color: var(--uni-text-secondary, #64748b);
+}
+
+.plaintext-code-box {
+  background: var(--uni-surface-secondary, rgba(0, 0, 0, 0.04));
+  border: 2px dashed var(--uni-primary, #0f766e);
+  border-radius: var(--uni-radius-card, 14px);
+  padding: 20px 16px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  cursor: pointer;
+}
+
+:global(.dark) .plaintext-code-box,
+:global(.ion-palette-dark) .plaintext-code-box {
+  border-color: var(--uni-primary, #5EEAD4);
+}
+
+.code-label {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  color: var(--uni-text-secondary, #64748b);
+}
+
+.plaintext-code-display {
+  font-size: clamp(20px, 6vw, 28px);
+  font-weight: 800;
+  letter-spacing: clamp(0.08em, 2vw, 0.2em);
+  color: var(--uni-primary, #0f766e);
+  user-select: all;
+  word-break: break-all;
+}
+
+:global(.dark) .plaintext-code-display,
+:global(.ion-palette-dark) .plaintext-code-display {
+  color: var(--uni-primary, #5EEAD4);
+}
+
+.code-hint {
+  font-size: 11px;
+  color: var(--uni-text-secondary, #64748b);
+}
+
+.code-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
 }
 </style>

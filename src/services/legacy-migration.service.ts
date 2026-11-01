@@ -264,9 +264,9 @@ export class LegacyMigrationService {
                 id: t.id,
                 semester_id: semesterId,
                 name: t.name,
-                type: t.chargeType === 'FINE' ? 'FINE' : 'CONTRIBUTION',
+                type: (t.chargeType ?? t.type) === 'FINE' ? 'FINE' : 'CONTRIBUTION',
                 trigger_type: t.triggerType || 'MANUAL',
-                default_amount_centavos: t.defaultAmount,
+                default_amount_centavos: t.defaultAmount ?? t.defaultAmountCentavos ?? 0,
                 status: t.status === 'ACTIVE' ? 'ACTIVE' : 'INACTIVE',
                 created_at: t.createdAt || now,
               }, tx);

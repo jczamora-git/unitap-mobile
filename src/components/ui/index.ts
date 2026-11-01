@@ -15,3 +15,15 @@ export { default as UniDialog } from './UniDialog.vue';
 export { default as UniToast } from './UniToast.vue';
 export { default as UniStatusBadge } from './UniStatusBadge.vue';
 export { default as UniEmptyState } from './UniEmptyState.vue';
+export { default as UniPagination } from './UniPagination.vue';
+export { default as UniExpandableRow } from './UniExpandableRow.vue';
+export { default as UniRecordList } from './UniRecordList.vue';
+export { default as UniTreeView } from './UniTreeView.vue';
+export { default as UniFilterChip } from './UniFilterChip.vue';
+export { default as UniFilterSheet } from './UniFilterSheet.vue';
+export { default as UniSheetNavigator } from './UniSheetNavigator.vue';
+export { default as UniKpiCarousel } from './UniKpiCarousel.vue';
+export { default as UniWelcomeSetup, type SetupStage } from './UniWelcomeSetup.vue';
+export { default as UniDataUpdateScreen, type UpdateStage } from './UniDataUpdateScreen.vue';
+
+

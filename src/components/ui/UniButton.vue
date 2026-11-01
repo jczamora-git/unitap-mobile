@@ -13,6 +13,7 @@ interface Props {
   iconPosition?: 'left' | 'right';
   iconOnly?: boolean;
   ariaLabel?: string;
+  title?: string;
 }
 
 const props = withDefaults(defineProps<Props>(), {
@@ -25,8 +26,10 @@ const props = withDefaults(defineProps<Props>(), {
   icon: undefined,
   iconPosition: 'left',
   iconOnly: false,
-  ariaLabel: undefined
+  ariaLabel: undefined,
+  title: undefined,
 });
+
 
 const emit = defineEmits<{
   (e: 'click', event: MouseEvent): void;
@@ -57,7 +60,9 @@ function handleClick(event: MouseEvent) {
     ]"
     :disabled="disabled || loading"
     :aria-label="ariaLabel"
+    :title="title || ariaLabel"
     @click="handleClick"
+
   >
     <ion-spinner v-if="loading" name="crescent" class="btn-spinner" />
     
@@ -156,19 +161,30 @@ function handleClick(event: MouseEvent) {
 
 .uni-btn:focus-visible {
   outline: none;
-  box-shadow: 0 0 0 3px rgba(112, 243, 207, 0.4);
+  box-shadow: 0 0 0 2px var(--uni-border-focus, #0F766E);
 }
 
 /* Variants */
 .uni-btn-primary {
-  background: var(--uni-mint);
-  color: #0A1C16;
-  border-color: rgba(255, 255, 255, 0.15);
-  box-shadow: 0 2px 10px rgba(112, 243, 207, 0.25);
+  background: var(--uni-btn-primary-bg, #0F766E);
+  color: #FFFFFF;
+  border-color: transparent;
+  box-shadow: none;
+}
+
+:root.dark .uni-btn-primary,
+:root.ion-palette-dark .uni-btn-primary,
+body.dark .uni-btn-primary,
+body.ion-palette-dark .uni-btn-primary,
+:global(.dark) .uni-btn-primary,
+:global(.ion-palette-dark) .uni-btn-primary {
+  background: var(--uni-btn-primary-bg, #0D9488);
+  color: #FFFFFF;
+  box-shadow: none;
 }
 
 .uni-btn-primary:hover:not(:disabled) {
-  filter: brightness(1.04);
+  filter: brightness(1.06);
 }
 
 .uni-btn-secondary {

@@ -1,33 +1,39 @@
 <script setup lang="ts">
 import { ref, onMounted, computed, watch } from 'vue';
-import { useRouter } from 'vue-router';
+import { useRouter, useRoute } from 'vue-router';
 import {
   IonPage,
   IonContent,
   IonIcon,
-  IonInput,
-  IonSelect,
-  IonSelectOption,
+  IonSpinner,
   onIonViewWillEnter,
-  onIonViewDidLeave
+  onIonViewDidLeave,
 } from '@ionic/vue';
 import {
   radioOutline,
   checkmarkCircle,
   alertCircle,
-  flashOutline
+  cashOutline,
+  printOutline,
 } from 'ionicons/icons';
 import { useNfc } from '@/composables/useNfc';
 import { studentService } from '@/services/student.service';
 import { financeService } from '@/services/finance.service';
+import { CardsRepository } from '@/database/repositories/cards.repository';
 import type { Student } from '@/types/student';
-import type { StudentCharge, Payment } from '@/types/finance';
+import type {
+  StudentObligationItem,
+  PaymentReceipt,
+  PaymentMethod,
+} from '@/types/finance';
 import { formatPeso, centavosToPeso, pesoToCentavos } from '@/utilities/finance-formatters';
 import { formatFullName } from '@/utilities/student-formatters';
-import { formatTime } from '@/utilities/date-formatters';
-import { UniPageHeader, UniButton } from '@/components/ui';
+import { UniPageHeader, UniButton, UniCard, UniSheet, UniSelect } from '@/components/ui';
+
+import { haptics } from '@/utilities/haptics';
 
 const router = useRouter();
+const route = useRoute();
 
 const {
   deviceStatus,
@@ -35,170 +41,214 @@ const {
   lastTag,
   startScan,
   stopScan,
-  refreshStatus
+  refreshStatus,
 } = useNfc();
 
 const allStudents = ref<Student[]>([]);
 const selectedStudentId = ref<string>('');
-const selectedStudent = computed(() => 
-  allStudents.value.find(s => s.id === selectedStudentId.value) || null
+const selectedStudent = computed(() =>
+  allStudents.value.find((s) => s.id === selectedStudentId.value) || null
 );
 
-const walletBalanceCentavos = ref(0);
-const outstandingCharges = ref<StudentCharge[]>([]);
-const selectedChargeIds = ref<string[]>([]);
-const paymentAmountsMap = ref<Record<string, number>>({}); // chargeId -> centavos
+const studentOptions = computed(() => [
+  { value: '', label: '-- Choose or Tap Student NFC --' },
+  ...allStudents.value.map((s) => ({
+    value: s.id,
+    label: `${formatFullName(s.firstName, s.middleName, s.lastName)} (${s.studentNumber || s.id}) - ${s.yearLevel}${s.section}`,
+  })),
+]);
+
+
+const outstandingObligations = ref<StudentObligationItem[]>([]);
+const selectedObligationIds = ref<string[]>([]);
+const paymentAmountsMap = ref<Record<string, number>>({}); // obId -> centavos
+
+const paymentMethod = ref<PaymentMethod>('CASH');
+const paymentNotes = ref<string>('');
 
 const identifiedViaNfc = ref(false);
 const isProcessing = ref(false);
 const errorMessage = ref('');
-const completedPayment = ref<Payment | null>(null);
+const completedReceipt = ref<PaymentReceipt | null>(null);
+const isReceiptModalOpen = ref(false);
+
+const totalSelectedToPay = computed(() => {
+  return selectedObligationIds.value.reduce((acc, id) => {
+    return acc + (paymentAmountsMap.value[id] || 0);
+  }, 0);
+});
 
 async function loadInitialData() {
   allStudents.value = await studentService.getStudents();
-}
-
-async function loadStudentFinancials(studentId: string) {
-  if (!studentId) return;
-  walletBalanceCentavos.value = await financeService.calculateWalletBalance(studentId);
-  const charges = await financeService.getCharges(studentId);
-  const activeUnpaid = charges.filter(c => c.status === 'UNPAID' || c.status === 'PARTIALLY_PAID');
-  outstandingCharges.value = activeUnpaid;
-
-  // Auto-select all unpaid charges
-  selectedChargeIds.value = activeUnpaid.map(c => c.id);
-  const amounts: Record<string, number> = {};
-  activeUnpaid.forEach(c => {
-    amounts[c.id] = c.issuedAmount - c.paidAmount;
-  });
-  paymentAmountsMap.value = amounts;
-}
-
-watch(selectedStudentId, async (newId) => {
-  if (newId) {
-    completedPayment.value = null;
-    errorMessage.value = '';
-    await loadStudentFinancials(newId);
+  const queryStudentId = route.query.studentId as string;
+  if (queryStudentId) {
+    selectedStudentId.value = queryStudentId;
+    await onStudentSelected();
   }
-});
+}
 
-// Watch NFC card taps
-watch(lastTag, async (newTag) => {
-  if (!newTag?.id || isProcessing.value) return;
+async function onStudentSelected() {
+  if (!selectedStudentId.value) {
+    outstandingObligations.value = [];
+    selectedObligationIds.value = [];
+    paymentAmountsMap.value = {};
+    return;
+  }
+
   try {
-    const student = await studentService.findStudentByRfid(newTag.id);
-    if (student) {
+    const list = await financeService.getStudentObligations(selectedStudentId.value);
+    // Only show active obligations with remaining balance
+    outstandingObligations.value = list.filter((o) => o.balanceCentavos > 0 && o.status !== 'VOID');
+
+    selectedObligationIds.value = [];
+    paymentAmountsMap.value = {};
+
+    // Auto-select first obligation if available
+    if (outstandingObligations.value.length > 0) {
+      const first = outstandingObligations.value[0];
+      selectedObligationIds.value = [first.id];
+      paymentAmountsMap.value[first.id] = first.balanceCentavos;
+    }
+  } catch (err: any) {
+    console.error('Error loading student obligations:', err);
+    errorMessage.value = err.message || 'Error loading obligations.';
+  }
+}
+
+watch(selectedStudentId, onStudentSelected);
+
+// NFC Resolution
+watch(lastTag, async (tag) => {
+  if (!tag) return;
+  haptics.medium();
+
+  try {
+    const card = await CardsRepository.getCardByNormalizedUid(tag.compactId || tag.id);
+    if (card && card.student_id) {
+      selectedStudentId.value = card.student_id;
       identifiedViaNfc.value = true;
-      selectedStudentId.value = student.id;
+      errorMessage.value = '';
+      haptics.success();
     } else {
-      errorMessage.value = `Scanned card [${newTag.id}] is not registered to any student.`;
+      errorMessage.value = `Unregistered card (${tag.compactId || tag.id}). Please register card or select student manually.`;
+      haptics.error();
     }
   } catch (err) {
-    console.error('Error identifying student via NFC:', err);
+    console.error('Failed to resolve NFC card:', err);
   }
 });
 
-onMounted(async () => {
-  await loadInitialData();
-  await refreshStatus();
-});
-
-onIonViewWillEnter(async () => {
-  await refreshStatus();
-  if (deviceStatus.value.enabled) {
-    await startScan();
-  }
-});
-
-onIonViewDidLeave(async () => {
-  await stopScan();
-});
-
-const totalSelectedToPay = computed(() => {
-  let total = 0;
-  for (const cid of selectedChargeIds.value) {
-    total += paymentAmountsMap.value[cid] || 0;
-  }
-  return total;
-});
-
-function toggleChargeSelection(chargeId: string) {
-  if (selectedChargeIds.value.includes(chargeId)) {
-    selectedChargeIds.value = selectedChargeIds.value.filter(id => id !== chargeId);
+function toggleObligation(ob: StudentObligationItem) {
+  haptics.light();
+  const idx = selectedObligationIds.value.indexOf(ob.id);
+  if (idx >= 0) {
+    selectedObligationIds.value.splice(idx, 1);
+    delete paymentAmountsMap.value[ob.id];
   } else {
-    selectedChargeIds.value.push(chargeId);
+    selectedObligationIds.value.push(ob.id);
+    paymentAmountsMap.value[ob.id] = ob.balanceCentavos; // Default to full remaining balance
   }
 }
 
-async function handleQuickTopUp(pesos: number) {
-  if (!selectedStudentId.value) return;
-  try {
-    await financeService.topUpWallet(
-      selectedStudentId.value, 
-      pesos * 100, 
-      `Quick Top-up for Payment: ₱${pesos}`
-    );
-    await loadStudentFinancials(selectedStudentId.value);
-  } catch (err: unknown) {
-    errorMessage.value = err instanceof Error ? err.message : 'Error topping up wallet';
-  }
+function setPaymentAmount(obId: string, pesos: number) {
+  const cents = Math.round(pesoToCentavos(pesos));
+  const ob = outstandingObligations.value.find((o) => o.id === obId);
+  const max = ob ? ob.balanceCentavos : cents;
+  paymentAmountsMap.value[obId] = Math.max(0, Math.min(cents, max));
 }
 
 async function handleConfirmPayment() {
-  errorMessage.value = '';
   if (!selectedStudentId.value) {
-    errorMessage.value = 'Please select or scan a student.';
+    errorMessage.value = 'Please select a student.';
     return;
   }
-  if (selectedChargeIds.value.length === 0) {
-    errorMessage.value = 'Please select at least one charge to pay.';
-    return;
-  }
-  if (totalSelectedToPay.value <= 0) {
-    errorMessage.value = 'Payment amount must be greater than 0.';
-    return;
-  }
-  if (walletBalanceCentavos.value < totalSelectedToPay.value) {
-    errorMessage.value = 'Insufficient simulated wallet credits. Please add demo funds.';
+  if (selectedObligationIds.value.length === 0 || totalSelectedToPay.value <= 0) {
+    errorMessage.value = 'Please select at least one obligation to pay.';
     return;
   }
 
   isProcessing.value = true;
-  try {
-    const allocations = selectedChargeIds.value.map(cid => ({
-      chargeId: cid,
-      amountCentavos: paymentAmountsMap.value[cid]
-    }));
+  errorMessage.value = '';
 
-    const payment = await financeService.processPayment({
+  try {
+    const allocations = selectedObligationIds.value.map((id) => ({
+      obligationId: id,
+      amountCentavos: paymentAmountsMap.value[id] || 0,
+    })).filter((a) => a.amountCentavos > 0);
+
+    const firstOb = outstandingObligations.value.find((o) => o.id === selectedObligationIds.value[0]);
+    const semesterId = firstOb?.semesterId || 'sem_default';
+
+    const result = await financeService.recordPayment({
       studentId: selectedStudentId.value,
+      semesterId,
+      amountCentavos: totalSelectedToPay.value,
+      source: paymentMethod.value,
+      channel: identifiedViaNfc.value ? 'NFC' : 'MANUAL',
       allocations,
-      channel: identifiedViaNfc.value ? 'NFC' : 'MANUAL'
+      notes: paymentNotes.value.trim() || undefined,
+      actorUserId: 'officer_local',
     });
 
-    completedPayment.value = payment;
-    await loadStudentFinancials(selectedStudentId.value);
-  } catch (err: unknown) {
-    console.error('Payment processing failed:', err);
-    errorMessage.value = err instanceof Error ? err.message : 'Payment error';
+    haptics.success();
+
+    // Generate receipt
+    completedReceipt.value = await financeService.generatePaymentReceipt(
+      result.paymentId,
+      'Authorized Officer'
+    );
+    isReceiptModalOpen.value = true;
+
+    // Refresh remaining obligations
+    await onStudentSelected();
+  } catch (err: any) {
+    console.error('Payment recording failed:', err);
+    errorMessage.value = err.message || 'Payment recording failed.';
+    haptics.error();
   } finally {
     isProcessing.value = false;
   }
 }
 
-function resetForNextPayment() {
-  completedPayment.value = null;
-  selectedStudentId.value = '';
-  identifiedViaNfc.value = false;
-  errorMessage.value = '';
+function printReceipt() {
+  if (!completedReceipt.value) return;
+  const html = financeService.generatePrintableReceiptHtml(completedReceipt.value);
+  const printWindow = window.open('', '_blank');
+  if (printWindow) {
+    printWindow.document.write(html);
+    printWindow.document.close();
+    printWindow.focus();
+    printWindow.print();
+  }
 }
+
+function handleDone() {
+  isReceiptModalOpen.value = false;
+  router.push('/tabs/finance');
+}
+
+onMounted(() => {
+  loadInitialData();
+  refreshStatus();
+});
+
+onIonViewWillEnter(() => {
+  loadInitialData();
+  if (deviceStatus.value.supported && deviceStatus.value.enabled) {
+    startScan();
+  }
+});
+
+onIonViewDidLeave(() => {
+  stopScan();
+});
 </script>
 
 <template>
   <ion-page>
     <UniPageHeader
-      title="Make Payment"
-      subtitle="Simulated NFC wallet settlement"
+      title="Record Payment"
+      subtitle="Direct cash and transfer receipt recording"
       :back-button="true"
       default-back-href="/tabs/finance"
       variant="detail"
@@ -206,600 +256,533 @@ function resetForNextPayment() {
 
     <ion-content class="safe-content">
       <div class="page-container">
-        <!-- Error Banner -->
+        <!-- Error Alert -->
         <div v-if="errorMessage" class="error-banner">
-          <ion-icon :icon="alertCircle" />
+          <ion-icon :icon="alertCircle" class="error-icon" />
           <span>{{ errorMessage }}</span>
         </div>
 
-        <!-- SUCCESS RECEIPT VIEW -->
-        <div v-if="completedPayment" class="minimal-card receipt-card">
-          <div class="receipt-icon-circle">
-            <ion-icon :icon="checkmarkCircle" />
-          </div>
-          <h2 class="receipt-headline">Payment Successful</h2>
-          <p class="receipt-sub">Simulated wallet settlement recorded in ledger</p>
-
-          <div class="receipt-table">
-            <div class="receipt-line">
-              <span class="line-label">Reference No.</span>
-              <span class="line-val font-mono">{{ completedPayment.referenceNumber }}</span>
-            </div>
-            <div class="receipt-line">
-              <span class="line-label">Student</span>
-              <span class="line-val font-semibold">{{ selectedStudent ? formatFullName(selectedStudent.firstName, selectedStudent.middleName, selectedStudent.lastName) : '' }}</span>
-            </div>
-            <div class="receipt-line">
-              <span class="line-label">Amount Paid</span>
-              <span class="line-val text-success font-mono font-semibold">{{ formatPeso(completedPayment.amount) }}</span>
-            </div>
-            <div class="receipt-line">
-              <span class="line-label">Identification</span>
-              <span class="status-badge" :class="completedPayment.paymentChannel === 'NFC' ? 'badge-accent' : 'badge-neutral'">
-                {{ completedPayment.paymentChannel }}
-              </span>
-            </div>
-            <div class="receipt-line">
-              <span class="line-label">Remaining Balance</span>
-              <span class="line-val font-mono">{{ formatPeso(walletBalanceCentavos) }}</span>
-            </div>
-            <div class="receipt-line">
-              <span class="line-label">Timestamp</span>
-              <span class="line-val">{{ formatTime(completedPayment.processedAt) }}</span>
-            </div>
+        <!-- 1. Student Selection / NFC Tap -->
+        <UniCard padding="md">
+          <div class="card-header-row">
+            <h3 class="step-title">1. Select Student</h3>
+            <span v-if="identifiedViaNfc" class="badge-mini badge-success">
+              NFC Identified
+            </span>
           </div>
 
-          <div class="receipt-actions">
-            <UniButton variant="primary" @click="resetForNextPayment">
-              Make Another Payment
-            </UniButton>
-            <UniButton variant="secondary" @click="router.push('/tabs/finance')">
-              Return to Finance
-            </UniButton>
-          </div>
-        </div>
-
-        <!-- PAYMENT WORKFLOW FORM -->
-        <div v-else class="workflow-container">
-          <!-- Step 1: NFC Scanner / Student Selection -->
-          <div class="minimal-card step-card">
-            <div class="step-header">
-              <span class="step-badge">1</span>
-              <h4 class="step-title">Identify Student</h4>
-              <span v-if="identifiedViaNfc" class="status-badge badge-success">NFC Verified</span>
-            </div>
-
-            <!-- NFC Tap radar banner -->
-            <div class="nfc-tap-banner" :class="{ 'scanning': isScanning }">
-              <div class="nfc-icon-wrap" :class="{ 'nfc-pulse-active': isScanning }">
-                <ion-icon :icon="radioOutline" />
-              </div>
-              <div class="banner-text">
-                <strong class="banner-title">Hold Student ID Against Device</strong>
-                <p class="banner-sub">Tap card or select manually from list below</p>
-              </div>
-            </div>
-
-            <div class="field-item">
-              <label class="field-label">Select Student Manually</label>
-              <ion-select 
-                v-model="selectedStudentId" 
-                placeholder="Choose student from directory..."
-                interface="action-sheet" 
-                class="clean-select"
-              >
-                <ion-select-option 
-                  v-for="s in allStudents" 
-                  :key="s.id" 
-                  :value="s.id"
-                >
-                  {{ formatFullName(s.firstName, s.middleName, s.lastName) }} ({{ s.studentNumber || s.section }})
-                </ion-select-option>
-              </ion-select>
-            </div>
+          <div class="nfc-tap-prompt" v-if="isScanning">
+            <ion-icon :icon="radioOutline" class="pulse-icon text-primary" />
+            <span>Ready for NFC student card tap...</span>
           </div>
 
-          <!-- Step 2: Student Wallet & Balances -->
-          <div v-if="selectedStudent" class="minimal-card step-card">
-            <div class="step-header">
-              <span class="step-badge">2</span>
-              <h4 class="step-title">Student Wallet Balance</h4>
-            </div>
-
-            <div class="wallet-balance-row">
-              <div class="wallet-stat">
-                <span class="secondary-text">Available Demo Credits</span>
-                <div class="balance-num tabular-nums font-mono">
-                  {{ formatPeso(walletBalanceCentavos) }}
-                </div>
-              </div>
-
-              <!-- Quick Demo Top-Up Buttons -->
-              <div class="topup-quick-col">
-                <span class="metadata-text">Add Demo Credits:</span>
-                <div class="quick-topup-pills">
-                  <button type="button" class="mini-topup-pill" @click="handleQuickTopUp(50)">+₱50</button>
-                  <button type="button" class="mini-topup-pill" @click="handleQuickTopUp(100)">+₱100</button>
-                  <button type="button" class="mini-topup-pill" @click="handleQuickTopUp(200)">+₱200</button>
-                </div>
-              </div>
-            </div>
+          <div class="form-group">
+            <label class="field-label">Student</label>
+            <UniSelect
+              v-model="selectedStudentId"
+              :options="studentOptions"
+              placeholder="Choose or Tap Student NFC"
+              header="Select Student"
+              @change="onStudentSelected"
+            />
           </div>
 
-          <!-- Step 3: Select Outstanding Charges -->
-          <div v-if="selectedStudent" class="minimal-card step-card">
-            <div class="step-header">
-              <span class="step-badge">3</span>
-              <h4 class="step-title">Select Charges to Pay</h4>
-              <span class="status-badge badge-neutral">{{ outstandingCharges.length }} Outstanding</span>
-            </div>
+        </UniCard>
 
-            <div v-if="outstandingCharges.length > 0" class="charges-selection-list">
-              <div 
-                v-for="chg in outstandingCharges" 
-                :key="chg.id" 
-                class="charge-item-box"
-                :class="{ selected: selectedChargeIds.includes(chg.id) }"
-              >
-                <div class="charge-item-head">
-                  <label class="custom-checkbox-label">
-                    <input 
-                      type="checkbox" 
-                      :checked="selectedChargeIds.includes(chg.id)" 
-                      @change="toggleChargeSelection(chg.id)" 
-                    />
-                    <span class="charge-name-text">{{ chg.title }}</span>
-                  </label>
-                  <span class="charge-rem-val font-mono">
-                    Rem: {{ formatPeso(chg.issuedAmount - chg.paidAmount) }}
+        <!-- 2. Outstanding Obligations Selection -->
+        <UniCard v-if="selectedStudent" padding="md">
+          <div class="card-header-row">
+            <h3 class="step-title">2. Select Obligations to Settle</h3>
+            <span class="badge-mini badge-neutral font-mono">
+              {{ outstandingObligations.length }} Unpaid
+            </span>
+          </div>
+
+          <div v-if="outstandingObligations.length > 0" class="obligations-list">
+            <div
+              v-for="ob in outstandingObligations"
+              :key="ob.id"
+              class="obligation-item"
+              :class="{ 'is-selected': selectedObligationIds.includes(ob.id) }"
+              @click="toggleObligation(ob)"
+            >
+              <div class="ob-left">
+                <input
+                  type="checkbox"
+                  :checked="selectedObligationIds.includes(ob.id)"
+                  class="uni-checkbox"
+                  @click.stop
+                />
+                <div class="ob-info">
+                  <span class="ob-title font-bold">{{ ob.title }}</span>
+                  <span class="ob-meta">
+                    <span class="badge-mini" :class="ob.type === 'FINE' ? 'badge-danger' : 'badge-primary'">
+                      {{ ob.type }}
+                    </span>
+                    <span class="meta-date">Issued: {{ new Date(ob.issuedAt).toLocaleDateString() }}</span>
                   </span>
                 </div>
+              </div>
 
-                <div v-if="selectedChargeIds.includes(chg.id)" class="payment-amount-inline">
-                  <label class="field-label-sub">Amount to Apply (₱):</label>
-                  <ion-input 
+              <div class="ob-right font-mono" @click.stop>
+                <span class="rem-label">Balance: {{ formatPeso(ob.balanceCentavos) }}</span>
+                <div v-if="selectedObligationIds.includes(ob.id)" class="amount-input-row">
+                  <span class="currency-prefix">₱</span>
+                  <input
                     type="number"
-                    :value="centavosToPeso(paymentAmountsMap[chg.id] || 0)"
-                    @ion-input="(e) => paymentAmountsMap[chg.id] = pesoToCentavos(Number(e.detail.value))"
-                    class="clean-input flex-1 font-mono"
+                    min="1"
+                    :max="centavosToPeso(ob.balanceCentavos)"
+                    :value="centavosToPeso(paymentAmountsMap[ob.id] || 0)"
+                    class="clean-input-inline"
+                    @input="setPaymentAmount(ob.id, +($event.target as HTMLInputElement).value)"
                   />
                 </div>
               </div>
             </div>
+          </div>
 
-            <div v-else class="empty-state-box">
-              <ion-icon :icon="checkmarkCircle" class="empty-state-icon text-success" />
-              <p class="empty-state-title">No Unpaid Fees</p>
-              <p class="empty-state-sub">This student has no outstanding fee obligations.</p>
+          <div v-else class="empty-state-inline">
+            <ion-icon :icon="checkmarkCircle" class="text-success text-2xl" />
+            <p>Student is fully clear. No outstanding fines or contributions.</p>
+          </div>
+        </UniCard>
+
+        <!-- 3. Payment Method & Confirmation -->
+        <UniCard v-if="selectedObligationIds.length > 0" padding="md">
+          <h3 class="step-title">3. Payment Details</h3>
+
+          <div class="form-group">
+            <label class="field-label">Payment Method</label>
+            <div class="method-options">
+              <label class="method-label" :class="{ active: paymentMethod === 'CASH' }">
+                <input type="radio" v-model="paymentMethod" value="CASH" />
+                <span>Cash Collection</span>
+              </label>
+              <label class="method-label" :class="{ active: paymentMethod === 'MANUAL_TRANSFER_RECORD' }">
+                <input type="radio" v-model="paymentMethod" value="MANUAL_TRANSFER_RECORD" />
+                <span>Bank / Transfer Record</span>
+              </label>
             </div>
           </div>
 
-          <!-- Step 4: Summary & Confirm -->
-          <div v-if="selectedStudent && outstandingCharges.length > 0" class="minimal-card summary-card">
-            <div class="summary-line">
-              <span class="secondary-text">Total Payment:</span>
-              <strong class="total-figure font-mono tabular-nums">{{ formatPeso(totalSelectedToPay) }}</strong>
-            </div>
-            <div class="summary-line">
-              <span class="secondary-text">Current Wallet Balance:</span>
-              <span class="font-mono tabular-nums">{{ formatPeso(walletBalanceCentavos) }}</span>
-            </div>
-            <div class="summary-line">
-              <span class="secondary-text">Balance After Payment:</span>
-              <span 
-                class="font-mono tabular-nums font-semibold"
-                :class="walletBalanceCentavos - totalSelectedToPay >= 0 ? 'text-success' : 'text-danger'"
-              >
-                {{ formatPeso(walletBalanceCentavos - totalSelectedToPay) }}
-              </span>
-            </div>
+          <div class="form-group">
+            <label class="field-label">Official Notes (Optional)</label>
+            <input
+              v-model="paymentNotes"
+              type="text"
+              placeholder="e.g. Paid in full to CSG Treasurer"
+              class="clean-input"
+            />
+          </div>
 
-            <div class="confirm-btn-wrap">
-              <UniButton 
-                variant="primary"
-                block
-                :loading="isProcessing"
-                :disabled="totalSelectedToPay <= 0 || walletBalanceCentavos < totalSelectedToPay"
-                :icon="flashOutline"
-                @click="handleConfirmPayment"
-              >
-                Confirm Simulated Payment
-              </UniButton>
+          <!-- Total Banner -->
+          <div class="settlement-banner">
+            <div class="banner-text">
+              <span class="banner-sub font-mono">{{ selectedObligationIds.length }} obligations</span>
+              <span class="banner-main">Total Payment Received:</span>
             </div>
+            <span class="banner-figure font-mono font-bold">{{ formatPeso(totalSelectedToPay) }}</span>
+          </div>
+
+          <UniButton
+            variant="primary"
+            :disabled="isProcessing || totalSelectedToPay <= 0"
+            @click="handleConfirmPayment"
+          >
+            <ion-spinner v-if="isProcessing" name="crescent" slot="start" />
+            <ion-icon v-else :icon="cashOutline" slot="start" />
+            <span>Record Payment & Generate Receipt</span>
+          </UniButton>
+        </UniCard>
+      </div>
+
+      <!-- 4. Official Printable Payment Receipt Sheet -->
+      <UniSheet
+        :is-open="isReceiptModalOpen"
+        title="Official Payment Receipt"
+        @close="handleDone"
+      >
+        <div v-if="completedReceipt" class="receipt-sheet-wrap">
+          <div class="receipt-header-center">
+            <div class="receipt-brand">UniTap 2.0</div>
+            <div class="receipt-sub">Computer Studies Government (CSG)</div>
+            <span class="badge-mini badge-warning">Locally Recorded • Sync Pending</span>
+          </div>
+
+          <div class="receipt-details-grid font-mono">
+            <div class="rec-row"><span>Ref #:</span><strong>{{ completedReceipt.referenceNumber }}</strong></div>
+            <div class="rec-row"><span>Date:</span><span>{{ new Date(completedReceipt.paymentDate).toLocaleString() }}</span></div>
+            <div class="rec-row"><span>Student:</span><strong>{{ completedReceipt.student.fullName }}</strong></div>
+            <div class="rec-row"><span>ID:</span><span>{{ completedReceipt.student.schoolId }}</span></div>
+            <div class="rec-row"><span>Method:</span><span>{{ completedReceipt.paymentMethod === 'CASH' ? 'Cash Collection' : 'Bank Transfer' }}</span></div>
+          </div>
+
+          <div class="receipt-items-table">
+            <div class="item-head">
+              <span>Obligation</span>
+              <span>Amount Paid</span>
+            </div>
+            <div v-for="it in completedReceipt.items" :key="it.obligationId" class="item-line">
+              <div class="item-info">
+                <span class="font-bold">{{ it.title }}</span>
+                <span class="item-rem font-mono">Remaining: {{ formatPeso(it.remainingBalanceCentavos) }}</span>
+              </div>
+              <span class="item-amt font-mono font-bold text-success">{{ formatPeso(it.paidAmountCentavos) }}</span>
+            </div>
+          </div>
+
+          <div class="receipt-total-box">
+            <span class="bold">TOTAL COLLECTED:</span>
+            <span class="total-figure font-mono font-bold text-success">{{ formatPeso(completedReceipt.totalPaidCentavos) }}</span>
+          </div>
+
+          <div class="receipt-actions">
+            <UniButton variant="outline" @click="printReceipt">
+              <ion-icon :icon="printOutline" slot="start" />
+              <span>Print / Save PDF</span>
+            </UniButton>
+            <UniButton variant="primary" @click="handleDone">
+              <span>Done</span>
+            </UniButton>
           </div>
         </div>
-      </div>
+      </UniSheet>
     </ion-content>
   </ion-page>
 </template>
 
 <style scoped>
-.workflow-container {
+.page-container {
+  padding: 4px 0 calc(96px + var(--ion-safe-area-bottom, 0px)) 0;
+  max-width: 680px;
+  margin: 0 auto;
   display: flex;
   flex-direction: column;
-  gap: 14px;
-}
-
-.error-banner {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  background: rgba(220, 75, 75, 0.1);
-  color: var(--ion-color-danger);
-  padding: 10px 14px;
-  border-radius: var(--app-btn-radius);
-  font-size: 13px;
-  font-weight: 500;
-}
-
-.step-card {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
-
-.step-header {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.step-badge {
-  width: 22px;
-  height: 22px;
-  border-radius: 50%;
-  background: var(--ion-color-primary);
-  color: #ffffff;
-  font-size: 11px;
-  font-weight: 700;
-  display: flex;
-  align-items: center;
-  justify-content: center;
+  gap: 16px;
 }
 
 .step-title {
-  font-size: 14px;
-  font-weight: 650;
-  color: var(--app-text-primary);
-  margin: 0;
-  flex: 1;
-}
-
-.nfc-tap-banner {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  background: var(--app-surface-subtle);
-  border: 1px dashed var(--app-border);
-  border-radius: 12px;
-  padding: 12px;
-}
-
-.nfc-tap-banner.scanning {
-  border-color: rgba(59, 130, 246, 0.5);
-  background: var(--app-accent-soft);
-}
-
-.nfc-icon-wrap {
-  width: 36px;
-  height: 36px;
-  border-radius: 50%;
-  background: var(--app-surface);
-  color: var(--ion-color-primary);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 18px;
-  flex-shrink: 0;
-  border: 1px solid var(--app-border);
-}
-
-.banner-text {
-  display: flex;
-  flex-direction: column;
-  gap: 1px;
-}
-
-.banner-title {
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--app-text-primary);
-}
-
-.banner-sub {
-  font-size: 11px;
-  color: var(--app-text-secondary);
+  font-size: 15px;
+  font-weight: 800;
+  color: var(--uni-ink, #0f172a);
   margin: 0;
 }
 
-.field-item {
+.card-header-row {
   display: flex;
-  flex-direction: column;
-  gap: 5px;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 12px;
+}
+
+.nfc-tap-prompt {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--uni-primary-bg, #ccfbf1);
+  color: var(--uni-primary-dark, #115e59);
+  padding: 8px 12px;
+  border-radius: 8px;
+  font-size: 12px;
+  font-weight: 700;
+  margin-bottom: 12px;
+}
+
+.pulse-icon {
+  animation: pulse 1.5s infinite;
+}
+
+@keyframes pulse {
+  0% { transform: scale(1); opacity: 1; }
+  50% { transform: scale(1.2); opacity: 0.7; }
+  100% { transform: scale(1); opacity: 1; }
 }
 
 .field-label {
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--app-text-secondary);
-}
-
-.field-label-sub {
   font-size: 11px;
-  font-weight: 500;
-  color: var(--app-text-secondary);
+  font-weight: 700;
+  text-transform: uppercase;
+  color: var(--uni-muted, #64748b);
+  margin-bottom: 4px;
 }
 
-.clean-select, .clean-input {
-  --background: var(--app-surface-subtle);
-  --color: var(--app-text-primary);
-  --padding-start: 12px;
-  --padding-end: 12px;
-  border: 1px solid var(--app-border);
-  border-radius: 10px;
+.clean-select,
+.clean-input {
+  width: 100%;
+  padding: 8px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--uni-border, #e2e8f0);
+  background: var(--uni-surface, #ffffff);
   font-size: 14px;
-  min-height: 44px;
+  font-weight: 600;
+  outline: none;
 }
 
-.wallet-balance-row {
+.obligations-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.obligation-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 10px 12px;
+  border: 1px solid var(--uni-border, #e2e8f0);
+  border-radius: 8px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.obligation-item:hover {
+  background: #f8fafc;
+}
+
+.obligation-item.is-selected {
+  border-color: var(--uni-primary, #0f766e);
+  background: #f0fdfa;
+}
+
+.ob-left {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  background: var(--app-surface-subtle);
-  border-radius: 12px;
-  padding: 12px 14px;
+  gap: 10px;
 }
 
-.wallet-stat {
+.ob-info {
   display: flex;
   flex-direction: column;
   gap: 2px;
 }
 
-.balance-num {
-  font-size: 20px;
-  font-weight: 700;
-  color: var(--ion-color-primary);
+.ob-title {
+  font-size: 13px;
+  color: var(--uni-ink, #0f172a);
 }
 
-.topup-quick-col {
+.ob-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+}
+
+.meta-date {
+  color: var(--uni-muted, #64748b);
+}
+
+.ob-right {
   display: flex;
   flex-direction: column;
   align-items: flex-end;
   gap: 4px;
 }
 
-.quick-topup-pills {
-  display: flex;
-  gap: 6px;
+.rem-label {
+  font-size: 11px;
+  color: var(--uni-muted, #64748b);
 }
 
-.mini-topup-pill {
-  padding: 4px 10px;
+.amount-input-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.currency-prefix {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--uni-primary-dark, #115e59);
+}
+
+.clean-input-inline {
+  width: 80px;
+  padding: 4px 6px;
   border-radius: 6px;
-  background: var(--app-surface);
-  border: 1px solid var(--app-border);
-  color: var(--app-text-primary);
-  font-size: 11px;
-  font-weight: 600;
+  border: 1px solid var(--uni-primary, #0f766e);
+  font-size: 13px;
+  font-weight: 700;
+  text-align: right;
+  outline: none;
+}
+
+.method-options {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.method-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--uni-border, #cbd5e1);
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 700;
   cursor: pointer;
   transition: all 0.15s ease;
 }
 
-.mini-topup-pill:active {
-  background: var(--app-accent-soft);
-  color: var(--ion-color-primary);
+.method-label.active {
+  border-color: var(--uni-primary, #0f766e);
+  background: var(--uni-primary-bg, #ccfbf1);
+  color: var(--uni-primary-dark, #115e59);
 }
 
-/* Charges Selection */
-.charges-selection-list {
+.settlement-banner {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 14px;
+  background: #f8fafc;
+  border: 1px solid var(--uni-border, #e2e8f0);
+  border-radius: 8px;
+  margin: 14px 0;
+}
+
+.banner-text {
   display: flex;
   flex-direction: column;
-  gap: 8px;
 }
 
-.charge-item-box {
-  background: var(--app-surface-subtle);
-  border: 1px solid var(--app-border);
-  border-radius: 10px;
+.banner-sub {
+  font-size: 11px;
+  color: var(--uni-muted, #64748b);
+}
+
+.banner-main {
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.banner-figure {
+  font-size: 18px;
+  color: var(--uni-primary-dark, #115e59);
+}
+
+.badge-mini {
+  font-size: 10px;
+  font-weight: 700;
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+
+.badge-success { background: #dcfce7; color: #15803d; }
+.badge-warning { background: #fef3c7; color: #b45309; }
+.badge-danger { background: #fee2e2; color: #b91c1c; }
+.badge-neutral { background: #f1f5f9; color: #64748b; }
+
+.error-banner {
+  background: #fef2f2;
+  border: 1px solid #fecaca;
+  color: #991b1b;
+  padding: 10px 14px;
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
+
+.receipt-sheet-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.receipt-header-center {
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+}
+
+.receipt-brand {
+  font-size: 18px;
+  font-weight: 900;
+  color: var(--uni-primary, #0f766e);
+}
+
+.receipt-sub {
+  font-size: 11px;
+  color: var(--uni-muted, #64748b);
+  margin-bottom: 4px;
+}
+
+.receipt-details-grid {
+  background: #f8fafc;
+  border: 1px dashed var(--uni-border, #cbd5e1);
+  border-radius: 8px;
   padding: 10px 12px;
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  transition: border-color 0.15s ease;
+  gap: 4px;
+  font-size: 12px;
 }
 
-.charge-item-box.selected {
-  border-color: var(--ion-color-primary);
-  background: var(--app-surface);
-}
-
-.charge-item-head {
+.rec-row {
   display: flex;
-  align-items: center;
   justify-content: space-between;
 }
 
-.custom-checkbox-label {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  cursor: pointer;
-}
-
-.custom-checkbox-label input[type="checkbox"] {
-  width: 16px;
-  height: 16px;
-  accent-color: var(--ion-color-primary);
-}
-
-.charge-name-text {
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--app-text-primary);
-}
-
-.charge-rem-val {
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--app-text-secondary);
-}
-
-.payment-amount-inline {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding-top: 6px;
-  border-top: 1px dashed var(--app-border);
-}
-
-.flex-1 {
-  flex: 1;
-}
-
-/* Summary Card */
-.summary-card {
+.receipt-items-table {
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  background: var(--app-surface);
+  gap: 6px;
+  border-top: 1px dashed var(--uni-border, #cbd5e1);
+  padding-top: 8px;
 }
 
-.summary-line {
+.item-head {
   display: flex;
-  align-items: center;
   justify-content: space-between;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--uni-muted, #64748b);
+  text-transform: uppercase;
+}
+
+.item-line {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 4px 0;
   font-size: 13px;
+}
+
+.item-info {
+  display: flex;
+  flex-direction: column;
+}
+
+.item-rem {
+  font-size: 11px;
+  color: var(--uni-muted, #64748b);
+}
+
+.receipt-total-box {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  background: #f8fafc;
+  border: 1px solid var(--uni-border, #e2e8f0);
+  border-radius: 8px;
+  padding: 12px;
 }
 
 .total-figure {
   font-size: 18px;
-  color: var(--app-text-primary);
-}
-
-.font-semibold {
-  font-weight: 600;
-}
-
-.confirm-btn-wrap {
-  margin-top: 6px;
-}
-
-.primary-submit-btn {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
-  width: 100%;
-  height: 46px;
-  border-radius: var(--app-btn-radius);
-  background: var(--ion-color-primary);
-  color: #ffffff;
-  border: none;
-  font-size: 14px;
-  font-weight: 600;
-  cursor: pointer;
-  box-shadow: 0 4px 14px rgba(59, 130, 246, 0.3);
-  transition: opacity 0.15s ease, transform 0.15s ease;
-}
-
-.primary-submit-btn:active {
-  transform: scale(0.985);
-  opacity: 0.92;
-}
-
-.primary-submit-btn:disabled {
-  opacity: 0.55;
-  cursor: not-allowed;
-  box-shadow: none;
-}
-
-.secondary-btn {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 100%;
-  height: 42px;
-  border-radius: var(--app-btn-radius);
-  background: var(--app-surface-subtle);
-  border: 1px solid var(--app-border);
-  color: var(--app-text-primary);
-  font-size: 13px;
-  font-weight: 600;
-  cursor: pointer;
-}
-
-/* Receipt Card */
-.receipt-card {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  text-align: center;
-  padding: 24px 18px;
-  gap: 12px;
-}
-
-.receipt-icon-circle {
-  width: 56px;
-  height: 56px;
-  border-radius: 50%;
-  background: rgba(21, 154, 116, 0.12);
-  color: var(--ion-color-success);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 28px;
-}
-
-.receipt-headline {
-  font-size: 18px;
-  font-weight: 700;
-  color: var(--app-text-primary);
-  margin: 0;
-}
-
-.receipt-sub {
-  font-size: 12px;
-  color: var(--app-text-secondary);
-  margin: -4px 0 6px 0;
-}
-
-.receipt-table {
-  width: 100%;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  background: var(--app-surface-subtle);
-  border-radius: 12px;
-  padding: 12px 14px;
-}
-
-.receipt-line {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  font-size: 12px;
-}
-
-.line-label {
-  color: var(--app-text-secondary);
-}
-
-.line-val {
-  color: var(--app-text-primary);
 }
 
 .receipt-actions {
-  width: 100%;
   display: flex;
-  flex-direction: column;
-  gap: 8px;
+  justify-content: flex-end;
+  gap: 10px;
   margin-top: 8px;
-}
-
-.btn-spinner {
-  width: 18px;
-  height: 18px;
 }
 </style>

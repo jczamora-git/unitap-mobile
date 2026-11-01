@@ -6,6 +6,7 @@ import type {
   UserRoleRecord,
   DeviceRecord,
   ActivationClaim,
+  ActivationClaimAuditRecord,
 } from '../../types/database';
 
 export class AuthRepository {
@@ -100,11 +101,34 @@ export class AuthRepository {
     );
   }
 
+  public static async assignUserRole(role: UserRoleRecord, adapter?: DatabaseAdapter): Promise<void> {
+    const db = await this.getDb(adapter);
+    await db.execute(
+      `INSERT INTO user_roles (id, user_id, role, semester_id, assigned_by_user_id, assigned_at, revoked_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET
+         role = excluded.role,
+         assigned_at = excluded.assigned_at,
+         revoked_at = excluded.revoked_at`,
+      [
+        role.id,
+        role.user_id,
+        role.role,
+        role.semester_id || null,
+        role.assigned_by_user_id || null,
+        role.assigned_at,
+        role.revoked_at || null,
+      ]
+    );
+  }
+
   public static async createActivationClaim(claim: ActivationClaim, adapter?: DatabaseAdapter): Promise<void> {
     const db = await this.getDb(adapter);
     await db.execute(
-      `INSERT INTO activation_claims (id, student_id, token_hash, issued_by_user_id, expires_at, used_at, revoked_at, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO activation_claims (
+        id, student_id, token_hash, issued_by_user_id, expires_at, used_at, revoked_at, created_at,
+        attempt_count, max_attempts, claimed_by_user_id, last_attempt_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         claim.id,
         claim.student_id,
@@ -114,6 +138,10 @@ export class AuthRepository {
         claim.used_at || null,
         claim.revoked_at || null,
         claim.created_at,
+        claim.attempt_count ?? 0,
+        claim.max_attempts ?? 5,
+        claim.claimed_by_user_id || null,
+        claim.last_attempt_at || null,
       ]
     );
   }
@@ -126,9 +154,67 @@ export class AuthRepository {
     );
   }
 
-  public static async markActivationClaimUsed(claimId: string, usedAt: string, adapter?: DatabaseAdapter): Promise<void> {
+  public static async getLatestActivationClaimByStudentId(studentId: string, adapter?: DatabaseAdapter): Promise<ActivationClaim | null> {
     const db = await this.getDb(adapter);
-    await db.execute('UPDATE activation_claims SET used_at = ? WHERE id = ?', [usedAt, claimId]);
+    return db.queryOne<ActivationClaim>(
+      'SELECT * FROM activation_claims WHERE student_id = ? ORDER BY created_at DESC LIMIT 1',
+      [studentId]
+    );
+  }
+
+  public static async markActivationClaimUsed(claimId: string, usedAt: string, claimedByUserId?: string, adapter?: DatabaseAdapter): Promise<void> {
+    const db = await this.getDb(adapter);
+    await db.execute(
+      'UPDATE activation_claims SET used_at = ?, claimed_by_user_id = coalesce(?, claimed_by_user_id) WHERE id = ?',
+      [usedAt, claimedByUserId || null, claimId]
+    );
+  }
+
+  public static async revokeActivationClaim(claimId: string, adapter?: DatabaseAdapter): Promise<void> {
+    const db = await this.getDb(adapter);
+    await db.execute('UPDATE activation_claims SET revoked_at = ? WHERE id = ?', [new Date().toISOString(), claimId]);
+  }
+
+  public static async incrementActivationAttempt(claimId: string, adapter?: DatabaseAdapter): Promise<number> {
+    const db = await this.getDb(adapter);
+    const now = new Date().toISOString();
+    await db.execute(
+      'UPDATE activation_claims SET attempt_count = attempt_count + 1, last_attempt_at = ? WHERE id = ?',
+      [now, claimId]
+    );
+    const row = await db.queryOne<{ attempt_count: number; max_attempts: number }>(
+      'SELECT attempt_count, max_attempts FROM activation_claims WHERE id = ?',
+      [claimId]
+    );
+    if (row && row.attempt_count >= row.max_attempts) {
+      await db.execute('UPDATE activation_claims SET revoked_at = ? WHERE id = ?', [now, claimId]);
+    }
+    return row?.attempt_count ?? 1;
+  }
+
+  public static async recordActivationAudit(audit: ActivationClaimAuditRecord, adapter?: DatabaseAdapter): Promise<void> {
+    const db = await this.getDb(adapter);
+    await db.execute(
+      `INSERT INTO activation_claims_audit (id, claim_id, student_id, action, performed_by_user_id, notes, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [
+        audit.id,
+        audit.claim_id || null,
+        audit.student_id,
+        audit.action,
+        audit.performed_by_user_id || null,
+        audit.notes || null,
+        audit.created_at,
+      ]
+    );
+  }
+
+  public static async getActivationAuditByStudentId(studentId: string, adapter?: DatabaseAdapter): Promise<ActivationClaimAuditRecord[]> {
+    const db = await this.getDb(adapter);
+    return db.query<ActivationClaimAuditRecord>(
+      'SELECT * FROM activation_claims_audit WHERE student_id = ? ORDER BY created_at DESC LIMIT 20',
+      [studentId]
+    );
   }
 
   public static async registerDevice(device: DeviceRecord, adapter?: DatabaseAdapter): Promise<void> {

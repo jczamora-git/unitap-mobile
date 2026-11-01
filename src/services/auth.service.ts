@@ -11,6 +11,8 @@ const LOCKOUT_KEY = 'unitap_auth_lockout_v2';
 export interface AuthSession {
   user: UserAccount;
   role: UserRoleRecord;
+  roles?: UserRoleRecord[];
+  activeWorkspace?: 'DEVADMIN' | 'OFFICER' | 'STUDENT';
   student?: StudentRecord | null;
   loggedInAt: string;
 }
@@ -19,6 +21,7 @@ export interface LoginResult {
   success: boolean;
   user?: UserAccount;
   role?: UserRoleRecord['role'];
+  roles?: UserRoleRecord['role'][];
   student?: StudentRecord | null;
   error?: string;
   lockedUntil?: string;
@@ -27,13 +30,51 @@ export interface LoginResult {
 class AuthService {
   private currentUser = ref<UserAccount | null>(null);
   private currentRole = ref<UserRoleRecord | null>(null);
+  private currentRoles = ref<UserRoleRecord[]>([]);
+  private currentWorkspace = ref<'DEVADMIN' | 'OFFICER' | 'STUDENT' | null>(null);
   private currentStudent = ref<StudentRecord | null>(null);
   private sessionInitialized = false;
 
   public user = computed(() => this.currentUser.value);
-  public role = computed(() => this.currentRole.value?.role || null);
+  public role = computed(() => {
+    if (this.currentRole.value?.role === 'DEVADMIN') return 'DEVADMIN';
+    return this.currentWorkspace.value || this.currentRole.value?.role || null;
+  });
+  public roles = computed(() => this.currentRoles.value.map((r) => r.role));
+  public activeWorkspace = computed(() => this.currentWorkspace.value);
   public student = computed(() => this.currentStudent.value);
   public isAuthenticated = computed(() => this.currentUser.value !== null);
+  public canSwitchWorkspace = computed(() => {
+    const r = this.currentRoles.value.map((x) => x.role);
+    return r.includes('STUDENT') && r.includes('OFFICER');
+  });
+
+  public hasRole(role: 'DEVADMIN' | 'OFFICER' | 'STUDENT'): boolean {
+    return this.currentRoles.value.some((r) => r.role === role && !r.revoked_at);
+  }
+
+  public async switchWorkspace(workspace: 'DEVADMIN' | 'OFFICER' | 'STUDENT'): Promise<void> {
+    if (!this.hasRole(workspace)) {
+      throw new Error(`User does not possess the ${workspace} role.`);
+    }
+    const matchingRole = this.currentRoles.value.find((r) => r.role === workspace && !r.revoked_at);
+    if (!matchingRole) return;
+
+    this.currentWorkspace.value = workspace;
+    this.currentRole.value = matchingRole;
+
+    if (this.currentUser.value) {
+      const session: AuthSession = {
+        user: this.currentUser.value,
+        role: matchingRole,
+        roles: this.currentRoles.value,
+        activeWorkspace: workspace,
+        student: this.currentStudent.value,
+        loggedInAt: new Date().toISOString(),
+      };
+      await Preferences.set({ key: SESSION_STORAGE_KEY, value: JSON.stringify(session) });
+    }
+  }
 
   public async initSession(): Promise<void> {
     if (this.sessionInitialized) return;
@@ -43,6 +84,8 @@ class AuthService {
         const session: AuthSession = JSON.parse(value);
         this.currentUser.value = session.user;
         this.currentRole.value = session.role;
+        this.currentRoles.value = session.roles || (session.role ? [session.role] : []);
+        this.currentWorkspace.value = session.activeWorkspace || session.role?.role || 'STUDENT';
         this.currentStudent.value = session.student || null;
       }
     } catch {
@@ -151,12 +194,15 @@ class AuthService {
       return { success: false, error: 'Invalid username, school ID, or password.' };
     }
 
-    // Fetch user role
+    // Fetch user roles
     const roles = await AuthRepository.getUserRoles(user.id);
     if (roles.length === 0) {
       return { success: false, error: 'No active role assigned to this account.' };
     }
-    const primaryRole = roles[0];
+    const hasAdmin = roles.find((r) => r.role === 'DEVADMIN');
+    const hasOfficer = roles.find((r) => r.role === 'OFFICER');
+    const primaryRole = hasAdmin || hasOfficer || roles[0];
+    const initialWorkspace = primaryRole.role;
 
     // Reset failed attempts upon successful authentication
     await this.resetFailedAttempts(cleanId);
@@ -164,11 +210,15 @@ class AuthService {
     // Save session
     this.currentUser.value = user;
     this.currentRole.value = primaryRole;
+    this.currentRoles.value = roles;
+    this.currentWorkspace.value = initialWorkspace;
     this.currentStudent.value = student;
 
     const session: AuthSession = {
       user,
       role: primaryRole,
+      roles,
+      activeWorkspace: initialWorkspace,
       student,
       loggedInAt: new Date().toISOString(),
     };
@@ -178,6 +228,7 @@ class AuthService {
       success: true,
       user,
       role: primaryRole.role,
+      roles: roles.map((r) => r.role),
       student,
     };
   }
@@ -185,17 +236,35 @@ class AuthService {
   public async logout(): Promise<void> {
     this.currentUser.value = null;
     this.currentRole.value = null;
+    this.currentRoles.value = [];
+    this.currentWorkspace.value = null;
     this.currentStudent.value = null;
     await Preferences.remove({ key: SESSION_STORAGE_KEY });
+
+    try {
+      const { SyncManager } = await import('@/services/sync/sync-manager');
+      SyncManager.stop();
+    } catch {
+      // Ignored
+    }
   }
 
-  public async setSession(user: UserAccount, role: UserRoleRecord, student?: StudentRecord | null): Promise<void> {
+  public async setSession(
+    user: UserAccount,
+    role: UserRoleRecord,
+    student?: StudentRecord | null,
+    allRoles?: UserRoleRecord[]
+  ): Promise<void> {
     this.currentUser.value = user;
     this.currentRole.value = role;
+    this.currentRoles.value = allRoles && allRoles.length > 0 ? allRoles : [role];
+    this.currentWorkspace.value = role.role;
     this.currentStudent.value = student || null;
     const session: AuthSession = {
       user,
       role,
+      roles: this.currentRoles.value,
+      activeWorkspace: role.role,
       student: student || null,
       loggedInAt: new Date().toISOString(),
     };
@@ -333,22 +402,35 @@ class AuthService {
     const cleanSchoolId = schoolId.trim();
     const student = await StudentsRepository.getStudentBySchoolId(cleanSchoolId);
     if (!student) {
-      throw new Error('Student record not found. Please contact an officer to verify your enrollment.');
+      throw new Error('Invalid activation code or school ID.');
     }
 
     const existingUser = await AuthRepository.getUserByStudentId(student.id);
     if (existingUser && existingUser.account_status === 'ACTIVE') {
-      throw new Error('This student account has already been activated. Please sign in with your credentials.');
+      throw new Error('This student record has already been activated. Please sign in or contact an officer.');
     }
 
     const tokenHash = await this.hashToken(activationCode);
     const claim = await AuthRepository.getActivationClaimByHash(tokenHash);
-    if (!claim) {
-      throw new Error('Invalid or already used activation code.');
+    const latestClaim = await AuthRepository.getLatestActivationClaimByStudentId(student.id);
+
+    if (!claim || claim.student_id !== student.id) {
+      if (latestClaim && !latestClaim.used_at && !latestClaim.revoked_at) {
+        await AuthRepository.incrementActivationAttempt(latestClaim.id);
+        await AuthRepository.recordActivationAudit({
+          id: 'aud_' + Math.random().toString(36).substring(2, 12),
+          claim_id: latestClaim.id,
+          student_id: student.id,
+          action: 'ATTEMPT_FAILED',
+          notes: 'Incorrect activation code submitted',
+          created_at: new Date().toISOString(),
+        });
+      }
+      throw new Error('Invalid activation code or school ID.');
     }
 
-    if (claim.student_id !== student.id) {
-      throw new Error('Activation code does not match this school ID.');
+    if ((claim.attempt_count ?? 0) >= (claim.max_attempts ?? 5)) {
+      throw new Error('Too many failed activation attempts. Code revoked. Please request a new one from an officer.');
     }
 
     if (new Date(claim.expires_at).getTime() < Date.now()) {
@@ -361,7 +443,7 @@ class AuthService {
 
     const user: UserAccount = {
       id: userId,
-      username: cleanSchoolId,
+      username: cleanSchoolId.toLowerCase(),
       student_id: student.id,
       account_status: 'ACTIVE',
       created_at: now,
@@ -383,7 +465,20 @@ class AuthService {
     };
 
     await AuthRepository.createUserWithCredentials(user, cred, role);
-    await AuthRepository.markActivationClaimUsed(claim.id, now);
+    await AuthRepository.markActivationClaimUsed(claim.id, now, userId);
+    await AuthRepository.recordActivationAudit({
+      id: 'aud_' + Math.random().toString(36).substring(2, 12),
+      claim_id: claim.id,
+      student_id: student.id,
+      action: 'CLAIMED',
+      performed_by_user_id: userId,
+      notes: 'Student self-registration completed',
+      created_at: now,
+    });
+
+    // Check and activate pending officer appointment if one exists for this student (Scenario B)
+    const { OfficerRepository } = await import('@/database/repositories/officer.repository');
+    await OfficerRepository.activatePendingAppointmentForStudent(student.id, userId);
 
     return user;
   }

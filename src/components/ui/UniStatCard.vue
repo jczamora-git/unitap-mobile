@@ -95,41 +95,38 @@ function handleClick(event: MouseEvent) {
 }
 
 .stat-icon-box {
-  width: 28px;
-  height: 28px;
-  border-radius: 8px;
+  width: 22px;
+  height: 22px;
+  background: transparent;
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 15px;
+  font-size: 21px;
 }
 
 .icon-box-mint {
-  background: rgba(112, 243, 207, 0.12);
-  color: #0E8560;
-}
-@media (prefers-color-scheme: dark) {
-  .icon-box-mint { color: var(--uni-mint); }
+  background: transparent;
+  color: var(--uni-primary);
 }
 
 .icon-box-blue {
-  background: rgba(101, 191, 255, 0.12);
+  background: transparent;
   color: var(--uni-blue);
 }
 
 .icon-box-violet {
-  background: rgba(139, 133, 246, 0.12);
+  background: transparent;
   color: var(--uni-violet);
 }
 
 .icon-box-amber {
-  background: rgba(255, 183, 143, 0.14);
-  color: #D97706;
+  background: transparent;
+  color: var(--uni-warning, #D97706);
 }
 
 .icon-box-neutral {
-  background: var(--uni-surface-elevated);
-  color: var(--uni-text-muted);
+  background: transparent;
+  color: var(--uni-text-secondary);
 }
 
 .stat-value-row {
@@ -155,5 +152,30 @@ function handleClick(event: MouseEvent) {
   color: var(--uni-text-muted);
   margin-top: 4px;
   line-height: 1.2;
+}
+
+@media (max-width: 380px) {
+  .uni-stat-card {
+    padding: 12px;
+    border-radius: 14px;
+  }
+
+  .stat-label {
+    font-size: 11.5px;
+  }
+
+  .stat-icon-box {
+    font-size: 18px;
+    width: 20px;
+    height: 20px;
+  }
+
+  .stat-num {
+    font-size: clamp(15px, 4.2vw, 18px);
+  }
+
+  .stat-meta {
+    font-size: 10.5px;
+  }
 }
 </style>

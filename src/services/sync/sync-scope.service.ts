@@ -25,7 +25,8 @@ export class SyncScopeService {
   }
 
   /**
-   * Returns tables required for hydration based on role
+   * Returns tables required for hydration based on role.
+   * Excludes privileged tables for students in compliance with RA 10173 data minimization.
    */
   public static getRequiredTablesForRole(role: UserRole): string[] {
     switch (role) {
@@ -34,49 +35,86 @@ export class SyncScopeService {
           'academic_years',
           'semesters',
           'programs',
+          'year_levels',
+          'sections',
+          'event_categories',
           'obligation_rules',
           'events',
           'event_occurrences',
+          'event_participants',
           'students',
           'student_enrollments',
           'nfc_cards',
           'attendance_records',
           'student_obligations',
           'payments',
+          'payment_allocations',
         ];
       case 'OFFICER':
         return [
           'academic_years',
           'semesters',
           'programs',
+          'year_levels',
+          'sections',
+          'event_categories',
           'obligation_rules',
           'students',
           'student_enrollments',
           'nfc_cards',
           'events',
           'event_occurrences',
+          'event_participants',
           'attendance_records',
           'student_obligations',
           'payments',
-          'simulated_wallets',
-          'simulated_wallet_ledger',
+          'payment_allocations',
         ];
       case 'STUDENT':
         return [
           'academic_years',
           'semesters',
           'programs',
+          'year_levels',
+          'sections',
+          'event_categories',
           'students',
           'student_enrollments',
           'events',
           'event_occurrences',
+          'event_participants',
           'attendance_records',
           'student_obligations',
           'payments',
-          'simulated_wallets',
-          'simulated_wallet_ledger',
         ];
     }
   }
-}
 
+  /**
+   * Returns scoped query filter to prevent unauthorized data downloads
+   */
+  public static getTableFilter(
+    tableName: string,
+    role: UserRole,
+    studentId?: string | null
+  ): { column: string; value: string } | null {
+    if (role === 'STUDENT' && studentId) {
+      if (tableName === 'students') {
+        return { column: 'id', value: studentId };
+      }
+      if (
+        [
+          'student_enrollments',
+          'attendance_records',
+          'student_obligations',
+          'payments',
+          'event_participants',
+          'nfc_cards',
+        ].includes(tableName)
+      ) {
+        return { column: 'student_id', value: studentId };
+      }
+    }
+    return null;
+  }
+}

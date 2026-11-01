@@ -53,6 +53,11 @@ const routes: Array<RouteRecordRaw> = [
     component: () => import('@/views/CreateEventPage.vue')
   },
   {
+    path: '/events/:id/edit',
+    name: 'EditEvent',
+    component: () => import('@/views/CreateEventPage.vue')
+  },
+  {
     path: '/events/:id',
     name: 'EventDetail',
     component: () => import('@/views/EventDetailPage.vue')
@@ -68,9 +73,24 @@ const routes: Array<RouteRecordRaw> = [
     component: () => import('@/views/StudentProfilePage.vue')
   },
   {
+    path: '/students/:id/edit',
+    name: 'EditStudent',
+    component: () => import('@/views/EditStudentPage.vue')
+  },
+  {
     path: '/finance/pay',
     name: 'MakePayment',
     component: () => import('@/views/MakePaymentPage.vue')
+  },
+  {
+    path: '/finance/absentees',
+    name: 'EventAbsentees',
+    component: () => import('@/views/EventAbsenteesPage.vue')
+  },
+  {
+    path: '/finance/contributions',
+    name: 'Contributions',
+    component: () => import('@/views/ContributionsPage.vue')
   },
   {
     path: '/finance/charges',
@@ -84,13 +104,60 @@ const routes: Array<RouteRecordRaw> = [
   },
   {
     path: '/finance/wallet/:studentId',
-    name: 'StudentWallet',
-    component: () => import('@/views/StudentWalletPage.vue')
+    redirect: (to) => `/students/${to.params.studentId}`
   },
   {
     path: '/settings',
     name: 'Settings',
     component: () => import('@/views/SettingsPage.vue')
+  },
+  {
+    path: '/settings/system-setup',
+    name: 'SystemSetupHub',
+    component: () => import('@/views/settings/SystemSetupHubPage.vue'),
+    meta: { requiresDevAdmin: true }
+  },
+  {
+    path: '/settings/system-setup/event-categories',
+    name: 'EventCategories',
+    component: () => import('@/views/settings/EventCategoriesPage.vue'),
+    meta: { requiresDevAdmin: true }
+  },
+  {
+    path: '/settings/system-setup/year-levels',
+    name: 'YearLevels',
+    component: () => import('@/views/settings/YearLevelsPage.vue'),
+    meta: { requiresDevAdmin: true }
+  },
+  {
+    path: '/settings/system-setup/sections',
+    name: 'Sections',
+    component: () => import('@/views/settings/SectionsPage.vue'),
+    meta: { requiresDevAdmin: true }
+  },
+  {
+    path: '/settings/system-setup/academic-years',
+    name: 'AcademicYears',
+    component: () => import('@/views/settings/AcademicYearsPage.vue'),
+    meta: { requiresDevAdmin: true }
+  },
+  {
+    path: '/settings/system-setup/semesters',
+    name: 'Semesters',
+    component: () => import('@/views/settings/SemestersPage.vue'),
+    meta: { requiresDevAdmin: true }
+  },
+  {
+    path: '/settings/system-setup/officers',
+    name: 'OfficerManagement',
+    component: () => import('@/views/settings/OfficerManagementPage.vue'),
+    meta: { requiresDevAdmin: true }
+  },
+  {
+    path: '/settings/system-setup/officers/create',
+    name: 'CreateOfficer',
+    component: () => import('@/views/settings/CreateOfficerPage.vue'),
+    meta: { requiresDevAdmin: true }
   },
   {
     path: '/diagnostics/device',
@@ -169,6 +236,13 @@ router.beforeEach(async (to, _from, next) => {
   } else if (authenticated && (to.path === '/login' || to.path === '/register')) {
     // If already logged in and visiting public auth, go to initial-sync or home
     next('/tabs/home');
+  } else if (to.matched.some((record) => record.meta?.requiresDevAdmin)) {
+    const role = SupabaseAuthService.role.value || authService.role.value;
+    if (role !== 'DEVADMIN') {
+      next('/tabs/home');
+    } else {
+      next();
+    }
   } else {
     next();
   }

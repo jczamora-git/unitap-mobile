@@ -2,224 +2,104 @@
   <ion-page>
     <ion-content :fullscreen="true" class="login-content">
       <div class="login-shell">
-        <!-- Hero Header -->
-        <div class="login-hero">
-          <div class="brand">
-            <div class="brandmark">◈</div>
-            <div class="brand-text">
-              <span class="brand-title">UniTap</span>
-              <span class="brand-version">2.0</span>
-            </div>
+        <!-- Top Navigation Bar -->
+        <header class="top-nav-bar">
+          <div class="brand-cluster">
+            <img src="/unitap-logo.png" alt="UniTap" class="brand-avatar" />
+            <span class="brand-name">UniTap</span>
           </div>
-          <div class="hero-body">
-            <div class="eyebrow">OFFLINE-FIRST CAMPUS OS</div>
-            <h1>Every tap. Secure & organized.</h1>
-            <p>One identity for every semester. Offline event attendance, academic history, and transparent fines & contributions.</p>
-          </div>
-          <div class="offline-pill">
-            <span class="dot"></span> OFFLINE OPERATION READY
-          </div>
-        </div>
+        </header>
 
-        <!-- Form Card Container -->
-        <div class="login-card-container">
-          <div class="login-card">
-            <!-- Tabs -->
-            <div class="tabs-nav">
-              <button
-                type="button"
-                :class="{ active: activeTab === 'signin' }"
-                @click="activeTab = 'signin'"
-              >
-                Sign In
-              </button>
-              <button
-                type="button"
-                :class="{ active: activeTab === 'activate' }"
-                @click="activeTab = 'activate'"
-              >
-                Student Activate
-              </button>
-              <button
-                v-if="!hasAdminConfigured"
-                type="button"
-                :class="{ active: activeTab === 'setup' }"
-                @click="activeTab = 'setup'"
-              >
-                Initial Admin
-              </button>
+        <!-- Main Body: Centered vertically with comfortable gap for balanced mobile composition -->
+        <main class="login-body">
+          <!-- Hero Section: Headline matching UniTap NFC attendance & verification -->
+          <section class="hero-section">
+            <div class="hero-text-block">
+              <h1 class="hero-headline">
+                Every tap. <br />
+                <span class="headline-inline-row">
+                  <ion-icon :icon="cardOutline" class="headline-inline-icon" aria-hidden="true" />
+                  <span class="headline-mid">Campus Attendance</span>
+                </span> <br />
+                <span class="highlight-text">Fast &amp; Verified</span>
+              </h1>
+            </div>
+          </section>
+
+          <!-- Form Section: Balanced layout with left-aligned controls -->
+          <section class="form-section">
+            <!-- Error Alert -->
+            <div v-if="errorMessage" class="alert-box alert-error" role="alert">
+              <ion-icon :icon="informationCircleOutline" class="alert-icon" />
+              <span>{{ errorMessage }}</span>
             </div>
 
-            <!-- Sign In Form -->
-            <form v-if="activeTab === 'signin'" @submit.prevent="handleSignIn" class="auth-form">
-              <h2 class="form-title">Welcome back</h2>
-              <p class="form-sub">Sign in to manage your UniTap profile, attendance, and campus activities.</p>
-
-              <div v-if="errorMessage" class="error-banner">
-                {{ errorMessage }}
+            <!-- SIGN IN FORM -->
+            <form @submit.prevent="handleSignIn" class="form-flow">
+              <!-- Identifier Input -->
+              <div class="form-group">
+                <label for="login-id" class="input-label">Email or School ID</label>
+                <div class="modern-input-box">
+                  <ion-icon :icon="mailOutline" class="input-lead-icon" />
+                  <span class="input-pipe" aria-hidden="true"></span>
+                  <input
+                    id="login-id"
+                    v-model="loginIdentifier"
+                    type="text"
+                    placeholder="example@gmail.com"
+                    required
+                    autocomplete="username"
+                    class="clean-input"
+                  />
+                </div>
               </div>
 
+              <!-- Password Input -->
               <div class="form-group">
-                <label for="login-id">Email, Username, or School ID</label>
-                <input
-                  id="login-id"
-                  v-model="loginIdentifier"
-                  type="text"
-                  placeholder="admin@unitap.com or devadmin"
-                  required
-                  autocomplete="username"
-                  class="custom-input"
-                />
-              </div>
-
-              <div class="form-group">
-                <label for="login-password">Password</label>
-                <div class="password-wrapper">
+                <label for="login-password" class="input-label">Password</label>
+                <div class="modern-input-box">
+                  <ion-icon :icon="lockClosedOutline" class="input-lead-icon" />
+                  <span class="input-pipe" aria-hidden="true"></span>
                   <input
                     id="login-password"
                     v-model="loginPassword"
                     :type="showPassword ? 'text' : 'password'"
-                    placeholder="Enter your password"
+                    placeholder="••••••••••••"
                     required
                     autocomplete="current-password"
-                    class="custom-input"
+                    class="clean-input"
                   />
-                  <button type="button" class="btn-toggle-pass" @click="showPassword = !showPassword">
-                    {{ showPassword ? 'Hide' : 'Show' }}
+                  <button 
+                    type="button" 
+                    class="btn-eye-toggle" 
+                    :aria-label="showPassword ? 'Hide password' : 'Show password'"
+                    @click="showPassword = !showPassword"
+                  >
+                    <ion-icon :icon="showPassword ? eyeOffOutline : eyeOutline" class="eye-icon" />
+                    <span class="eye-text">{{ showPassword ? 'Hide' : 'Show' }}</span>
                   </button>
                 </div>
               </div>
 
-              <button type="submit" class="btn-primary" :disabled="loading">
-                <span v-if="loading">Signing in...</span>
-                <span v-else>Sign In →</span>
+              <!-- Primary Login Button with Chevron -->
+              <button type="submit" class="modern-login-btn" :disabled="loading">
+                <ion-spinner v-if="loading" name="crescent" class="btn-spinner" />
+                <template v-else>
+                  <span class="btn-text">Login</span>
+                  <ion-icon :icon="chevronForwardOutline" class="btn-chevron" />
+                </template>
               </button>
 
-              <div class="form-footer">
-                <span>New student? </span>
-                <button type="button" class="btn-link" @click="activeTab = 'activate'">
-                  Activate your account
+              <!-- Clean Minimal Helper Style -->
+              <div class="helper-footer">
+                <span class="helper-text">Don't have an account? </span>
+                <button type="button" class="btn-text-link" @click="router.push('/register')">
+                  Activate account
                 </button>
               </div>
             </form>
-
-            <!-- Student Activation Form -->
-            <form v-else-if="activeTab === 'activate'" @submit.prevent="handleActivate" class="auth-form">
-              <h2 class="form-title">Activate student account</h2>
-              <p class="form-sub">Only enrolled students in the official roster can activate their student account.</p>
-
-              <div v-if="errorMessage" class="error-banner">
-                {{ errorMessage }}
-              </div>
-              <div v-if="successMessage" class="success-banner">
-                {{ successMessage }}
-              </div>
-
-              <div class="form-group">
-                <label for="act-school-id">School ID</label>
-                <input
-                  id="act-school-id"
-                  v-model="actSchoolId"
-                  type="text"
-                  placeholder="e.g. 2026-0001"
-                  required
-                  class="custom-input"
-                />
-              </div>
-
-              <div class="form-group">
-                <label for="act-code">Activation Code</label>
-                <input
-                  id="act-code"
-                  v-model="actCode"
-                  type="text"
-                  placeholder="Provided by an authorized officer"
-                  required
-                  class="custom-input"
-                />
-              </div>
-
-              <div class="form-group">
-                <label for="act-password">Create Password</label>
-                <div class="password-wrapper">
-                  <input
-                    id="act-password"
-                    v-model="actPassword"
-                    :type="showActPassword ? 'text' : 'password'"
-                    placeholder="At least 8 characters"
-                    minlength="8"
-                    required
-                    class="custom-input"
-                  />
-                  <button type="button" class="btn-toggle-pass" @click="showActPassword = !showActPassword">
-                    {{ showActPassword ? 'Hide' : 'Show' }}
-                  </button>
-                </div>
-              </div>
-
-              <div class="form-group">
-                <label for="act-confirm">Confirm Password</label>
-                <input
-                  id="act-confirm"
-                  v-model="actConfirmPassword"
-                  type="password"
-                  placeholder="Re-enter password"
-                  minlength="8"
-                  required
-                  class="custom-input"
-                />
-              </div>
-
-              <button type="submit" class="btn-primary" :disabled="loading">
-                <span v-if="loading">Activating...</span>
-                <span v-else>Activate Student Account →</span>
-              </button>
-
-              <div class="form-footer">
-                <span>Already activated? </span>
-                <button type="button" class="btn-link" @click="activeTab = 'signin'">
-                  Back to Sign In
-                </button>
-              </div>
-            </form>
-
-            <!-- Initial DevAdmin Setup Form -->
-            <form v-else-if="activeTab === 'setup'" @submit.prevent="handleInitialSetup" class="auth-form">
-              <h2 class="form-title">Initial Admin Setup</h2>
-              <p class="form-sub">No administrator is provisioned yet. Set the initial password for <strong>devadmin</strong>.</p>
-
-              <div v-if="errorMessage" class="error-banner">
-                {{ errorMessage }}
-              </div>
-              <div v-if="successMessage" class="success-banner">
-                {{ successMessage }}
-              </div>
-
-              <div class="form-group">
-                <label for="setup-password">Admin Password</label>
-                <div class="password-wrapper">
-                  <input
-                    id="setup-password"
-                    v-model="setupPassword"
-                    :type="showSetupPassword ? 'text' : 'password'"
-                    placeholder="Enter strong admin password"
-                    minlength="8"
-                    required
-                    class="custom-input"
-                  />
-                  <button type="button" class="btn-toggle-pass" @click="showSetupPassword = !showSetupPassword">
-                    {{ showSetupPassword ? 'Hide' : 'Show' }}
-                  </button>
-                </div>
-              </div>
-
-              <button type="submit" class="btn-primary" :disabled="loading">
-                <span v-if="loading">Provisioning...</span>
-                <span v-else>Provision DEVADMIN Account →</span>
-              </button>
-            </form>
-          </div>
-        </div>
+          </section>
+        </main>
       </div>
     </ion-content>
   </ion-page>
@@ -228,7 +108,16 @@
 <script setup lang="ts">
 import { ref, onMounted } from 'vue';
 import { useRouter } from 'vue-router';
-import { IonPage, IonContent } from '@ionic/vue';
+import { IonPage, IonContent, IonIcon, IonSpinner } from '@ionic/vue';
+import {
+  cardOutline,
+  mailOutline,
+  lockClosedOutline,
+  eyeOutline,
+  eyeOffOutline,
+  chevronForwardOutline,
+  informationCircleOutline,
+} from 'ionicons/icons';
 import { authService } from '@/services/auth.service';
 import { SupabaseAuthService } from '@/integrations/supabase/auth.service';
 import { InitialSyncService } from '@/services/sync/initial-sync.service';
@@ -237,36 +126,16 @@ import { LegacyMigrationService } from '@/services/legacy-migration.service';
 
 const router = useRouter();
 
-const activeTab = ref<'signin' | 'activate' | 'setup'>('signin');
-const hasAdminConfigured = ref(true);
 const loading = ref(false);
 const errorMessage = ref('');
-const successMessage = ref('');
 
 // Sign In
 const loginIdentifier = ref('');
 const loginPassword = ref('');
 const showPassword = ref(false);
 
-// Activate
-const actSchoolId = ref('');
-const actCode = ref('');
-const actPassword = ref('');
-const actConfirmPassword = ref('');
-const showActPassword = ref(false);
-
-// Initial Setup
-const setupPassword = ref('');
-const showSetupPassword = ref(false);
-
 onMounted(async () => {
-  // Check migration & admin setup
   await LegacyMigrationService.runMigrationIfNeeded();
-  const configured = await authService.isDevAdminConfigured();
-  hasAdminConfigured.value = configured;
-  if (!configured) {
-    activeTab.value = 'setup';
-  }
 });
 
 async function handleSignIn() {
@@ -285,17 +154,18 @@ async function handleSignIn() {
     }
 
     if (res.success) {
-      SyncManager.start();
+      const activeUserId = SupabaseAuthService.user.value?.id || authService.user.value?.id || 'dev_user';
+      await SyncManager.start(activeUserId);
 
-      // Check if local database has completed initial hydration
-      const hydrated = await InitialSyncService.isHydrated();
+      // Check if local database has completed initial hydration for this user
+      const hydrated = await InitialSyncService.isHydrated(activeUserId);
       if (!hydrated && !res.isOffline) {
         router.replace('/initial-sync');
       } else {
         router.replace('/tabs/home');
       }
     } else {
-      errorMessage.value = res.error || 'Failed to sign in.';
+      errorMessage.value = res.error || 'Failed to sign in. Please verify your credentials.';
     }
   } catch (err: unknown) {
     errorMessage.value = (err as Error).message || 'An unexpected error occurred.';
@@ -303,320 +173,324 @@ async function handleSignIn() {
     loading.value = false;
   }
 }
-
-async function handleActivate() {
-  errorMessage.value = '';
-  successMessage.value = '';
-
-  if (actPassword.value !== actConfirmPassword.value) {
-    errorMessage.value = 'Passwords do not match.';
-    return;
-  }
-
-  loading.value = true;
-  try {
-    await authService.activateStudentAccount(actSchoolId.value, actCode.value, actPassword.value);
-    successMessage.value = 'Account successfully activated! You can now sign in.';
-    loginIdentifier.value = actSchoolId.value;
-    activeTab.value = 'signin';
-  } catch (err: unknown) {
-    errorMessage.value = (err as Error).message || 'Activation failed.';
-  } finally {
-    loading.value = false;
-  }
-}
-
-async function handleInitialSetup() {
-  errorMessage.value = '';
-  successMessage.value = '';
-  loading.value = true;
-  try {
-    await authService.setupInitialDevAdmin(setupPassword.value);
-    hasAdminConfigured.value = true;
-    successMessage.value = 'DEVADMIN successfully provisioned. You may now sign in with username: devadmin';
-    loginIdentifier.value = 'devadmin';
-    activeTab.value = 'signin';
-  } catch (err: unknown) {
-    errorMessage.value = (err as Error).message || 'Setup failed.';
-  } finally {
-    loading.value = false;
-  }
-}
 </script>
 
 <style scoped>
+/* Clean pure white background matching reference design */
 .login-content {
-  --background: var(--uni-background, #F8FAFC);
+  --background: #FFFFFF;
+  background: #FFFFFF;
+}
+
+.login-content::part(scroll) {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 100%;
+  background: #FFFFFF;
 }
 
 .login-shell {
-  min-height: 100vh;
-  display: flex;
-  flex-direction: column;
-}
-
-@media (min-width: 768px) {
-  .login-shell {
-    display: grid;
-    grid-template-columns: 45% 55%;
-  }
-}
-
-.login-hero {
-  background: linear-gradient(145deg, #0b2535 0%, #0d3c43 50%, #0f766e 100%);
-  color: white;
-  padding: 36px 28px;
+  flex: 1;
   display: flex;
   flex-direction: column;
   justify-content: space-between;
-  gap: 24px;
+  width: 100%;
+  min-height: 100%;
+  padding: 24px 28px calc(36px + var(--ion-safe-area-bottom, 0px));
+  max-width: 440px;
+  margin: 0 auto;
+  box-sizing: border-box;
+  background: #FFFFFF;
 }
 
-.brand {
-  display: flex;
-  align-items: center;
-  gap: 12px;
+@media (max-width: 380px) {
+  .login-shell {
+    padding: 16px 20px 28px;
+  }
 }
 
-.brandmark {
-  width: 44px;
-  height: 44px;
-  border-radius: 14px;
-  background: rgba(255, 255, 255, 0.15);
-  border: 1px solid rgba(255, 255, 255, 0.3);
+/* Top Navigation Bar */
+.top-nav-bar {
   display: flex;
   align-items: center;
+  justify-content: flex-start;
+  padding: 6px 0 16px;
+  flex-shrink: 0;
+}
+
+.brand-cluster {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.brand-avatar {
+  width: 28px;
+  height: 28px;
+  border-radius: 7px;
+  object-fit: contain;
+}
+
+.brand-name {
+  font-size: 18px;
+  font-weight: 750;
+  letter-spacing: -0.02em;
+  color: #0F172A;
+}
+
+/* Main Body: Balanced vertical layout, centered content block, left-aligned text */
+.login-body {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
   justify-content: center;
-  font-size: 22px;
-  color: #9fe7d8;
+  padding: 16px 0 24px;
+  gap: 32px;
+  width: 100%;
+  text-align: left;
 }
 
-.brand-title {
-  font-size: 22px;
+/* Hero Section: Big bold headline */
+.hero-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  text-align: left;
+  flex-shrink: 0;
+}
+
+.hero-text-block {
+  width: 100%;
+  text-align: left;
+}
+
+.hero-headline {
+  font-size: clamp(28px, 7.5vw, 34px);
   font-weight: 800;
-  letter-spacing: -0.5px;
+  line-height: 1.15;
+  letter-spacing: -0.03em;
+  color: #0F172A;
+  margin: 0;
+  text-align: left;
 }
 
-.brand-version {
-  font-size: 11px;
-  color: #a7f3d0;
-  margin-left: 6px;
-  font-weight: 700;
-  background: rgba(255, 255, 255, 0.1);
-  padding: 2px 6px;
-  border-radius: 6px;
-}
-
-.hero-body h1 {
-  font-size: 28px;
-  font-weight: 800;
-  line-height: 1.2;
-  letter-spacing: -1px;
-  margin: 12px 0 8px;
-}
-
-.hero-body p {
-  font-size: 14px;
-  color: #d4e9e9;
-  line-height: 1.6;
-}
-
-.eyebrow {
-  font-size: 11px;
-  font-weight: 800;
-  letter-spacing: 1.5px;
-  color: #9fe7d8;
-}
-
-.offline-pill {
+.headline-inline-row {
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  background: rgba(204, 251, 241, 0.2);
-  border: 1px solid rgba(167, 243, 208, 0.3);
-  color: #a7f3d0;
-  font-size: 11px;
+}
+
+.headline-inline-icon {
+  font-size: 26px;
+  color: #0F172A;
+  flex-shrink: 0;
+}
+
+.headline-mid {
   font-weight: 800;
-  padding: 8px 14px;
-  border-radius: 9999px;
-  align-self: flex-start;
+  color: #0F172A;
 }
 
-.offline-pill .dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: #34d399;
-}
-
-.login-card-container {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 32px 24px 48px;
-}
-
-.login-card {
-  width: 100%;
-  max-width: 440px;
-}
-
-.tabs-nav {
-  display: flex;
-  background: #e2e8f0;
-  padding: 4px;
-  border-radius: 12px;
-  gap: 4px;
-  margin-bottom: 24px;
-}
-
-.tabs-nav button {
-  flex: 1;
-  border: 0;
-  border-radius: 10px;
-  background: transparent;
-  color: #64748b;
-  font-size: 13px;
-  font-weight: 700;
-  padding: 10px 4px;
-  cursor: pointer;
-  transition: all 0.15s ease;
-}
-
-.tabs-nav button.active {
-  background: #ffffff;
-  color: #0f172a;
-  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.08);
-}
-
-.auth-form {
-  background: #ffffff;
-  padding: 24px;
-  border-radius: 18px;
-  border: 1px solid var(--uni-border, #CBD5E1);
-  box-shadow: 0 4px 16px rgba(15, 23, 42, 0.04);
-}
-
-.form-title {
-  font-size: 22px;
+.highlight-text {
+  color: #0F766E;
+  display: inline-block;
   font-weight: 800;
-  color: var(--uni-ink, #0F172A);
-  margin: 0 0 6px;
 }
 
-.form-sub {
-  font-size: 13px;
-  color: var(--uni-muted, #64748B);
-  margin: 0 0 20px;
-  line-height: 1.5;
+/* Form Section: Balanced layout with left-aligned inputs */
+.form-section {
+  display: flex;
+  flex-direction: column;
+  padding-bottom: 8px;
+  flex-shrink: 0;
+  text-align: left;
+}
+
+.form-flow {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
 }
 
 .form-group {
-  margin-bottom: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
 }
 
-.form-group label {
-  display: block;
-  font-size: 12px;
-  font-weight: 700;
-  color: #334155;
-  margin-bottom: 6px;
+.input-label {
+  font-size: 13px;
+  font-weight: 650;
+  color: #0F172A;
+  letter-spacing: -0.01em;
 }
 
-.custom-input {
-  width: 100%;
-  padding: 12px 14px;
-  border: 1.5px solid var(--uni-border, #CBD5E1);
-  border-radius: 12px;
-  font-size: 14px;
-  color: var(--uni-ink, #0F172A);
-  background: #ffffff;
-  outline: none;
-  box-sizing: border-box;
+/* Modern Input Box (Matches Image 1 reference) */
+.modern-input-box {
+  display: flex;
+  align-items: center;
+  height: 50px;
+  border-radius: 16px;
+  background: #F8FAFC;
+  border: 1.5px solid #E2E8F0;
+  padding: 0 16px;
+  gap: 12px;
+  transition: border-color 0.15s ease, background 0.15s ease, box-shadow 0.15s ease;
 }
 
-.custom-input:focus {
-  border-color: var(--uni-primary, #0F766E);
+.modern-input-box:focus-within {
+  border-color: #0F766E;
+  background: #FFFFFF;
   box-shadow: 0 0 0 3px rgba(15, 118, 110, 0.12);
 }
 
-.password-wrapper {
-  position: relative;
+.input-lead-icon {
+  font-size: 19px;
+  color: #64748B;
+  flex-shrink: 0;
 }
 
-.btn-toggle-pass {
-  position: absolute;
-  right: 8px;
-  top: 50%;
-  transform: translateY(-50%);
-  background: none;
-  border: 0;
-  color: var(--uni-primary, #0F766E);
-  font-size: 12px;
-  font-weight: 700;
-  padding: 6px 8px;
-  cursor: pointer;
+.input-pipe {
+  width: 1px;
+  height: 20px;
+  background: #CBD5E1;
+  flex-shrink: 0;
 }
 
-.btn-primary {
-  width: 100%;
-  background: var(--uni-primary, #0F766E);
-  color: #ffffff;
+.clean-input {
+  flex: 1;
+  min-width: 0;
   border: 0;
-  border-radius: 12px;
-  padding: 14px;
+  background: transparent;
+  outline: none;
   font-size: 14px;
-  font-weight: 800;
+  color: #0F172A;
+  font-family: inherit;
+}
+
+.clean-input::placeholder {
+  color: #94A3B8;
+  font-size: 13.5px;
+}
+
+/* Password Eye / Show toggle */
+.btn-eye-toggle {
+  background: transparent;
+  border: 0;
+  padding: 4px 6px;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: #64748B;
   cursor: pointer;
-  margin-top: 8px;
-  box-shadow: 0 4px 12px rgba(15, 118, 110, 0.2);
+  border-radius: 6px;
+  transition: color 0.15s ease;
 }
 
-.btn-primary:hover {
-  background: var(--uni-primary-dark, #115E59);
+.btn-eye-toggle:hover {
+  color: #0F766E;
 }
 
-.btn-primary:disabled {
-  opacity: 0.65;
+.eye-icon {
+  font-size: 17px;
+}
+
+.eye-text {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+
+/* Modern Login Pill Button (Matches Image 1 reference) */
+.modern-login-btn {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  height: 52px;
+  border-radius: 9999px;
+  background: #18191E;
+  color: #FFFFFF;
+  border: 0;
+  padding: 0 24px;
+  font-size: 14.5px;
+  font-weight: 650;
+  cursor: pointer;
+  margin-top: 6px;
+  transition: transform 0.15s ease, background 0.15s ease;
+}
+
+.modern-login-btn:hover:not(:disabled) {
+  background: #272B33;
+}
+
+.modern-login-btn:active:not(:disabled) {
+  transform: scale(0.985);
+}
+
+.modern-login-btn:disabled {
+  opacity: 0.6;
   cursor: not-allowed;
 }
 
-.form-footer {
-  text-align: center;
-  font-size: 12px;
-  color: var(--uni-muted, #64748B);
-  margin-top: 18px;
+.btn-chevron {
+  font-size: 19px;
 }
 
-.btn-link {
-  background: none;
+.btn-spinner {
+  margin: 0 auto;
+}
+
+/* Helper Footer */
+.helper-footer {
+  text-align: center;
+  font-size: 13px;
+  color: #64748B;
+  margin-top: 6px;
+}
+
+.helper-text {
+  color: #64748B;
+}
+
+.btn-text-link {
+  background: transparent;
   border: 0;
-  color: var(--uni-primary, #0F766E);
+  color: #0F766E;
   font-weight: 700;
   cursor: pointer;
   padding: 0;
+  font-size: 13px;
+  text-decoration: underline;
+  text-underline-offset: 2px;
 }
 
-.error-banner {
-  background: #fef2f2;
-  border: 1px solid #fecaca;
-  color: var(--uni-danger, #B91C1C);
-  padding: 10px 12px;
-  border-radius: 10px;
-  font-size: 12px;
-  margin-bottom: 16px;
-  line-height: 1.4;
+.btn-text-link:hover {
+  color: #115E59;
 }
 
-.success-banner {
-  background: #f0fdf4;
-  border: 1px solid #bbf7d0;
-  color: var(--uni-success, #047857);
-  padding: 10px 12px;
-  border-radius: 10px;
-  font-size: 12px;
-  margin-bottom: 16px;
+/* Alert Boxes */
+.alert-box {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  border-radius: 12px;
+  font-size: 12.5px;
+  font-weight: 550;
   line-height: 1.4;
+  margin-bottom: 12px;
+}
+
+.alert-error {
+  background: #FEF2F2;
+  border: 1px solid #FECACA;
+  color: #B91C1C;
+}
+
+.alert-icon {
+  font-size: 18px;
+  flex-shrink: 0;
 }
 </style>
-

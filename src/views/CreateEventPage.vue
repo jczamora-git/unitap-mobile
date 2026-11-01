@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { ref } from 'vue';
-import { useRouter } from 'vue-router';
+import { ref, computed, onMounted } from 'vue';
+import { useRouter, useRoute } from 'vue-router';
 import {
   IonPage,
   IonContent,
@@ -12,18 +12,28 @@ import {
 } from '@ionic/vue';
 import { checkmarkOutline, closeCircleOutline } from 'ionicons/icons';
 import { eventService } from '@/services/event.service';
+import { AcademicRepository } from '@/database/repositories/academic.repository';
 import type { EventType, AudienceType } from '@/types/event';
+import type { EventCategory, YearLevel, SectionRecord } from '@/types/database';
 import { UniPageHeader, UniButton } from '@/components/ui';
 
 const router = useRouter();
+const route = useRoute();
+const eventId = computed(() => String(route.params.id || ''));
+const isEditMode = computed(() => !!eventId.value);
 
 const title = ref('');
 const description = ref('');
 const eventType = ref<EventType>('General Assembly');
+const selectedCategoryId = ref<string>('');
 const audienceType = ref<AudienceType>('ALL_BSIT');
 
+const categories = ref<EventCategory[]>([]);
+const yearLevels = ref<YearLevel[]>([]);
+const availableSections = ref<SectionRecord[]>([]);
+
 const selectedYears = ref<number[]>([1, 2, 3, 4]);
-const selectedSections = ref<string[]>(['BSIT-1A', 'BSIT-2A', 'BSIT-3A', 'BSIT-4A']);
+const selectedSections = ref<string[]>(['1F1', '2F1', '3F1', '4F1']);
 const customSectionInput = ref('');
 
 // Session occurrence
@@ -37,11 +47,68 @@ const gracePeriodMinutes = ref(15);
 const isSubmitting = ref(false);
 const errorMessage = ref('');
 
+onMounted(async () => {
+  try {
+    const [cats, yls, secs] = await Promise.all([
+      AcademicRepository.getEventCategories(),
+      AcademicRepository.getYearLevels(),
+      AcademicRepository.getSections(),
+    ]);
+    categories.value = cats;
+    yearLevels.value = yls;
+    availableSections.value = secs;
+
+    if (cats.length > 0) {
+      eventType.value = cats[0].name;
+      selectedCategoryId.value = cats[0].id;
+    }
+    if (yls.length > 0) {
+      selectedYears.value = yls.map(y => y.level_number);
+    }
+
+    if (isEditMode.value) {
+      const existing = await eventService.getEvent(eventId.value);
+      if (existing) {
+        title.value = existing.title;
+        description.value = existing.description || '';
+        eventType.value = existing.type;
+        const matched = cats.find(c => c.name === existing.type);
+        if (matched) selectedCategoryId.value = matched.id;
+        if (existing.audience) {
+          audienceType.value = existing.audience.type;
+          if (existing.audience.yearLevels) selectedYears.value = existing.audience.yearLevels;
+          if (existing.audience.sections) selectedSections.value = existing.audience.sections;
+        }
+      }
+    }
+  } catch (err) {
+    console.error('Failed to load setup options for event creation:', err);
+  }
+});
+
+function handleCategoryChange(val: string) {
+  eventType.value = val;
+  const match = categories.value.find(c => c.name === val || c.id === val);
+  if (match) {
+    selectedCategoryId.value = match.id;
+    eventType.value = match.name;
+  }
+}
+
 function toggleYear(y: number) {
   if (selectedYears.value.includes(y)) {
     selectedYears.value = selectedYears.value.filter(item => item !== y);
   } else {
     selectedYears.value.push(y);
+  }
+}
+
+function togglePredefinedSection(secName: string) {
+  const clean = secName.trim().toUpperCase();
+  if (selectedSections.value.includes(clean)) {
+    selectedSections.value = selectedSections.value.filter(s => s !== clean);
+  } else {
+    selectedSections.value.push(clean);
   }
 }
 
@@ -80,6 +147,21 @@ async function handleSaveEvent() {
 
   isSubmitting.value = true;
   try {
+    if (isEditMode.value) {
+      await eventService.updateEvent(eventId.value, {
+        title: title.value.trim(),
+        description: description.value.trim(),
+        type: eventType.value,
+        audience: {
+          type: audienceType.value,
+          yearLevels: audienceType.value === 'YEAR_LEVEL' ? selectedYears.value : undefined,
+          sections: audienceType.value === 'SECTION' ? selectedSections.value : undefined
+        }
+      });
+      router.replace(`/events/${eventId.value}`);
+      return;
+    }
+
     const event = await eventService.createEvent({
       title: title.value.trim(),
       description: description.value.trim(),
@@ -115,10 +197,10 @@ async function handleSaveEvent() {
 <template>
   <ion-page>
     <UniPageHeader
-      title="Create Event"
-      subtitle="Configure activity and attendance session"
+      :title="isEditMode ? 'Edit Event' : 'Create Event'"
+      :subtitle="isEditMode ? 'Update event details and parameters' : 'Configure activity and attendance session'"
       :back-button="true"
-      default-back-href="/tabs/events"
+      :default-back-href="isEditMode ? `/events/${eventId}` : '/tabs/events'"
       variant="detail"
     />
 
@@ -144,14 +226,31 @@ async function handleSaveEvent() {
 
             <div class="field-item">
               <label class="field-label">Event Category <span class="req">*</span></label>
-              <ion-select v-model="eventType" interface="action-sheet" class="clean-select">
-                <ion-select-option value="General Assembly">General Assembly</ion-select-option>
-                <ion-select-option value="Cleanup Drive">Cleanup Drive</ion-select-option>
-                <ion-select-option value="Sportsfest">Sportsfest</ion-select-option>
-                <ion-select-option value="IT Day">IT Day</ion-select-option>
-                <ion-select-option value="Orientation">Orientation</ion-select-option>
-                <ion-select-option value="Seminar">Seminar</ion-select-option>
-                <ion-select-option value="Other">Other</ion-select-option>
+              <ion-select 
+                v-model="eventType" 
+                interface="action-sheet" 
+                :interface-options="{ header: 'Event Category' }"
+                class="clean-select"
+                @ionChange="handleCategoryChange($event.detail.value)"
+              >
+                <template v-if="categories.length > 0">
+                  <ion-select-option
+                    v-for="cat in categories"
+                    :key="cat.id"
+                    :value="cat.name"
+                  >
+                    {{ cat.name }}
+                  </ion-select-option>
+                </template>
+                <template v-else>
+                  <ion-select-option value="General Assembly">General Assembly</ion-select-option>
+                  <ion-select-option value="Cleanup Drive">Cleanup Drive</ion-select-option>
+                  <ion-select-option value="Sportsfest">Sportsfest</ion-select-option>
+                  <ion-select-option value="IT Day">IT Day</ion-select-option>
+                  <ion-select-option value="Orientation">Orientation</ion-select-option>
+                  <ion-select-option value="Seminar">Seminar</ion-select-option>
+                  <ion-select-option value="Other">Other</ion-select-option>
+                </template>
               </ion-select>
             </div>
 
@@ -172,8 +271,13 @@ async function handleSaveEvent() {
 
             <div class="field-item">
               <label class="field-label">Audience Scope <span class="req">*</span></label>
-              <ion-select v-model="audienceType" interface="action-sheet" class="clean-select">
-                <ion-select-option value="ALL_BSIT">All BSIT Students</ion-select-option>
+              <ion-select 
+                v-model="audienceType" 
+                interface="action-sheet" 
+                :interface-options="{ header: 'Audience Scope' }"
+                class="clean-select"
+              >
+                <ion-select-option value="ALL_BSIT">All Enrolled Students</ion-select-option>
                 <ion-select-option value="YEAR_LEVEL">Specific Year Level(s)</ion-select-option>
                 <ion-select-option value="SECTION">Specific Section(s)</ion-select-option>
               </ion-select>
@@ -183,23 +287,55 @@ async function handleSaveEvent() {
             <div v-if="audienceType === 'YEAR_LEVEL'" class="sub-field-box">
               <label class="field-label-sub">Select Eligible Years:</label>
               <div class="chips-toggle-row">
-                <button 
-                  v-for="y in [1, 2, 3, 4]" 
-                  :key="y"
-                  type="button"
-                  class="toggle-chip"
-                  :class="{ active: selectedYears.includes(y) }"
-                  @click="toggleYear(y)"
-                >
-                  {{ y }}th Year
-                </button>
+                <template v-if="yearLevels.length > 0">
+                  <button 
+                    v-for="yl in yearLevels" 
+                    :key="yl.id"
+                    type="button"
+                    class="toggle-chip"
+                    :class="{ active: selectedYears.includes(yl.level_number) }"
+                    @click="toggleYear(yl.level_number)"
+                  >
+                    {{ yl.display_name }}
+                  </button>
+                </template>
+                <template v-else>
+                  <button 
+                    v-for="y in [1, 2, 3, 4]" 
+                    :key="y"
+                    type="button"
+                    class="toggle-chip"
+                    :class="{ active: selectedYears.includes(y) }"
+                    @click="toggleYear(y)"
+                  >
+                    {{ y }}th Year
+                  </button>
+                </template>
               </div>
             </div>
 
             <!-- Section Selection -->
             <div v-if="audienceType === 'SECTION'" class="sub-field-box">
               <label class="field-label-sub">Eligible Sections:</label>
-              <div class="sections-wrap">
+              
+              <!-- Quick Select from Configured Sections -->
+              <div v-if="availableSections.length > 0" class="predefined-sections-block">
+                <span class="sub-label">Tap to toggle registered sections:</span>
+                <div class="chips-toggle-row">
+                  <button
+                    v-for="sec in availableSections"
+                    :key="sec.id"
+                    type="button"
+                    class="toggle-chip"
+                    :class="{ active: selectedSections.includes(sec.section_name) }"
+                    @click="togglePredefinedSection(sec.section_name)"
+                  >
+                    {{ sec.section_name }}
+                  </button>
+                </div>
+              </div>
+
+              <div class="sections-wrap mt-2">
                 <span v-for="sec in selectedSections" :key="sec" class="sec-pill">
                   {{ sec }}
                   <button type="button" class="del-sec-btn" @click="removeSection(sec)">
@@ -211,7 +347,7 @@ async function handleSaveEvent() {
               <div class="add-section-inline">
                 <ion-input 
                   v-model="customSectionInput" 
-                  placeholder="e.g. BSIT-3B" 
+                  placeholder="e.g. 4F4" 
                   class="clean-input flex-1"
                   @keyup.enter="addSection"
                 />
@@ -285,7 +421,7 @@ async function handleSaveEvent() {
               :loading="isSubmitting"
               :icon="checkmarkOutline"
             >
-              Save and Create Event
+              {{ isEditMode ? 'Save Changes' : 'Save and Create Event' }}
             </UniButton>
           </div>
         </form>
@@ -417,6 +553,21 @@ async function handleSaveEvent() {
   color: var(--app-text-primary);
 }
 
+.predefined-sections-block {
+  margin-bottom: 10px;
+}
+
+.sub-label {
+  display: block;
+  font-size: 11px;
+  color: var(--app-text-muted);
+  margin-bottom: 6px;
+}
+
+.mt-2 {
+  margin-top: 8px;
+}
+
 .del-sec-btn {
   background: transparent;
   border: none;
@@ -483,7 +634,7 @@ async function handleSaveEvent() {
   font-size: 14px;
   font-weight: 600;
   cursor: pointer;
-  box-shadow: 0 4px 14px rgba(59, 130, 246, 0.3);
+  box-shadow: none;
   transition: opacity 0.15s ease, transform 0.15s ease;
 }
 

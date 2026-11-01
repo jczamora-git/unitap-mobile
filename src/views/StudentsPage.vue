@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted } from 'vue';
+import { ref, computed, watch, onMounted } from 'vue';
 import { useRouter } from 'vue-router';
 import { 
   IonPage, 
@@ -20,7 +20,8 @@ import type { Student, YearLevel } from '@/types/student';
 import { 
   UniPageHeader, 
   UniButton, 
-  UniEmptyState 
+  UniEmptyState,
+  UniPagination
 } from '@/components/ui';
 
 const router = useRouter();
@@ -32,6 +33,18 @@ const {
   isLoading, 
   loadStudents 
 } = useStudents();
+
+const currentPage = ref(1);
+const pageSize = ref(10);
+const paginatedStudents = computed(() => {
+  const start = (currentPage.value - 1) * pageSize.value;
+  return filteredStudents.value.slice(start, start + pageSize.value);
+});
+
+watch([searchQuery, filterYear], () => {
+  currentPage.value = 1;
+});
+
 
 onMounted(async () => {
   await loadStudents();
@@ -159,12 +172,19 @@ function toggleYearFilter(year: YearLevel) {
         <!-- Student List -->
         <div v-else class="students-list">
           <StudentCard
-            v-for="student in filteredStudents"
+            v-for="student in paginatedStudents"
             :key="student.id"
             :student="student"
             @click="handleSelectStudent"
           />
+
+          <UniPagination
+            v-model:current-page="currentPage"
+            v-model:page-size="pageSize"
+            :total-items="filteredStudents.length"
+          />
         </div>
+
       </div>
     </ion-content>
   </ion-page>
@@ -183,7 +203,7 @@ function toggleYearFilter(year: YearLevel) {
   font-size: 13px;
   font-weight: 600;
   cursor: pointer;
-  box-shadow: 0 2px 8px rgba(59, 130, 246, 0.25);
+  box-shadow: none;
   transition: transform 0.15s ease, opacity 0.15s ease;
 }
 

@@ -178,8 +178,8 @@ export class StudentService {
     if (!lastName) {
       throw new Error('Last Name is required.');
     }
-    if (!dto.yearLevel || dto.yearLevel < 1 || dto.yearLevel > 4) {
-      throw new Error('Please select a valid Year Level (1st to 4th Year).');
+    if (!dto.yearLevel || dto.yearLevel < 1 || dto.yearLevel > 8) {
+      throw new Error('Please select a valid Year Level.');
     }
     if (!dto.section || !dto.section.trim()) {
       throw new Error('Section is required.');

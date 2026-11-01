@@ -18,6 +18,14 @@ export type HydrationState =
   | 'FAILED'
   | 'RESUMABLE';
 
+export type UserFacingSyncStatus =
+  | 'Up to Date'
+  | 'Updating'
+  | 'Offline'
+  | 'Waiting to Sync'
+  | 'Needs Attention'
+  | 'Update Failed';
+
 export interface SyncProgress {
   currentTable: string;
   tablesCompleted: number;
@@ -60,6 +68,72 @@ export class SyncStatusService {
     return computed(() => this.progress.value);
   }
 
+  /**
+   * User-friendly minimal sync status label adhering to specification:
+   * - Up to Date
+   * - Updating
+   * - Offline
+   * - Waiting to Sync
+   * - Needs Attention
+   * - Update Failed
+   */
+  public static get userFacingStatus() {
+    return computed<UserFacingSyncStatus>(() => {
+      if (this.currentState.value === 'SYNCING') {
+        return 'Updating';
+      }
+
+      const isOffline =
+        this.currentState.value === 'OFFLINE' ||
+        (typeof navigator !== 'undefined' && !navigator.onLine);
+
+      if (isOffline) {
+        return 'Offline';
+      }
+
+      if (this.currentState.value === 'CONFLICT') {
+        return 'Needs Attention';
+      }
+
+      if (this.currentState.value === 'SYNC_ERROR') {
+        return 'Update Failed';
+      }
+
+      if (this.pendingOutboxCount.value > 0) {
+        return 'Waiting to Sync';
+      }
+
+      if (this.currentState.value === 'SYNCED') {
+        return 'Up to Date';
+      }
+
+      return 'Up to Date';
+    });
+  }
+
+  /**
+   * Formats last sync timestamp for minimal display: "Today, 9:30 AM" or "Just now"
+   */
+  public static get formattedLastSync() {
+    return computed<string>(() => {
+      if (!this.lastSyncTimestamp.value) return 'Never';
+      const date = new Date(this.lastSyncTimestamp.value);
+      if (isNaN(date.getTime())) return 'Never';
+
+      const now = new Date();
+      const diffMs = now.getTime() - date.getTime();
+      if (diffMs < 60000) return 'Just now';
+
+      const isToday =
+        date.getDate() === now.getDate() &&
+        date.getMonth() === now.getMonth() &&
+        date.getFullYear() === now.getFullYear();
+
+      const timeStr = date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+      return isToday ? `Today, ${timeStr}` : `${date.toLocaleDateString([], { month: 'short', day: 'numeric' })}, ${timeStr}`;
+    });
+  }
+
   public static setState(newState: SyncState): void {
     this.currentState.value = newState;
   }
@@ -97,4 +171,3 @@ export class SyncStatusService {
     };
   }
 }
-

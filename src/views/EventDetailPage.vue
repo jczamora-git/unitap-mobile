@@ -176,9 +176,20 @@ async function handleAddSession() {
       variant="detail"
     >
       <template #trailing>
-        <UniButton size="sm" :icon="addOutline" @click="showAddSessionModal = true">
-          Session
-        </UniButton>
+        <div class="header-trailing-actions">
+          <UniButton
+            v-if="event"
+            variant="outline"
+            size="sm"
+            :icon="createOutline"
+            @click="router.push(`/events/${event.id}/edit`)"
+          >
+            Edit
+          </UniButton>
+          <UniButton size="sm" :icon="addOutline" @click="showAddSessionModal = true">
+            Session
+          </UniButton>
+        </div>
       </template>
     </UniPageHeader>
 
@@ -450,6 +461,12 @@ async function handleAddSession() {
   font-size: 12px;
   font-weight: 600;
   cursor: pointer;
+}
+
+.header-trailing-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
 }
 
 .event-header-card {

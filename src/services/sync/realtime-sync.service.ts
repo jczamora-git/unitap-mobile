@@ -1,5 +1,5 @@
 import { supabase } from '@/integrations/supabase/client';
-import { PullSyncService } from './pull-sync.service';
+import { SyncManager } from './sync-manager';
 import type { RealtimeChannel } from '@supabase/supabase-js';
 
 export class RealtimeSyncService {
@@ -16,7 +16,7 @@ export class RealtimeSyncService {
         { event: '*', schema: 'public', table: 'attendance_records' },
         (payload) => {
           console.log('[Realtime] Attendance change detected:', payload);
-          PullSyncService.pullRemoteChanges();
+          SyncManager.triggerRealtimeSync();
         }
       )
       .on(
@@ -24,7 +24,7 @@ export class RealtimeSyncService {
         { event: '*', schema: 'public', table: 'payments' },
         (payload) => {
           console.log('[Realtime] Payment change detected:', payload);
-          PullSyncService.pullRemoteChanges();
+          SyncManager.triggerRealtimeSync();
         }
       )
       .on(
@@ -32,7 +32,7 @@ export class RealtimeSyncService {
         { event: '*', schema: 'public', table: 'student_obligations' },
         (payload) => {
           console.log('[Realtime] Obligation change detected:', payload);
-          PullSyncService.pullRemoteChanges();
+          SyncManager.triggerRealtimeSync();
         }
       )
       .subscribe((status) => {
@@ -53,4 +53,3 @@ export class RealtimeSyncService {
     }
   }
 }
-

@@ -1,27 +1,44 @@
-/* UniTap Design Tokens — Minimal Premium Mobile Experience */
+/* UniTap 2.0 Design Tokens — Clean Minimal Light & Dark Mobile Experience */
 
+/* ==========================================================================
+   1. GLOBAL ROOT (LIGHT MODE PALETTE - DEFAULT)
+   ========================================================================== */
 :root {
-  /* UniTap 2.0 Core Palette */
+  /* UniTap 2.0 Core Color Palette (Light Mode) */
   --uni-primary: #0F766E;
-  --uni-primary-dark: #115E59;
-  --uni-ink: #0F172A;
-  --uni-muted: #64748B;
+  --uni-primary-hover: #115E59;
+  --uni-primary-contrast: #FFFFFF;
+  --uni-btn-primary-bg: #0F766E;
+  --uni-btn-primary-text: #FFFFFF;
+
   --uni-background: #F8FAFC;
   --uni-surface: #FFFFFF;
-  --uni-border: #CBD5E1;
-  --uni-success: #047857;
-  --uni-warning: #B45309;
-  --uni-danger: #B91C1C;
+  --uni-surface-secondary: #F1F5F9;
 
-  /* Brand Accent Tokens */
-  --uni-mint: #70F3CF;
-  --uni-mint-rgb: 112, 243, 207;
-  --uni-blue: #65BFFF;
-  --uni-blue-rgb: 101, 191, 255;
-  --uni-violet: #8B85F6;
-  --uni-violet-rgb: 139, 133, 246;
-  --uni-peach: #FFB78F;
-  --uni-peach-rgb: 255, 183, 143;
+  --uni-text: #0F172A;
+  --uni-text-secondary: #64748B;
+
+  --uni-border: #E2E8F0;
+
+  --uni-success: #059669;
+  --uni-warning: #D97706;
+  --uni-danger: #DC2626;
+
+  /* Shadows (Light Mode) */
+  --uni-shadow-card: 0 1px 3px 0 rgba(0, 0, 0, 0.05), 0 1px 2px -1px rgba(0, 0, 0, 0.05);
+  --uni-shadow-dock: 0 10px 25px -5px rgba(0, 0, 0, 0.08), 0 8px 10px -6px rgba(0, 0, 0, 0.04);
+  --uni-shadow-sheet: 0 -10px 30px rgba(0, 0, 0, 0.08);
+  --uni-shadow-dialog: 0 20px 48px rgba(0, 0, 0, 0.12);
+
+  /* Brand Accents */
+  --uni-mint: #0F766E;
+  --uni-mint-rgb: 15, 118, 110;
+  --uni-blue: #0284C7;
+  --uni-blue-rgb: 2, 132, 199;
+  --uni-violet: #7C3AED;
+  --uni-violet-rgb: 124, 58, 237;
+  --uni-peach: #D97706;
+  --uni-peach-rgb: 217, 119, 6;
 
   /* Typography Scale */
   --uni-font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
@@ -43,52 +60,226 @@
   --uni-radius-modal: 20px;
   --uni-radius-sheet: 24px;
 
-  /* Light Theme Surfaces & Text (Default) */
-  --uni-bg: #F7F8FA;
-  --uni-surface: #FFFFFF;
-  --uni-surface-elevated: #F0F2F5;
-  --uni-surface-input: #F0F2F5;
-  --uni-text-primary: #191B20;
-  --uni-text-secondary: #747B85;
-  --uni-text-muted: #949BA6;
-  --uni-border: rgba(0, 0, 0, 0.06);
-  --uni-border-subtle: rgba(0, 0, 0, 0.04);
-  --uni-shadow-card: 0 2px 12px rgba(0, 0, 0, 0.03);
-  --uni-shadow-dock: 0 8px 24px rgba(0, 0, 0, 0.06);
-  --uni-shadow-sheet: 0 -8px 32px rgba(0, 0, 0, 0.08);
-  --uni-shadow-dialog: 0 20px 48px rgba(0, 0, 0, 0.12);
+  /* Responsive Spacing & Density Tokens */
+  --uni-gutter: clamp(12px, 3.8vw, 16px);
+  --uni-card-p-sm: clamp(8px, 2.5vw, 12px) clamp(10px, 3vw, 14px);
+  --uni-card-p-md: clamp(12px, 3.5vw, 16px) clamp(12px, 3.8vw, 18px);
+  --uni-card-p-lg: clamp(14px, 4vw, 20px) clamp(14px, 4.2vw, 22px);
+  --uni-control-h-sm: 36px;
+  --uni-control-h-md: 44px;
+  --uni-control-h-lg: 50px;
 
-  /* Legacy Bridge Tokens */
-  --app-bg: var(--uni-bg);
+  /* Aliases and Bridge Variables */
+  --uni-bg: var(--uni-background);
+  --uni-surface-elevated: var(--uni-surface-secondary);
+  --uni-surface-input: var(--uni-surface-secondary);
+  --uni-text-primary: var(--uni-text);
+  --uni-text-muted: var(--uni-text-secondary);
+  --uni-border-subtle: var(--uni-border);
+  --uni-ink: var(--uni-text);
+  --uni-muted: var(--uni-text-secondary);
+
+  --app-bg: var(--uni-background);
   --app-surface: var(--uni-surface);
-  --app-surface-subtle: var(--uni-surface-elevated);
-  --app-surface-elevated: var(--uni-surface-elevated);
-  --app-text-primary: var(--uni-text-primary);
+  --app-surface-subtle: var(--uni-surface-secondary);
+  --app-surface-elevated: var(--uni-surface-secondary);
+  --app-text-primary: var(--uni-text);
   --app-text-secondary: var(--uni-text-secondary);
-  --app-text-muted: var(--uni-text-muted);
+  --app-text-muted: var(--uni-text-secondary);
   --app-border: var(--uni-border);
+  --app-border-subtle: var(--uni-border);
   --app-card-radius: var(--uni-radius-card);
-  --aurora-mint: var(--uni-mint);
+
+  --aurora-mint: var(--uni-primary);
   --aurora-sky: var(--uni-blue);
   --aurora-violet: var(--uni-violet);
   --aurora-peach: var(--uni-peach);
+
+  --app-shadow-card: var(--uni-shadow-card);
+  --app-shadow-nav: var(--uni-shadow-dock);
+  --app-shadow-modal: var(--uni-shadow-dialog);
+
+  /* Ionic Overrides */
+  --ion-background-color: var(--uni-background);
+  --ion-text-color: var(--uni-text);
+  --ion-item-background: var(--uni-surface);
+  --ion-toolbar-background: var(--uni-background);
+  --ion-tab-bar-background: var(--uni-surface);
+  --ion-card-background: var(--uni-surface);
+  --ion-border-color: var(--uni-border);
 }
 
-/* Dark Theme Overrides */
-@media (prefers-color-scheme: dark) {
-  :root {
-    --uni-bg: #111318;
-    --uni-surface: #1B1D22;
-    --uni-surface-elevated: #24272D;
-    --uni-surface-input: #24272D;
-    --uni-text-primary: #F5F6F7;
-    --uni-text-secondary: #949BA6;
-    --uni-text-muted: #737B86;
-    --uni-border: rgba(255, 255, 255, 0.07);
-    --uni-border-subtle: rgba(255, 255, 255, 0.04);
-    --uni-shadow-card: 0 4px 18px rgba(0, 0, 0, 0.25);
-    --uni-shadow-dock: 0 12px 36px rgba(0, 0, 0, 0.4);
-    --uni-shadow-sheet: 0 -12px 40px rgba(0, 0, 0, 0.5);
-    --uni-shadow-dialog: 0 24px 56px rgba(0, 0, 0, 0.6);
-  }
+/* ==========================================================================
+   2. DARK MODE PALETTE (.dark or .ion-palette-dark on html/body)
+   ========================================================================== */
+:root.dark,
+:root.ion-palette-dark,
+body.dark,
+body.ion-palette-dark {
+  /* UniTap 2.0 Core Color Palette (Dark Mode) */
+  --uni-primary: #5EEAD4;
+  --uni-primary-hover: #2DD4BF;
+  --uni-primary-contrast: #0F172A;
+  --uni-btn-primary-bg: #0D9488;
+  --uni-btn-primary-text: #FFFFFF;
+
+  --uni-background: #0F1117;
+  --uni-surface: #1B1D23;
+  --uni-surface-secondary: #252830;
+
+  --uni-text: #F8FAFC;
+  --uni-text-secondary: #9CA3AF;
+
+  --uni-border: #30343D;
+
+  --uni-success: #34D399;
+  --uni-warning: #FBBF24;
+  --uni-danger: #F87171;
+
+  /* Shadows (Dark Mode) */
+  --uni-shadow-card: 0 4px 18px rgba(0, 0, 0, 0.35);
+  --uni-shadow-dock: 0 14px 40px rgba(0, 0, 0, 0.6);
+  --uni-shadow-sheet: 0 -12px 40px rgba(0, 0, 0, 0.5);
+  --uni-shadow-dialog: 0 24px 56px rgba(0, 0, 0, 0.6);
+
+  /* Brand Accents (Dark Mode) */
+  --uni-mint: #5EEAD4;
+  --uni-mint-rgb: 94, 234, 212;
+  --uni-blue: #65BFFF;
+  --uni-blue-rgb: 101, 191, 255;
+  --uni-violet: #8B85F6;
+  --uni-violet-rgb: 139, 133, 246;
+  --uni-peach: #FFB78F;
+  --uni-peach-rgb: 255, 183, 143;
+
+  /* Aliases and Bridge Variables */
+  --uni-bg: var(--uni-background);
+  --uni-surface-elevated: var(--uni-surface-secondary);
+  --uni-surface-input: var(--uni-surface-secondary);
+  --uni-text-primary: var(--uni-text);
+  --uni-text-muted: var(--uni-text-secondary);
+  --uni-border-subtle: var(--uni-border);
+  --uni-ink: var(--uni-text);
+  --uni-muted: var(--uni-text-secondary);
+
+  --app-bg: var(--uni-background);
+  --app-surface: var(--uni-surface);
+  --app-surface-subtle: var(--uni-surface-secondary);
+  --app-surface-elevated: var(--uni-surface-secondary);
+  --app-text-primary: var(--uni-text);
+  --app-text-secondary: var(--uni-text-secondary);
+  --app-text-muted: var(--uni-text-secondary);
+  --app-border: var(--uni-border);
+  --app-border-subtle: var(--uni-border);
+
+  --aurora-mint: var(--uni-primary);
+  --aurora-sky: var(--uni-blue);
+  --aurora-violet: var(--uni-violet);
+  --aurora-peach: var(--uni-peach);
+
+  --app-shadow-card: var(--uni-shadow-card);
+  --app-shadow-nav: var(--uni-shadow-dock);
+  --app-shadow-modal: var(--uni-shadow-dialog);
+
+  /* Ionic Overrides */
+  --ion-background-color: var(--uni-background);
+  --ion-text-color: var(--uni-text);
+  --ion-item-background: var(--uni-surface);
+  --ion-toolbar-background: var(--uni-background);
+  --ion-tab-bar-background: var(--uni-surface);
+  --ion-card-background: var(--uni-surface);
+  --ion-border-color: var(--uni-border);
+}
+
+/* ==========================================================================
+   3. IONIC COMPONENT THEME INTEGRATION
+   ========================================================================== */
+ion-app {
+  background-color: var(--uni-background);
+  color: var(--uni-text);
+}
+
+ion-content {
+  --background: var(--uni-background);
+  --color: var(--uni-text);
+}
+
+ion-header,
+ion-toolbar {
+  --background: var(--uni-background);
+  --color: var(--uni-text);
+  --border-color: var(--uni-border);
+}
+
+ion-card {
+  --background: var(--uni-surface);
+  --color: var(--uni-text);
+  border: 1px solid var(--uni-border);
+}
+
+ion-item {
+  --background: var(--uni-surface);
+  --color: var(--uni-text);
+  --border-color: var(--uni-border);
+}
+
+ion-input,
+ion-textarea {
+  --background: var(--uni-surface-secondary);
+  --color: var(--uni-text);
+  --placeholder-color: var(--uni-text-secondary);
+}
+
+ion-button {
+  --box-shadow: none !important;
+  box-shadow: none !important;
+}
+
+ion-button.button-solid {
+  --background: var(--uni-primary);
+  --color: var(--uni-primary-contrast);
+  --box-shadow: none !important;
+  box-shadow: none !important;
+}
+
+ion-modal {
+  --background: var(--uni-surface);
+  --color: var(--uni-text);
+}
+
+ion-action-sheet {
+  --background: var(--uni-surface);
+  --color: var(--uni-text);
+}
+
+ion-alert {
+  --background: var(--uni-surface);
+  --color: var(--uni-text);
+}
+
+ion-toast {
+  --background: var(--uni-surface-secondary);
+  --color: var(--uni-text);
+}
+
+ion-select {
+  --background: var(--uni-surface-secondary);
+  --color: var(--uni-text);
+}
+
+ion-datetime {
+  --background: var(--uni-surface);
+  --color: var(--uni-text);
+}
+
+ion-tab-bar {
+  --background: var(--uni-surface);
+  --border-color: var(--uni-border);
+  --color: var(--uni-text-secondary);
+  --color-selected: var(--uni-primary);
+}
+
+ion-tab-button {
+  --color: var(--uni-text-secondary);
+  --color-selected: var(--uni-primary);
 }

@@ -75,6 +75,17 @@ function selectOption(value: any) {
   height: 44px;
 }
 
+@media (max-width: 380px) {
+  .control-md {
+    height: 40px;
+  }
+  .segment-item {
+    font-size: 12px;
+    padding: 0 6px;
+    gap: 2px;
+  }
+}
+
 .segment-item {
   flex: 1;
   height: 100%;
@@ -102,16 +113,19 @@ function selectOption(value: any) {
 
 .segment-active {
   background: var(--uni-surface);
-  color: var(--uni-text-primary);
+  color: var(--uni-primary);
+  font-weight: 650;
   box-shadow: 0 1px 4px rgba(0, 0, 0, 0.08);
   border: 1px solid var(--uni-border);
 }
 
-@media (prefers-color-scheme: dark) {
-  .segment-active {
-    background: var(--uni-surface-elevated);
-    border-color: rgba(255, 255, 255, 0.1);
-  }
+:root.dark .segment-active,
+:root.ion-palette-dark .segment-active,
+body.dark .segment-active,
+body.ion-palette-dark .segment-active {
+  background: var(--uni-surface-elevated);
+  color: var(--uni-primary);
+  border-color: rgba(255, 255, 255, 0.1);
 }
 
 .segment-label {
@@ -126,5 +140,12 @@ function selectOption(value: any) {
 .is-disabled {
   opacity: 0.5;
   pointer-events: none;
+}
+
+@media (max-width: 380px) {
+  .segment-item {
+    padding: 0 6px;
+    font-size: 12px;
+  }
 }
 </style>

@@ -323,7 +323,7 @@ async function executeTopUp() {
   font-size: 12px;
   font-weight: 600;
   cursor: pointer;
-  box-shadow: 0 2px 8px rgba(59, 130, 246, 0.35);
+  box-shadow: none;
 }
 
 .topup-action-btn:active {

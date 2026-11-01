@@ -9,9 +9,15 @@
             <h1 class="page-title">Terms & Semesters</h1>
             <p class="page-subtitle">Manage historical academic years and active semester sessions.</p>
           </div>
-          <button class="btn-create" @click="showCreateModal = true">
-            + New Term
-          </button>
+          <UniButton
+            variant="primary"
+            size="sm"
+            :icon="addOutline"
+            aria-label="Create new semester term"
+            @click="showCreateModal = true"
+          >
+            New
+          </UniButton>
         </div>
 
         <!-- Active Term Banner -->
@@ -87,12 +93,13 @@
 
               <div class="form-group">
                 <label>Term</label>
-                <select v-model="newTerm" class="modal-input" required>
-                  <option value="FIRST">First Semester</option>
-                  <option value="SECOND">Second Semester</option>
-                  <option value="SUMMER">Summer</option>
-                </select>
+                <UniSelect
+                  v-model="newTerm"
+                  :options="termOptions"
+                  header="Select Term"
+                />
               </div>
+
 
               <div class="form-row">
                 <div class="form-group">
@@ -131,15 +138,24 @@
 <script setup lang="ts">
 import { ref, onMounted } from 'vue';
 import { IonPage, IonContent } from '@ionic/vue';
+import { addOutline } from 'ionicons/icons';
 import { AcademicRepository } from '@/database/repositories/academic.repository';
+import { UniSelect, UniButton } from '@/components/ui';
 import type { Semester } from '@/types/database';
 
 const activeSemester = ref<Semester | null>(null);
 const semesters = ref<Semester[]>([]);
 const showCreateModal = ref(false);
 
+const termOptions = [
+  { value: 'FIRST', label: 'First Semester' },
+  { value: 'SECOND', label: 'Second Semester' },
+  { value: 'SUMMER', label: 'Summer' },
+];
+
 const newYearLabel = ref('2026-2027');
 const newTerm = ref<'FIRST' | 'SECOND' | 'SUMMER'>('SECOND');
+
 const newStartsOn = ref('2027-01-10');
 const newEndsOn = ref('2027-05-30');
 const setImmediatelyActive = ref(false);
@@ -201,6 +217,12 @@ async function handleCreateSemester() {
   margin: 0 auto;
 }
 
+@media (max-width: 600px) {
+  .page-container {
+    padding: 16px 12px;
+  }
+}
+
 .page-header {
   display: flex;
   justify-content: space-between;
@@ -227,17 +249,6 @@ async function handleCreateSemester() {
   font-size: 13px;
   color: var(--uni-muted, #64748B);
   margin: 0;
-}
-
-.btn-create {
-  background: var(--uni-primary, #0F766E);
-  color: white;
-  border: 0;
-  border-radius: 12px;
-  padding: 10px 16px;
-  font-size: 13px;
-  font-weight: 700;
-  cursor: pointer;
 }
 
 .active-term-card {
@@ -280,8 +291,8 @@ async function handleCreateSemester() {
 }
 
 .warning-banner {
-  background: #fffbeb;
-  border: 1px solid #fef3c7;
+  background: rgba(245, 158, 11, 0.12);
+  border: 1px solid rgba(245, 158, 11, 0.3);
   color: var(--uni-warning, #B45309);
   padding: 14px;
   border-radius: 12px;
@@ -292,7 +303,7 @@ async function handleCreateSemester() {
 .section-title {
   font-size: 18px;
   font-weight: 800;
-  color: var(--uni-ink, #0F172A);
+  color: var(--uni-text, #0F172A);
   margin-bottom: 16px;
 }
 
@@ -303,14 +314,14 @@ async function handleCreateSemester() {
 }
 
 .sem-card {
-  background: #ffffff;
-  border: 1px solid var(--uni-border, #CBD5E1);
+  background: var(--uni-surface);
+  border: 1px solid var(--uni-border);
   border-radius: 14px;
   padding: 18px;
 }
 
 .sem-card.is-active {
-  border-color: var(--uni-primary, #0F766E);
+  border-color: var(--uni-primary);
   box-shadow: 0 0 0 2px rgba(15, 118, 110, 0.15);
 }
 
@@ -362,9 +373,9 @@ async function handleCreateSemester() {
 }
 
 .btn-activate {
-  background: white;
-  border: 1.5px solid var(--uni-primary, #0F766E);
-  color: var(--uni-primary, #0F766E);
+  background: var(--uni-surface);
+  border: 1.5px solid var(--uni-primary);
+  color: var(--uni-primary);
   border-radius: 8px;
   padding: 6px 12px;
   font-size: 12px;
@@ -376,7 +387,7 @@ async function handleCreateSemester() {
 .active-label {
   font-size: 12px;
   font-weight: 700;
-  color: var(--uni-primary, #0F766E);
+  color: var(--uni-primary);
 }
 
 .modal-overlay {
@@ -391,7 +402,9 @@ async function handleCreateSemester() {
 }
 
 .modal-card {
-  background: white;
+  background: var(--uni-surface);
+  color: var(--uni-text);
+  border: 1px solid var(--uni-border);
   border-radius: 16px;
   padding: 24px;
   max-width: 440px;
@@ -413,15 +426,17 @@ async function handleCreateSemester() {
   font-size: 12px;
   font-weight: 700;
   margin-bottom: 6px;
-  color: #334155;
+  color: var(--uni-text);
 }
 
 .modal-input {
   width: 100%;
   padding: 10px 12px;
-  border: 1.5px solid var(--uni-border, #CBD5E1);
+  border: 1.5px solid var(--uni-border);
   border-radius: 10px;
   font-size: 14px;
+  color: var(--uni-text);
+  background: var(--uni-surface-secondary);
   box-sizing: border-box;
 }
 

@@ -5,12 +5,14 @@ interface Props {
   variant?: 'default' | 'elevated' | 'subtle';
   padding?: 'sm' | 'md' | 'lg' | 'none';
   interactive?: boolean;
+  overflow?: 'visible' | 'hidden';
 }
 
 const props = withDefaults(defineProps<Props>(), {
   variant: 'default',
   padding: 'md',
-  interactive: false
+  interactive: false,
+  overflow: 'visible',
 });
 
 const emit = defineEmits<{
@@ -31,6 +33,7 @@ function handleClick(event: MouseEvent) {
     :class="[
       `uni-card-${variant}`,
       `uni-card-p-${padding}`,
+      `uni-card-overflow-${overflow}`,
       { 'uni-card-interactive': interactive }
     ]"
     @click="handleClick"
@@ -47,6 +50,18 @@ function handleClick(event: MouseEvent) {
               background 0.15s ease;
   box-sizing: border-box;
   position: relative;
+}
+
+.uni-card:has(.uni-select-container.is-active),
+.uni-card:has(.is-active) {
+  z-index: 50;
+}
+
+.uni-card-overflow-visible {
+  overflow: visible;
+}
+
+.uni-card-overflow-hidden {
   overflow: hidden;
 }
 
@@ -74,15 +89,24 @@ function handleClick(event: MouseEvent) {
 }
 
 .uni-card-p-sm {
-  padding: 12px 14px;
+  padding: var(--uni-card-p-sm, 12px 14px);
 }
 
 .uni-card-p-md {
-  padding: 16px 18px;
+  padding: var(--uni-card-p-md, 16px 18px);
 }
 
 .uni-card-p-lg {
-  padding: 20px 22px;
+  padding: var(--uni-card-p-lg, 20px 22px);
+}
+
+@media (max-width: 380px) {
+  .uni-card-p-md {
+    padding: 12px 14px;
+  }
+  .uni-card-p-lg {
+    padding: 14px 16px;
+  }
 }
 
 /* Interactive */

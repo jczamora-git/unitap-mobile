@@ -191,7 +191,7 @@ ion-toast.nfc-toast-info {
 .btn-ui-primary {
   background: var(--aurora-mint);
   color: #0A251D;
-  box-shadow: 0 4px 16px rgba(112, 243, 207, 0.35);
+  box-shadow: none;
 }
 
 .btn-ui-secondary {
@@ -220,4 +220,276 @@ ion-toast.nfc-toast-info {
   padding: 0 12px;
   font-size: 12px;
   border-radius: 10px;
+}
+
+/* ========================================================
+   PREMIUM SELECTION ACTION SHEET (ION-ACTION-SHEET)
+   Restored polished bottom sheet & selection overlay UI
+   ======================================================== */
+ion-action-sheet {
+  --background: var(--uni-surface, #FFFFFF);
+  --color: var(--uni-text, #0F172A);
+  --backdrop-opacity: 0.45;
+  font-family: var(--uni-font-family, inherit);
+}
+
+/* Backdrop with subtle blur */
+ion-action-sheet ion-backdrop {
+  background: rgba(0, 0, 0, 0.45);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+}
+
+/* Sheet Wrapper (Floating Card Bottom Sheet) */
+ion-action-sheet .action-sheet-wrapper {
+  width: calc(100% - 24px) !important;
+  max-width: 480px !important;
+  margin-left: auto !important;
+  margin-right: auto !important;
+  margin-bottom: calc(12px + var(--ion-safe-area-bottom, 0px)) !important;
+  padding: 0 !important;
+  box-sizing: border-box;
+}
+
+/* Container */
+ion-action-sheet .action-sheet-container {
+  padding: 0 !important;
+  display: flex !important;
+  flex-direction: column !important;
+  justify-content: flex-end !important;
+}
+
+/* Option Group Card */
+ion-action-sheet .action-sheet-group {
+  background: var(--uni-surface, #FFFFFF) !important;
+  border-radius: 18px !important;
+  border: 1px solid var(--uni-border, #E2E8F0) !important;
+  box-shadow: 0 10px 32px rgba(0, 0, 0, 0.12) !important;
+  overflow: hidden !important;
+  margin-bottom: 8px !important;
+  max-height: 65vh !important;
+  overflow-y: auto !important;
+  -webkit-overflow-scrolling: touch;
+}
+
+/* Sheet Header / Title */
+ion-action-sheet .action-sheet-title {
+  font-size: 11.5px !important;
+  font-weight: 700 !important;
+  text-transform: uppercase !important;
+  letter-spacing: 0.06em !important;
+  color: var(--uni-text-secondary, #64748B) !important;
+  padding: 14px 18px 10px 18px !important;
+  min-height: auto !important;
+  text-align: left !important;
+  border-bottom: 1px solid var(--uni-border, #E2E8F0) !important;
+  background: transparent !important;
+}
+
+/* Selection Buttons / Option Rows */
+ion-action-sheet .action-sheet-button {
+  min-height: 46px !important;
+  height: auto !important;
+  padding: 12px 18px !important;
+  font-size: 14.5px !important;
+  font-weight: 500 !important;
+  color: var(--uni-text, #0F172A) !important;
+  text-align: left !important;
+  border-bottom: 1px solid var(--uni-border, #E2E8F0) !important;
+  background: transparent !important;
+  transition: background-color 0.15s ease, color 0.15s ease !important;
+  cursor: pointer !important;
+}
+
+ion-action-sheet .action-sheet-button:last-child {
+  border-bottom: none !important;
+}
+
+ion-action-sheet .action-sheet-button .action-sheet-button-inner {
+  display: flex !important;
+  align-items: center !important;
+  justify-content: space-between !important;
+  width: 100% !important;
+}
+
+/* Hover & Active States */
+ion-action-sheet .action-sheet-button:hover {
+  background: var(--uni-surface-secondary, #F1F5F9) !important;
+}
+
+ion-action-sheet .action-sheet-button.ion-activated {
+  background: var(--uni-surface-secondary, #F1F5F9) !important;
+}
+
+/* Selected Option State with Indicator */
+ion-action-sheet .action-sheet-button.action-sheet-selected {
+  font-weight: 650 !important;
+  color: var(--uni-primary, #0F766E) !important;
+  background: rgba(15, 118, 110, 0.06) !important;
+}
+
+ion-action-sheet .action-sheet-button.action-sheet-selected .action-sheet-button-inner::after {
+  content: '✓';
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--uni-primary, #0F766E);
+  margin-left: 10px;
+  display: inline-block;
+}
+
+/* Cancel Button Group Card */
+ion-action-sheet .action-sheet-group-cancel {
+  background: var(--uni-surface, #FFFFFF) !important;
+  border-radius: 18px !important;
+  border: 1px solid var(--uni-border, #E2E8F0) !important;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.08) !important;
+  margin-top: 4px !important;
+  margin-bottom: 0 !important;
+  overflow: hidden !important;
+}
+
+ion-action-sheet .action-sheet-group-cancel .action-sheet-button {
+  min-height: 48px !important;
+  font-size: 15px !important;
+  font-weight: 650 !important;
+  color: var(--uni-text-secondary, #64748B) !important;
+  text-align: center !important;
+  justify-content: center !important;
+  border: none !important;
+}
+
+ion-action-sheet .action-sheet-group-cancel .action-sheet-button .action-sheet-button-inner {
+  justify-content: center !important;
+}
+
+ion-action-sheet .action-sheet-group-cancel .action-sheet-button:active {
+  background: var(--uni-surface-secondary, #F1F5F9) !important;
+}
+
+/* ========================================================
+   DARK MODE OVERRIDES FOR ION-ACTION-SHEET
+   ======================================================== */
+:root.dark ion-action-sheet,
+:root.ion-palette-dark ion-action-sheet,
+body.dark ion-action-sheet,
+body.ion-palette-dark ion-action-sheet {
+  --background: var(--uni-surface, #1B1D23);
+  --color: var(--uni-text, #F8FAFC);
+}
+
+:root.dark ion-action-sheet .action-sheet-group,
+:root.ion-palette-dark ion-action-sheet .action-sheet-group,
+body.dark ion-action-sheet .action-sheet-group,
+body.ion-palette-dark ion-action-sheet .action-sheet-group {
+  background: var(--uni-surface, #1B1D23) !important;
+  border-color: var(--uni-border, #30343D) !important;
+  box-shadow: 0 12px 36px rgba(0, 0, 0, 0.5) !important;
+}
+
+:root.dark ion-action-sheet .action-sheet-title,
+:root.ion-palette-dark ion-action-sheet .action-sheet-title,
+body.dark ion-action-sheet .action-sheet-title,
+body.ion-palette-dark ion-action-sheet .action-sheet-title {
+  color: var(--uni-text-secondary, #9CA3AF) !important;
+  border-bottom-color: var(--uni-border, #30343D) !important;
+}
+
+:root.dark ion-action-sheet .action-sheet-button,
+:root.ion-palette-dark ion-action-sheet .action-sheet-button,
+body.dark ion-action-sheet .action-sheet-button,
+body.ion-palette-dark ion-action-sheet .action-sheet-button {
+  color: var(--uni-text, #F8FAFC) !important;
+  border-bottom-color: var(--uni-border, #30343D) !important;
+}
+
+:root.dark ion-action-sheet .action-sheet-button:hover,
+:root.ion-palette-dark ion-action-sheet .action-sheet-button:hover,
+:root.dark ion-action-sheet .action-sheet-button.ion-activated,
+:root.ion-palette-dark ion-action-sheet .action-sheet-button.ion-activated {
+  background: var(--uni-surface-secondary, #252830) !important;
+}
+
+:root.dark ion-action-sheet .action-sheet-button.action-sheet-selected,
+:root.ion-palette-dark ion-action-sheet .action-sheet-button.action-sheet-selected,
+body.dark ion-action-sheet .action-sheet-button.action-sheet-selected,
+body.ion-palette-dark ion-action-sheet .action-sheet-button.action-sheet-selected {
+  color: var(--uni-primary, #5EEAD4) !important;
+  background: rgba(94, 234, 212, 0.1) !important;
+}
+
+:root.dark ion-action-sheet .action-sheet-button.action-sheet-selected .action-sheet-button-inner::after,
+:root.ion-palette-dark ion-action-sheet .action-sheet-button.action-sheet-selected .action-sheet-button-inner::after {
+  color: var(--uni-primary, #5EEAD4) !important;
+}
+
+:root.dark ion-action-sheet .action-sheet-group-cancel,
+:root.ion-palette-dark ion-action-sheet .action-sheet-group-cancel,
+body.dark ion-action-sheet .action-sheet-group-cancel,
+body.ion-palette-dark ion-action-sheet .action-sheet-group-cancel {
+  background: var(--uni-surface-secondary, #252830) !important;
+  border-color: var(--uni-border, #30343D) !important;
+}
+
+:root.dark ion-action-sheet .action-sheet-group-cancel .action-sheet-button,
+:root.ion-palette-dark ion-action-sheet .action-sheet-group-cancel .action-sheet-button,
+body.dark ion-action-sheet .action-sheet-group-cancel .action-sheet-button,
+body.ion-palette-dark ion-action-sheet .action-sheet-group-cancel .action-sheet-button {
+  color: var(--uni-text-secondary, #9CA3AF) !important;
+}
+
+/* ========================================================
+   DESKTOP RESPONSIVE CONSTRAINTS
+   ======================================================== */
+@media (min-width: 640px) {
+  ion-action-sheet .action-sheet-wrapper {
+    max-width: 440px !important;
+    margin-bottom: 24px !important;
+  }
+}
+
+/* ========================================================
+   IONIC ALERT & POPOVER HARMONIZATION
+   ======================================================== */
+ion-alert {
+  --background: var(--uni-surface, #FFFFFF);
+  --color: var(--uni-text, #0F172A);
+  font-family: var(--uni-font-family, inherit);
+}
+
+ion-alert .alert-wrapper {
+  border-radius: 18px !important;
+  border: 1px solid var(--uni-border, #E2E8F0) !important;
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.16) !important;
+  overflow: hidden !important;
+  max-width: 400px !important;
+}
+
+:root.dark ion-alert .alert-wrapper,
+:root.ion-palette-dark ion-alert .alert-wrapper,
+body.dark ion-alert .alert-wrapper,
+body.ion-palette-dark ion-alert .alert-wrapper {
+  background: var(--uni-surface, #1B1D23) !important;
+  border-color: var(--uni-border, #30343D) !important;
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.5) !important;
+}
+
+ion-popover {
+  --background: var(--uni-surface, #FFFFFF);
+  --color: var(--uni-text, #0F172A);
+}
+
+ion-popover::part(content) {
+  border-radius: 14px !important;
+  border: 1px solid var(--uni-border, #E2E8F0) !important;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.12) !important;
+  overflow: hidden !important;
+}
+
+:root.dark ion-popover::part(content),
+:root.ion-palette-dark ion-popover::part(content),
+body.dark ion-popover::part(content),
+body.ion-palette-dark ion-popover::part(content) {
+  background: var(--uni-surface, #1B1D23) !important;
+  border-color: var(--uni-border, #30343D) !important;
+  box-shadow: 0 12px 36px rgba(0, 0, 0, 0.5) !important;
 }

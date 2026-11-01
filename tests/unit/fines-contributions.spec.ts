@@ -176,77 +176,87 @@ describe('UniTap 2.0 Fines & Contributions Management', () => {
     ).rejects.toThrow('must equal');
   });
 
-  it('rejects simulated wallet payment when funds are insufficient and succeeds when funded', async () => {
+  it('records direct payments across multiple obligations with partial payments and rejects overpayment', async () => {
+    // 1. Issue two obligations: Fine ₱50.00 (5000) and Contribution ₱100.00 (10000)
     await FinanceRepository.assessObligation({
-      id: 'ob_wallet_test',
+      id: 'ob_mult_1',
       student_id: studentId,
       semester_id: semesterId,
-      title: 'Sportsfest Contribution',
-      type: 'CONTRIBUTION',
-      amount_centavos: 10000, // ₱100.00
+      title: 'Sportsfest Absence Fine',
+      type: 'FINE',
+      amount_centavos: 5000,
       status: 'ACTIVE',
       issued_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
     });
 
-    // 1. Attempt payment with 0 balance -> should fail
+    await FinanceRepository.assessObligation({
+      id: 'ob_mult_2',
+      student_id: studentId,
+      semester_id: semesterId,
+      title: 'CSG T-Shirt Contribution',
+      type: 'CONTRIBUTION',
+      amount_centavos: 10000,
+      status: 'ACTIVE',
+      issued_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    });
+
+    // 2. Reject overpayment on ob_mult_1 (trying to allocate 6000 on 5000 balance)
     await expect(
       FinanceRepository.recordPayment(
         {
-          id: 'pay_insufficient',
+          id: 'pay_over',
           student_id: studentId,
           semester_id: semesterId,
-          reference_number: 'REF-INSUFF',
-          idempotency_key: 'IDEMP-INSUFF',
-          amount_centavos: 10000,
-          source: 'SIMULATED_WALLET',
+          reference_number: 'REF-OVERPAY',
+          idempotency_key: 'IDEMP-OVERPAY',
+          amount_centavos: 6000,
+          source: 'CASH_RECORDED',
           channel: 'MANUAL',
           status: 'POSTED',
           processed_by_user_id: 'officer_1',
           processed_at: new Date().toISOString(),
         },
-        [{ id: 'alloc_1', obligation_id: 'ob_wallet_test', amount_centavos: 10000 }]
+        [{ id: 'alloc_over', obligation_id: 'ob_mult_1', amount_centavos: 6000 }]
       )
-    ).rejects.toThrow('Insufficient wallet balance');
+    ).rejects.toThrow('exceeds remaining');
 
-    // 2. Top up wallet with ₱150.00 (15000 centavos)
-    const newBal = await FinanceRepository.topUpWallet(
-      studentId,
-      15000,
-      'officer_1',
-      'REF-TOPUP-1'
-    );
-    expect(newBal).toBe(15000);
-
-    // 3. Payment now succeeds
+    // 3. Record valid split payment: ₱50.00 on Fine (Full) + ₱30.00 on Contribution (Partial) = ₱80.00 (8000 cents)
     await FinanceRepository.recordPayment(
       {
-        id: 'pay_success',
+        id: 'pay_split_1',
         student_id: studentId,
         semester_id: semesterId,
-        reference_number: 'REF-WALLET-SUCCESS',
-        idempotency_key: 'IDEMP-SUCCESS',
-        amount_centavos: 10000,
-        source: 'SIMULATED_WALLET',
-        channel: 'NFC',
+        reference_number: 'REF-SPLIT-1',
+        idempotency_key: 'IDEMP-SPLIT-1',
+        amount_centavos: 8000,
+        source: 'MANUAL_TRANSFER_RECORD',
+        channel: 'MANUAL',
         status: 'POSTED',
         processed_by_user_id: 'officer_1',
+        notes: 'GCash collection ref #998877',
         processed_at: new Date().toISOString(),
       },
-      [{ id: 'alloc_success', obligation_id: 'ob_wallet_test', amount_centavos: 10000 }]
+      [
+        { id: 'alloc_split_1', obligation_id: 'ob_mult_1', amount_centavos: 5000 },
+        { id: 'alloc_split_2', obligation_id: 'ob_mult_2', amount_centavos: 3000 },
+      ]
     );
 
-    // Wallet balance should now be 5000 centavos (₱50.00)
-    const wallet = await FinanceRepository.getOrCreateWallet(studentId);
-    const remaining = await FinanceRepository.getWalletBalance(wallet.id);
-    expect(remaining).toBe(5000);
-
-    // Obligation balance should be 0
+    // 4. Verify resulting balances
     const obligations = await FinanceRepository.getStudentObligations(studentId, semesterId);
-    expect(obligations[0].balance_centavos).toBe(0);
+    const fine = obligations.find((o) => o.id === 'ob_mult_1');
+    const contrib = obligations.find((o) => o.id === 'ob_mult_2');
+
+    expect(fine?.paid_centavos).toBe(5000);
+    expect(fine?.balance_centavos).toBe(0); // Fully paid
+
+    expect(contrib?.paid_centavos).toBe(3000);
+    expect(contrib?.balance_centavos).toBe(7000); // Remaining partial balance
   });
 
-  it('reverses payments with a mandatory reason and refunds wallet ledger', async () => {
+  it('reverses payments with a mandatory reason and restores obligation balance', async () => {
     await FinanceRepository.assessObligation({
       id: 'ob_rev_test',
       student_id: studentId,
@@ -259,8 +269,6 @@ describe('UniTap 2.0 Fines & Contributions Management', () => {
       updated_at: new Date().toISOString(),
     });
 
-    await FinanceRepository.topUpWallet(studentId, 5000, 'officer_1', 'REF-TOPUP-REV');
-
     await FinanceRepository.recordPayment(
       {
         id: 'pay_to_reverse',
@@ -269,7 +277,7 @@ describe('UniTap 2.0 Fines & Contributions Management', () => {
         reference_number: 'REF-TO-REV',
         idempotency_key: 'IDEMP-REV',
         amount_centavos: 5000,
-        source: 'SIMULATED_WALLET',
+        source: 'CASH_RECORDED',
         channel: 'MANUAL',
         status: 'POSTED',
         processed_by_user_id: 'officer_1',
@@ -278,8 +286,9 @@ describe('UniTap 2.0 Fines & Contributions Management', () => {
       [{ id: 'alloc_rev', obligation_id: 'ob_rev_test', amount_centavos: 5000 }]
     );
 
-    const wallet = await FinanceRepository.getOrCreateWallet(studentId);
-    expect(await FinanceRepository.getWalletBalance(wallet.id)).toBe(0);
+    // Initial check: balance should be 0
+    let obligations = await FinanceRepository.getStudentObligations(studentId, semesterId);
+    expect(obligations[0].balance_centavos).toBe(0);
 
     // Reversal without reason fails
     await expect(
@@ -289,15 +298,12 @@ describe('UniTap 2.0 Fines & Contributions Management', () => {
     // Reversal with reason succeeds
     await FinanceRepository.reversePayment(
       'pay_to_reverse',
-      'Incorrect student tapped',
+      'Incorrect student receipt issued',
       'officer_1'
     );
 
-    // Wallet refunded back to 5000 centavos
-    expect(await FinanceRepository.getWalletBalance(wallet.id)).toBe(5000);
-
     // Obligation balance restored to 5000
-    const obligations = await FinanceRepository.getStudentObligations(studentId, semesterId);
+    obligations = await FinanceRepository.getStudentObligations(studentId, semesterId);
     expect(obligations[0].balance_centavos).toBe(5000);
   });
 

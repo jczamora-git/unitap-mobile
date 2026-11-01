@@ -45,8 +45,8 @@ function onTemplateChange() {
   const tmpl = templates.value.find(t => t.id === selectedTemplateId.value);
   if (tmpl) {
     title.value = tmpl.name;
-    chargeType.value = tmpl.chargeType;
-    amountPesos.value = centavosToPeso(tmpl.defaultAmount);
+    chargeType.value = tmpl.chargeType || (tmpl.type as any) || 'FINE';
+    amountPesos.value = centavosToPeso(tmpl.defaultAmount ?? tmpl.defaultAmountCentavos ?? 0);
   }
 }
 
@@ -113,6 +113,7 @@ async function handleSaveCharge() {
               <ion-select 
                 v-model="selectedStudentId" 
                 interface="action-sheet" 
+                :interface-options="{ header: 'Target Student' }"
                 placeholder="Choose student"
                 class="clean-select"
               >
@@ -132,13 +133,14 @@ async function handleSaveCharge() {
               <ion-select 
                 v-model="selectedTemplateId" 
                 interface="action-sheet" 
+                :interface-options="{ header: 'Fee Template' }"
                 placeholder="Select fee template (Optional)"
                 class="clean-select"
                 @ion-change="onTemplateChange"
               >
                 <ion-select-option value="">None (Custom Charge)</ion-select-option>
                 <ion-select-option v-for="t in templates" :key="t.id" :value="t.id">
-                  {{ t.name }} — ₱{{ centavosToPeso(t.defaultAmount) }}
+                  {{ t.name }} — ₱{{ centavosToPeso(t.defaultAmount ?? t.defaultAmountCentavos ?? 0) }}
                 </ion-select-option>
               </ion-select>
             </div>
@@ -155,7 +157,12 @@ async function handleSaveCharge() {
             <div class="category-and-amount-grid">
               <div class="field-item">
                 <label class="field-label">Category</label>
-                <ion-select v-model="chargeType" interface="action-sheet" class="clean-select">
+                <ion-select 
+                  v-model="chargeType" 
+                  interface="action-sheet" 
+                  :interface-options="{ header: 'Category' }"
+                  class="clean-select"
+                >
                   <ion-select-option value="FINE">Fine</ion-select-option>
                   <ion-select-option value="CONTRIBUTION">Contribution</ion-select-option>
                   <ion-select-option value="OTHER">Other</ion-select-option>
@@ -290,7 +297,7 @@ async function handleSaveCharge() {
   font-size: 14px;
   font-weight: 600;
   cursor: pointer;
-  box-shadow: 0 4px 14px rgba(59, 130, 246, 0.3);
+  box-shadow: none;
   transition: opacity 0.15s ease, transform 0.15s ease;
 }
 

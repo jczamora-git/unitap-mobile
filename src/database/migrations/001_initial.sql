@@ -1,4 +1,8 @@
--- UniTap phase-1 OFFLINE-FIRST relational model / SQLite 3
+-- ============================================================================
+-- UniTap Phase-1 Relational Model / SQLite 3
+-- LOCAL SQLITE ENGINE ONLY (DO NOT RUN IN SUPABASE POSTGRESQL)
+-- For Supabase PostgreSQL, run: supabase/migrations/20261031000001_unitap_initial_schema.sql
+-- ============================================================================
 -- All IDs supplied by the application as UUIDs; date-time fields UTC ISO-8601 text.
 -- Amounts are INTEGER Philippine centavos, never floating point pesos.
 -- Initialize SQLite connection with PRAGMA foreign_keys = ON before each session.

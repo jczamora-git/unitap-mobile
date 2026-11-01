@@ -37,8 +37,6 @@ export class CsvImportService {
     _semesterId?: string,
     _programId?: string
   ): Promise<CsvParseResult> {
-    void _semesterId;
-    void _programId;
     const fileHash = await sha256(fileContent);
     const lines = fileContent
       .replace(/\r\n/g, '\n')
@@ -66,6 +64,12 @@ export class CsvImportService {
       year: header.indexOf('year'),
       section: header.indexOf('section'),
     };
+
+    let academicYearId: string | undefined;
+    if (_semesterId) {
+      const sem = await AcademicRepository.getSemesterById(_semesterId);
+      academicYearId = sem?.academic_year_id;
+    }
 
     const validRows: CsvValidationRow[] = [];
     const invalidRows: CsvValidationRow[] = [];
@@ -105,6 +109,47 @@ export class CsvImportService {
       }
       if (!section) {
         invalidRows.push({ rowNumber: rowNum, isValid: false, isExistingStudent: false, error: 'Section is required' });
+        continue;
+      }
+
+      // 1. Verify year level exists in normalized year_levels table
+      const yearLevel = await AcademicRepository.getYearLevelByNumber(year);
+      if (!yearLevel) {
+        invalidRows.push({
+          rowNumber: rowNum,
+          isValid: false,
+          isExistingStudent: false,
+          error: `Year level ${year} is not configured in System Setup. DevAdmin setup required.`,
+        });
+        continue;
+      }
+
+      // 2. Verify section belongs to the selected year level
+      const matchedSection = await AcademicRepository.getSectionByName(
+        section,
+        yearLevel.id,
+        academicYearId,
+        _programId
+      );
+      const foundSection = matchedSection || (await AcademicRepository.getSectionByName(section, yearLevel.id));
+
+      if (!foundSection) {
+        const anySection = await AcademicRepository.getSectionByName(section);
+        if (anySection) {
+          invalidRows.push({
+            rowNumber: rowNum,
+            isValid: false,
+            isExistingStudent: false,
+            error: `Section "${section}" belongs to a different year level. DevAdmin setup required.`,
+          });
+        } else {
+          invalidRows.push({
+            rowNumber: rowNum,
+            isValid: false,
+            isExistingStudent: false,
+            error: `Section "${section}" is not configured for ${yearLevel.display_name}. DevAdmin setup required.`,
+          });
+        }
         continue;
       }
 
@@ -223,6 +268,8 @@ export class CsvImportService {
             );
 
             if (!existingEnrollment) {
+              const yl = await AcademicRepository.getYearLevelByNumber(d.year, tx);
+              const sec = yl ? await AcademicRepository.getSectionByName(d.section, yl.id, undefined, programId, tx) : null;
               await AcademicRepository.createEnrollment(
                 {
                   id: 'enr_' + Math.random().toString(36).substring(2, 10),
@@ -231,6 +278,8 @@ export class CsvImportService {
                   program_id: programId,
                   year_level: d.year,
                   section: d.section,
+                  year_level_id: yl?.id || null,
+                  section_id: sec?.id || null,
                   enrollment_status: 'ENROLLED',
                   first_name_snapshot: d.first_name,
                   middle_name_snapshot: d.middle_name || null,

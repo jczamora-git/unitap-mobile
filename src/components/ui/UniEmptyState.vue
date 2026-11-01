@@ -57,17 +57,34 @@ const emit = defineEmits<{
 }
 
 .empty-icon-box {
-  width: 48px;
-  height: 48px;
+  width: 52px;
+  height: 52px;
   border-radius: 50%;
-  background: var(--uni-surface-elevated);
-  border: 1px solid var(--uni-border);
+  background: rgba(15, 118, 110, 0.1);
+  border: 1px solid rgba(15, 118, 110, 0.2);
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 22px;
-  color: var(--uni-text-muted);
-  margin-bottom: 12px;
+  margin-bottom: 14px;
+}
+
+.empty-icon-box ion-icon {
+  font-size: 26px;
+  width: 26px;
+  height: 26px;
+  color: var(--uni-primary, #0f766e);
+  display: block;
+}
+
+:global(.dark) .empty-icon-box,
+:global(.ion-palette-dark) .empty-icon-box {
+  background: rgba(94, 234, 212, 0.12);
+  border-color: rgba(94, 234, 212, 0.28);
+}
+
+:global(.dark) .empty-icon-box ion-icon,
+:global(.ion-palette-dark) .empty-icon-box ion-icon {
+  color: var(--uni-primary, #5EEAD4);
 }
 
 .empty-title {
