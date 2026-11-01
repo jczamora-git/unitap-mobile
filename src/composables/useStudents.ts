@@ -1,6 +1,7 @@
 import { ref, computed } from 'vue';
 import type { Student, CreateStudentDto, UpdateStudentDto, YearLevel } from '@/types/student';
 import { studentService } from '@/services/student.service';
+import { PullSyncService } from '@/services/sync/pull-sync.service';
 
 const students = ref<Student[]>([]);
 const currentStudent = ref<Student | null>(null);
@@ -29,6 +30,7 @@ export function useStudents() {
       const last = s.lastName.toLowerCase();
       const course = s.course.toLowerCase();
       const section = s.section.toLowerCase();
+      const studentNum = (s.studentNumber || '').toLowerCase();
       const rfid = (s.rfidUid || '').toLowerCase();
       const rfidCompact = (s.rfidUidCompact || '').toLowerCase();
 
@@ -38,6 +40,7 @@ export function useStudents() {
         last.includes(query) ||
         course.includes(query) ||
         section.includes(query) ||
+        studentNum.includes(query) ||
         rfid.includes(query) ||
         (compactQuery.length > 0 && rfidCompact.includes(compactQuery))
       );
@@ -46,11 +49,26 @@ export function useStudents() {
 
   const totalCount = computed(() => students.value.length);
 
-  async function loadStudents(): Promise<Student[]> {
+  async function loadStudents(forceRemote = false): Promise<Student[]> {
     isLoading.value = true;
     error.value = null;
     try {
-      const data = await studentService.getStudents();
+      studentService.clearCache();
+      let data = await studentService.getStudents();
+
+      // If no students in local storage and device is online, attempt a pull sync to hydrate
+      if ((data.length === 0 || forceRemote) && typeof navigator !== 'undefined' && navigator.onLine) {
+        try {
+          const pullRes = await PullSyncService.pullRemoteChanges();
+          if (pullRes.appliedCount > 0) {
+            studentService.clearCache();
+            data = await studentService.getStudents();
+          }
+        } catch (syncErr) {
+          console.warn('[useStudents] Pull remote changes error on empty roster:', syncErr);
+        }
+      }
+
       students.value = data;
       return data;
     } catch (err: unknown) {

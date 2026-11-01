@@ -45,6 +45,10 @@ export function maskRfidUid(uid: string): string {
 export class StudentService {
   constructor(private repo: IStudentRepository = localStudentRepository) {}
 
+  clearCache(): void {
+    this.repo.clearCache();
+  }
+
   async getStudents(): Promise<Student[]> {
     return this.repo.getAll();
   }

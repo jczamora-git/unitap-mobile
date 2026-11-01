@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue';
 import type { Student } from '@/types/student';
-import { formatFullName } from '@/utilities/student-formatters';
+import { formatFullName, formatYearLevel } from '@/utilities/student-formatters';
 import { radioOutline, chevronForwardOutline } from 'ionicons/icons';
 import { IonIcon } from '@ionic/vue';
 import { haptics } from '@/utilities/haptics';
@@ -55,7 +55,7 @@ function onRowClick() {
         </span>
         <span class="sub-dot">•</span>
         <span class="student-academic">
-          {{ student.yearLevel }}th Yr - Sec {{ student.section }}
+          {{ formatYearLevel(student.yearLevel) }} - Sec {{ student.section }}
         </span>
       </div>
     </div>

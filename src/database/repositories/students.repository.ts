@@ -137,7 +137,7 @@ export class StudentsRepository {
       const q = `%${filters.query}%`;
       params.push(q, q, q);
     }
-    sql += ' ORDER BY s.last_name ASC, s.first_name ASC';
+    sql += ' GROUP BY s.id ORDER BY s.last_name ASC, s.first_name ASC';
 
     return db.query<StudentWithEnrollment>(sql, params);
   }
