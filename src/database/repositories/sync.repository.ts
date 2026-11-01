@@ -38,6 +38,23 @@ export class SyncRepository {
     );
   }
 
+  public static async getAllPendingOutbox(adapter?: DatabaseAdapter): Promise<SyncOutboxRecord[]> {
+    const db = await this.getDb(adapter);
+    return db.query<SyncOutboxRecord>(
+      'SELECT * FROM sync_outbox ORDER BY created_at DESC LIMIT 100'
+    );
+  }
+
+  public static async clearOutbox(adapter?: DatabaseAdapter): Promise<void> {
+    const db = await this.getDb(adapter);
+    await db.execute('DELETE FROM sync_outbox');
+  }
+
+  public static async deleteOutboxItem(id: string, adapter?: DatabaseAdapter): Promise<void> {
+    const db = await this.getDb(adapter);
+    await db.execute('DELETE FROM sync_outbox WHERE id = ?', [id]);
+  }
+
   public static async recordAuditEvent(event: AuditEventRecord, adapter?: DatabaseAdapter): Promise<void> {
     const db = await this.getDb(adapter);
     await db.execute(

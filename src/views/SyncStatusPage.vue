@@ -39,6 +39,40 @@
           </button>
         </div>
 
+        <!-- Sync Error Alert if lastError exists -->
+        <div v-if="lastError" class="sync-error-card">
+          <ion-icon :icon="alertCircleOutline" class="error-card-icon" />
+          <div class="error-card-content">
+            <span class="error-card-title">Push Synchronization Error</span>
+            <span class="error-card-msg font-mono">{{ lastError }}</span>
+          </div>
+        </div>
+
+        <!-- Pending Outbox Queue -->
+        <div v-if="pendingCount > 0" class="outbox-section">
+          <div class="section-head-row">
+            <h3 class="section-title">Pending Operations Queue ({{ pendingCount }})</h3>
+            <button class="clear-queue-btn" @click="handleClearQueue">Clear Queue</button>
+          </div>
+          <div class="outbox-cards">
+            <div v-for="item in outboxItems" :key="item.id" class="outbox-item-card">
+              <div class="outbox-head">
+                <span class="outbox-entity">{{ item.entity_type }}</span>
+                <span class="outbox-op">{{ item.operation }}</span>
+                <span v-if="item.retry_count && item.retry_count > 0" class="outbox-retry">
+                  Retried {{ item.retry_count }}x
+                </span>
+                <button class="delete-btn" title="Discard item" @click="handleDeleteItem(item.id)">
+                  <ion-icon :icon="trashOutline" />
+                </button>
+              </div>
+              <div v-if="item.last_error" class="outbox-err font-mono">
+                {{ item.last_error }}
+              </div>
+            </div>
+          </div>
+        </div>
+
         <div class="info-section">
           <h3 class="section-title">How UniTap 2.0 Sync Works</h3>
           <ul class="info-list">
@@ -54,19 +88,56 @@
 </template>
 
 <script setup lang="ts">
+import { ref, onMounted } from 'vue';
 import { useRouter } from 'vue-router';
 import { IonPage, IonContent, IonIcon } from '@ionic/vue';
-import { refreshOutline } from 'ionicons/icons';
+import { refreshOutline, alertCircleOutline, trashOutline } from 'ionicons/icons';
 import { useSyncStatus } from '@/composables/useSyncStatus';
 import { useConnectivity } from '@/composables/useConnectivity';
 import { formatTime } from '@/utilities/date-formatters';
+import type { SyncOutboxRecord } from '@/types/database';
 
 const router = useRouter();
-const { state, hydration, pendingCount, lastSync, syncNow } = useSyncStatus();
+const { 
+  state, 
+  hydration, 
+  pendingCount, 
+  lastSync, 
+  lastError, 
+  syncNow, 
+  getPendingOutbox, 
+  clearPendingOutbox, 
+  deletePendingItem 
+} = useSyncStatus();
 const { isOnline } = useConnectivity();
+
+const outboxItems = ref<SyncOutboxRecord[]>([]);
+
+async function loadOutbox() {
+  try {
+    outboxItems.value = await getPendingOutbox();
+  } catch (err) {
+    console.error('Failed loading outbox:', err);
+  }
+}
+
+onMounted(async () => {
+  await loadOutbox();
+});
 
 async function handleManualSync() {
   await syncNow();
+  await loadOutbox();
+}
+
+async function handleClearQueue() {
+  await clearPendingOutbox();
+  outboxItems.value = [];
+}
+
+async function handleDeleteItem(id: string) {
+  await deletePendingItem(id);
+  await loadOutbox();
 }
 </script>
 
@@ -279,6 +350,137 @@ async function handleManualSync() {
   display: flex;
   flex-direction: column;
   gap: 8px;
+}
+
+.sync-error-card {
+  background: rgba(239, 68, 68, 0.1);
+  border: 1px solid rgba(239, 68, 68, 0.3);
+  border-radius: 12px;
+  padding: 14px 16px;
+  margin-bottom: 20px;
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.error-card-icon {
+  font-size: 22px;
+  color: var(--uni-danger, #EF4444);
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+
+.error-card-content {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  overflow: hidden;
+}
+
+.error-card-title {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--uni-danger, #EF4444);
+}
+
+.error-card-msg {
+  font-size: 11.5px;
+  color: var(--uni-ink, #0F172A);
+  line-height: 1.4;
+  word-break: break-all;
+}
+
+.outbox-section {
+  background: var(--uni-surface);
+  border: 1px solid var(--uni-border);
+  border-radius: 12px;
+  padding: 16px;
+  margin-bottom: 20px;
+}
+
+.section-head-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 12px;
+}
+
+.clear-queue-btn {
+  background: none;
+  border: 1px solid rgba(239, 68, 68, 0.4);
+  color: var(--uni-danger, #EF4444);
+  border-radius: 6px;
+  padding: 4px 8px;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.outbox-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.outbox-item-card {
+  background: rgba(0, 0, 0, 0.03);
+  border: 1px solid var(--uni-border);
+  border-radius: 8px;
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.outbox-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.outbox-entity {
+  font-size: 11px;
+  font-weight: 700;
+  background: var(--uni-primary-bg, rgba(15, 118, 110, 0.15));
+  color: var(--uni-primary, #0F766E);
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+
+.outbox-op {
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--uni-muted, #64748B);
+}
+
+.outbox-retry {
+  font-size: 10px;
+  color: var(--uni-danger, #EF4444);
+  margin-left: auto;
+}
+
+.delete-btn {
+  background: none;
+  border: none;
+  color: var(--uni-muted, #64748B);
+  cursor: pointer;
+  padding: 2px 4px;
+  font-size: 14px;
+  margin-left: auto;
+}
+
+.delete-btn:hover {
+  color: var(--uni-danger, #EF4444);
+}
+
+.outbox-err {
+  font-size: 11px;
+  color: var(--uni-danger, #EF4444);
+  line-height: 1.35;
+  background: rgba(239, 68, 68, 0.08);
+  padding: 6px 8px;
+  border-radius: 4px;
+  word-break: break-all;
 }
 </style>
 

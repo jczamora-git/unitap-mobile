@@ -3,6 +3,7 @@ import { SyncPreferenceService, type SyncMode } from '@/services/sync/sync-prefe
 import { SyncStatusService, type UserFacingSyncStatus } from '@/services/sync/sync-status.service';
 import { SyncManager } from '@/services/sync/sync-manager';
 import { InitialSyncService } from '@/services/sync/initial-sync.service';
+import { PushSyncService } from '@/services/sync/push-sync.service';
 import { authService } from '@/services/auth.service';
 import { SupabaseAuthService } from '@/integrations/supabase/auth.service';
 import type { UserRole } from '@/services/sync/sync-scope.service';
@@ -16,6 +17,7 @@ export function useSyncPreferences() {
   const syncStatus = computed<UserFacingSyncStatus>(() => SyncStatusService.userFacingStatus.value);
   const formattedLastSync = computed(() => SyncStatusService.formattedLastSync.value);
   const pendingCount = computed(() => SyncStatusService.pendingCount.value);
+  const lastError = computed(() => SyncStatusService.lastError.value);
 
   async function setSyncMode(mode: SyncMode) {
     await SyncPreferenceService.setMode(mode);
@@ -66,12 +68,16 @@ export function useSyncPreferences() {
     syncStatus,
     formattedLastSync,
     pendingCount,
+    lastError,
     isSyncing,
     isRefreshing,
     syncError,
     setSyncMode,
     triggerSyncNow,
     triggerRefreshLocalData,
+    getPendingOutbox: PushSyncService.getPendingOutbox.bind(PushSyncService),
+    clearPendingOutbox: PushSyncService.clearPendingOutbox.bind(PushSyncService),
+    deletePendingItem: PushSyncService.deletePendingItem.bind(PushSyncService),
   };
 }
 

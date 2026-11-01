@@ -40,6 +40,7 @@ export class SyncStatusService {
   private static currentHydration = ref<HydrationState>('NOT_INITIALIZED');
   private static pendingOutboxCount = ref<number>(0);
   private static lastSyncTimestamp = ref<string | null>(null);
+  private static lastErrorMessage = ref<string | null>(null);
   private static progress = ref<SyncProgress>({
     currentTable: '',
     tablesCompleted: 0,
@@ -66,6 +67,14 @@ export class SyncStatusService {
 
   public static get currentProgress() {
     return computed(() => this.progress.value);
+  }
+
+  public static get lastError() {
+    return computed(() => this.lastErrorMessage.value);
+  }
+
+  public static setLastError(error: string | null): void {
+    this.lastErrorMessage.value = error;
   }
 
   /**

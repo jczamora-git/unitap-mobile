@@ -2,6 +2,7 @@ import { supabase } from '@/integrations/supabase/client';
 import { getDatabase } from '@/database/database';
 import { SyncStatusService } from './sync-status.service';
 import { ConflictService } from './conflict.service';
+import { SyncRepository } from '@/database/repositories/sync.repository';
 import type { SyncOutboxRecord } from '@/types/database';
 
 export class PushSyncService {
@@ -37,6 +38,11 @@ export class PushSyncService {
         p_operations: ops,
       });
 
+      if (batchErr) {
+        console.error('[PushSync] Batch push RPC error:', batchErr);
+        SyncStatusService.setLastError(batchErr.message || 'Server RPC error');
+      }
+
       if (!batchErr && batchRes && Array.isArray(batchRes.results)) {
         for (const res of batchRes.results) {
           if (res.status === 'APPLIED') {
@@ -58,6 +64,13 @@ export class PushSyncService {
             pushedCount++;
           } else {
             errorCount++;
+            const errMsg = res.error || 'Server rejected outbox operation';
+            console.error(`[PushSync] Outbox operation ${res.id} rejected by server:`, errMsg);
+            SyncStatusService.setLastError(errMsg);
+            await db.execute(
+              'UPDATE sync_outbox SET last_error = ?, retry_count = retry_count + 1 WHERE id = ?',
+              [errMsg, res.id]
+            );
           }
         }
 
@@ -70,6 +83,7 @@ export class PushSyncService {
         if (errorCount > 0) {
           SyncStatusService.setState('SYNC_ERROR');
         } else if (count === 0) {
+          SyncStatusService.setLastError(null);
           SyncStatusService.setState('SYNCED');
         }
 
@@ -117,9 +131,22 @@ export class PushSyncService {
           pushedCount++;
         } else {
           errorCount++;
+          const errMsg = 'REST push rejected: ' + op.entity_type;
+          console.error(`[PushSync] REST operation ${op.id} rejected:`, errMsg);
+          SyncStatusService.setLastError(errMsg);
+          await db.execute(
+            'UPDATE sync_outbox SET last_error = ?, retry_count = retry_count + 1 WHERE id = ?',
+            [errMsg, op.id]
+          );
         }
       } catch (err: unknown) {
         console.error(`[PushSync] Failed to process operation ${op.id}:`, err);
+        const errMsg = err instanceof Error ? err.message : String(err);
+        SyncStatusService.setLastError(errMsg);
+        await db.execute(
+          'UPDATE sync_outbox SET last_error = ?, retry_count = retry_count + 1 WHERE id = ?',
+          [errMsg, op.id]
+        );
         errorCount++;
       }
     }
@@ -134,10 +161,34 @@ export class PushSyncService {
     if (errorCount > 0) {
       SyncStatusService.setState('SYNC_ERROR');
     } else if (count === 0) {
+      SyncStatusService.setLastError(null);
       SyncStatusService.setState('SYNCED');
     }
 
     return { pushedCount, errorCount };
+  }
+
+  public static async getPendingOutbox(): Promise<SyncOutboxRecord[]> {
+    return SyncRepository.getAllPendingOutbox();
+  }
+
+  public static async clearPendingOutbox(): Promise<void> {
+    await SyncRepository.clearOutbox();
+    SyncStatusService.setPendingCount(0);
+    SyncStatusService.setLastError(null);
+    SyncStatusService.setState('SYNCED');
+  }
+
+  public static async deletePendingItem(id: string): Promise<void> {
+    await SyncRepository.deleteOutboxItem(id);
+    const db = await getDatabase();
+    const count = await db.queryOne<{ count: number }>('SELECT count(*) as count FROM sync_outbox');
+    const remaining = count?.count || 0;
+    SyncStatusService.setPendingCount(remaining);
+    if (remaining === 0) {
+      SyncStatusService.setLastError(null);
+      SyncStatusService.setState('SYNCED');
+    }
   }
 
   private static mapEntityTypeToTable(entityType: string): string {

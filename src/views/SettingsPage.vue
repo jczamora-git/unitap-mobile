@@ -25,7 +25,8 @@ import {
   constructOutline,
   cloudUploadOutline,
   optionsOutline,
-  refreshOutline
+  refreshOutline,
+  alertCircleOutline
 } from 'ionicons/icons';
 import { useNfc } from '@/composables/useNfc';
 import { useOnboarding } from '@/composables/useOnboarding';
@@ -34,7 +35,7 @@ import { useSyncPreferences } from '@/composables/useSyncPreferences';
 import { authService } from '@/services/auth.service';
 import { SupabaseAuthService } from '@/integrations/supabase/auth.service';
 import { AcademicRepository } from '@/database/repositories/academic.repository';
-import type { Semester, AcademicYear } from '@/types/database';
+import type { Semester, AcademicYear, SyncOutboxRecord } from '@/types/database';
 import { demoDataService } from '@/services/demo-data.service';
 import {
   formatUserRole,
@@ -52,11 +53,15 @@ const {
   syncStatus,
   formattedLastSync,
   pendingCount,
+  lastError,
   isSyncing,
   isRefreshing,
   setSyncMode,
   triggerSyncNow,
   triggerRefreshLocalData,
+  getPendingOutbox,
+  clearPendingOutbox,
+  deletePendingItem,
 } = useSyncPreferences();
 
 const {
@@ -71,7 +76,59 @@ const showResetAlert = ref(false);
 const showSignOutAlert = ref(false);
 const showAdvancedSyncSheet = ref(false);
 const showRefreshConfirmDialog = ref(false);
+const showPendingSheet = ref(false);
+const showClearPendingDialog = ref(false);
+const pendingList = ref<SyncOutboxRecord[]>([]);
+const isLoadingPending = ref(false);
+const expandedPayloadId = ref<string | null>(null);
 const notificationsEnabled = ref(true);
+
+async function openPendingSheet() {
+  haptics.light();
+  showPendingSheet.value = true;
+  await loadPendingList();
+}
+
+async function loadPendingList() {
+  isLoadingPending.value = true;
+  try {
+    pendingList.value = await getPendingOutbox();
+  } catch (err) {
+    console.error('Failed loading pending outbox:', err);
+  } finally {
+    isLoadingPending.value = false;
+  }
+}
+
+async function handleDeletePending(id: string) {
+  haptics.light();
+  await deletePendingItem(id);
+  await loadPendingList();
+}
+
+async function handleClearAllPending() {
+  showClearPendingDialog.value = false;
+  haptics.medium();
+  await clearPendingOutbox();
+  pendingList.value = [];
+  statusMessage.value = 'Pending changes cleared.';
+}
+
+function togglePayload(id: string) {
+  if (expandedPayloadId.value === id) {
+    expandedPayloadId.value = null;
+  } else {
+    expandedPayloadId.value = id;
+  }
+}
+
+function formatPayloadJson(jsonStr: string): string {
+  try {
+    return JSON.stringify(JSON.parse(jsonStr), null, 2);
+  } catch {
+    return jsonStr;
+  }
+}
 
 const syncModeOptions = [
   { value: 'AUTOMATIC', label: 'Automatic' },
@@ -353,6 +410,20 @@ function toggleNotifications() {
               <span class="last-sync-caption">Last Updated: {{ formattedLastSync }}</span>
             </div>
 
+            <!-- Sync Error Banner if lastError exists -->
+            <div
+              v-if="lastError && syncStatus === 'Update Failed'"
+              class="sync-error-banner tactile-press"
+              @click="openPendingSheet"
+            >
+              <ion-icon :icon="alertCircleOutline" class="error-banner-icon" />
+              <div class="error-banner-text">
+                <span class="error-banner-label">Error Details:</span>
+                <span class="error-banner-msg">{{ lastError }}</span>
+              </div>
+              <ion-icon :icon="chevronForwardOutline" class="error-banner-arrow" />
+            </div>
+
             <div class="row-divider"></div>
 
             <!-- Sync Preference Control -->
@@ -369,17 +440,20 @@ function toggleNotifications() {
             <div class="row-divider"></div>
 
             <!-- Pending Changes Counter & Action Row -->
-            <div class="list-action-row no-hover">
+            <div class="list-action-row tactile-press cursor-pointer" @click="openPendingSheet">
               <div class="row-icon-box text-primary">
                 <ion-icon :icon="cloudUploadOutline" />
               </div>
               <div class="row-content">
                 <span class="row-title">Pending Changes</span>
-                <span class="row-desc">Operations waiting to upload</span>
+                <span class="row-desc">Tap to inspect outbox logs &amp; queue</span>
               </div>
-              <span class="badge-pill font-mono" :class="pendingCount > 0 ? 'badge-warning' : 'badge-neutral'">
-                {{ pendingCount }}
-              </span>
+              <div class="pending-badge-row">
+                <span class="badge-pill font-mono" :class="pendingCount > 0 ? 'badge-warning' : 'badge-neutral'">
+                  {{ pendingCount }}
+                </span>
+                <ion-icon :icon="chevronForwardOutline" class="row-arrow" />
+              </div>
             </div>
 
             <!-- Sync Now Button -->
@@ -617,6 +691,107 @@ function toggleNotifications() {
         type="confirm"
         @confirm="handleConfirmRefreshData"
         @cancel="showRefreshConfirmDialog = false"
+      />
+
+      <!-- Pending Changes & Outbox Logs Sheet -->
+      <UniSheet
+        v-model:is-open="showPendingSheet"
+        title="Pending Sync Operations"
+        :subtitle="`${pendingList.length} operations queued for cloud upload`"
+      >
+        <div class="pending-sheet-content">
+          <div v-if="pendingList.length > 0" class="pending-sheet-toolbar">
+            <span class="sheet-summary-text">
+              Uncommitted operations stored safely in local SQLite outbox.
+            </span>
+            <div class="toolbar-actions">
+              <UniButton
+                variant="outline"
+                size="sm"
+                :icon="refreshOutline"
+                :disabled="isSyncing"
+                @click="onSyncNow(); loadPendingList()"
+              >
+                Retry Sync
+              </UniButton>
+              <UniButton
+                variant="destructive"
+                size="sm"
+                :icon="trashOutline"
+                @click="showClearPendingDialog = true"
+              >
+                Clear Queue
+              </UniButton>
+            </div>
+          </div>
+
+          <div v-if="isLoadingPending" class="loading-state">
+            <ion-spinner name="crescent" color="primary" />
+            <p class="metadata-text">Loading outbox logs...</p>
+          </div>
+
+          <div v-else-if="pendingList.length === 0" class="empty-pending-state">
+            <ion-icon :icon="checkmarkCircle" class="empty-icon text-success" />
+            <span class="empty-title">Queue is empty</span>
+            <span class="empty-desc">All local operations have been synchronized with the cloud.</span>
+          </div>
+
+          <div v-else class="pending-items-list">
+            <div
+              v-for="item in pendingList"
+              :key="item.id"
+              class="pending-item-card"
+            >
+              <div class="item-head-row">
+                <div class="item-badges">
+                  <span class="entity-badge">{{ item.entity_type }}</span>
+                  <span class="op-badge" :class="'op-' + item.operation.toLowerCase()">
+                    {{ item.operation }}
+                  </span>
+                </div>
+                <div class="item-actions">
+                  <span v-if="item.retry_count && item.retry_count > 0" class="retry-tag">
+                    Retried {{ item.retry_count }}x
+                  </span>
+                  <button class="delete-item-btn" title="Discard this stuck change" @click="handleDeletePending(item.id)">
+                    <ion-icon :icon="trashOutline" />
+                  </button>
+                </div>
+              </div>
+
+              <div class="item-meta-row font-mono">
+                <span>ID: {{ item.id }}</span>
+                <span>{{ item.created_at ? new Date(item.created_at).toLocaleTimeString() : '' }}</span>
+              </div>
+
+              <!-- Error Log Callout if last_error exists -->
+              <div v-if="item.last_error" class="item-error-box">
+                <ion-icon :icon="alertCircleOutline" class="item-error-icon" />
+                <span class="item-error-text">{{ item.last_error }}</span>
+              </div>
+
+              <!-- Payload Toggle & Preview -->
+              <div class="payload-section">
+                <button class="payload-toggle-btn" @click="togglePayload(item.id)">
+                  {{ expandedPayloadId === item.id ? 'Hide Payload' : 'Inspect Payload' }}
+                </button>
+                <pre v-if="expandedPayloadId === item.id" class="payload-code-block">{{ formatPayloadJson(item.payload_json) }}</pre>
+              </div>
+            </div>
+          </div>
+        </div>
+      </UniSheet>
+
+      <!-- Clear Pending Confirmation Dialog -->
+      <UniDialog
+        v-model:is-open="showClearPendingDialog"
+        title="Clear Pending Queue?"
+        description="Are you sure you want to discard all pending outbox changes? If records were already saved to Supabase (like imported students), discarding duplicate queue entries will safely resolve the 'Update Failed' state."
+        confirm-text="Clear Queue"
+        cancel-text="Cancel"
+        type="destructive"
+        @confirm="handleClearAllPending"
+        @cancel="showClearPendingDialog = false"
       />
     </ion-content>
   </ion-page>
@@ -1105,5 +1280,272 @@ function toggleNotifications() {
 
 .option-btn {
   align-self: flex-end;
+}
+
+/* Sync Error Callout Banner */
+.sync-error-banner {
+  margin: 0 16px 12px 16px;
+  padding: 10px 14px;
+  background: rgba(239, 68, 68, 0.12);
+  border: 1px solid rgba(239, 68, 68, 0.3);
+  border-radius: var(--uni-radius-card, 12px);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
+}
+
+.error-banner-icon {
+  font-size: 20px;
+  color: var(--uni-danger, #EF4444);
+  flex-shrink: 0;
+}
+
+.error-banner-text {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  overflow: hidden;
+}
+
+.error-banner-label {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  color: var(--uni-danger, #EF4444);
+  letter-spacing: 0.04em;
+}
+
+.error-banner-msg {
+  font-size: 12px;
+  color: var(--uni-text);
+  line-height: 1.35;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.error-banner-arrow {
+  font-size: 16px;
+  color: var(--uni-danger, #EF4444);
+  flex-shrink: 0;
+}
+
+.pending-badge-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* Pending Sheet Styles */
+.pending-sheet-content {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  max-height: 70vh;
+  overflow-y: auto;
+}
+
+.pending-sheet-toolbar {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--uni-border);
+}
+
+.sheet-summary-text {
+  font-size: 12.5px;
+  color: var(--uni-text-secondary);
+  line-height: 1.4;
+}
+
+.toolbar-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.empty-pending-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  padding: 30px 16px;
+  gap: 8px;
+}
+
+.empty-icon {
+  font-size: 40px;
+}
+
+.empty-title {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--uni-text);
+}
+
+.empty-desc {
+  font-size: 12.5px;
+  color: var(--uni-text-secondary);
+  max-width: 280px;
+}
+
+.pending-items-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.pending-item-card {
+  background: var(--uni-surface-secondary);
+  border: 1px solid var(--uni-border);
+  border-radius: var(--uni-radius-card, 12px);
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.item-head-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.item-badges {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.entity-badge {
+  font-size: 11px;
+  font-weight: 700;
+  padding: 2px 7px;
+  border-radius: 6px;
+  background: var(--uni-primary-bg, rgba(15, 118, 110, 0.15));
+  color: var(--uni-primary, #0F766E);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.op-badge {
+  font-size: 10.5px;
+  font-weight: 700;
+  padding: 2px 6px;
+  border-radius: 6px;
+  text-transform: uppercase;
+}
+
+.op-badge.op-create {
+  background: rgba(16, 185, 129, 0.15);
+  color: #10B981;
+}
+
+.op-badge.op-update {
+  background: rgba(59, 130, 246, 0.15);
+  color: #3B82F6;
+}
+
+.op-badge.op-void,
+.op-badge.op-revoke {
+  background: rgba(239, 68, 68, 0.15);
+  color: #EF4444;
+}
+
+.item-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.retry-tag {
+  font-size: 11px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: rgba(239, 68, 68, 0.12);
+  color: var(--uni-danger, #EF4444);
+  font-weight: 600;
+}
+
+.delete-item-btn {
+  background: none;
+  border: none;
+  color: var(--uni-text-secondary);
+  font-size: 16px;
+  cursor: pointer;
+  padding: 4px;
+  display: flex;
+  align-items: center;
+  transition: color 0.15s ease;
+}
+
+.delete-item-btn:hover {
+  color: var(--uni-danger, #EF4444);
+}
+
+.item-meta-row {
+  display: flex;
+  justify-content: space-between;
+  font-size: 11px;
+  color: var(--uni-text-secondary);
+}
+
+.item-error-box {
+  background: rgba(239, 68, 68, 0.1);
+  border: 1px solid rgba(239, 68, 68, 0.25);
+  border-radius: 8px;
+  padding: 8px 10px;
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.item-error-icon {
+  font-size: 16px;
+  color: var(--uni-danger, #EF4444);
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+
+.item-error-text {
+  font-size: 11.5px;
+  color: var(--uni-danger, #EF4444);
+  line-height: 1.35;
+  font-family: monospace;
+  word-break: break-all;
+}
+
+.payload-section {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.payload-toggle-btn {
+  background: none;
+  border: none;
+  color: var(--uni-primary, #0F766E);
+  font-size: 11.5px;
+  font-weight: 600;
+  cursor: pointer;
+  padding: 0;
+  text-align: left;
+}
+
+.payload-code-block {
+  margin: 0;
+  padding: 8px;
+  background: var(--uni-surface);
+  border: 1px solid var(--uni-border);
+  border-radius: 6px;
+  font-size: 10.5px;
+  line-height: 1.35;
+  max-height: 160px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
 }
 </style>
