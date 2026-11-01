@@ -4,6 +4,7 @@ import { FINES_REDESIGN_MIGRATION_SQL } from './migrations/002_fines_contributio
 import { SYSTEM_SETUP_MIGRATION_SQL } from './migrations/003_system_setup_academic_structure';
 import { STUDENT_ACTIVATION_MIGRATION_SQL } from './migrations/004_student_activation_audit';
 import { OFFICER_MANAGEMENT_MIGRATION_SQL } from './migrations/005_officer_management';
+import { ATTENDANCE_CONCURRENCY_MIGRATION_SQL } from './migrations/006_attendance_concurrency_audit';
 
 export interface Migration {
   version: number;
@@ -36,6 +37,11 @@ export const MIGRATIONS: Migration[] = [
     version: 5,
     description: 'UniTap 2.0 DevAdmin-Only Officer Management & Multi-Role Appointment Architecture',
     sql: OFFICER_MANAGEMENT_MIGRATION_SQL,
+  },
+  {
+    version: 6,
+    description: 'UniTap 2.0 Multi-Officer Attendance Concurrency, Optimistic Versioning & Revocation Audit',
+    sql: ATTENDANCE_CONCURRENCY_MIGRATION_SQL,
   },
 ];
 

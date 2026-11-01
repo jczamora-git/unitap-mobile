@@ -136,26 +136,137 @@ export class AttendanceRepository {
       if (!existing) {
         throw new Error('Attendance record not found.');
       }
-      if (existing.status === 'VOID') {
-        throw new Error('Attendance record is already voided.');
+      if (existing.status === 'VOID' || existing.status === 'REVOKED') {
+        throw new Error('Attendance record is already revoked.');
       }
 
       const now = new Date().toISOString();
+      const newVersion = (existing.version || 1) + 1;
       await tx.execute(
         `UPDATE attendance_records
-         SET status = 'VOID', voided_at = ?, voided_by_user_id = ?, void_reason = ?, updated_at = ?
+         SET status = 'VOID', voided_at = ?, voided_by_user_id = ?, void_reason = ?,
+             revoked_at = ?, revoked_by_user_id = ?, revocation_reason = ?, version = ?, updated_at = ?
          WHERE id = ?`,
-        [now, actorUserId, reason.trim(), now, attendanceId]
+        [now, actorUserId, reason.trim(), now, actorUserId, reason.trim(), newVersion, now, attendanceId]
       );
 
       const auditId = 'aud_' + Math.random().toString(36).substring(2, 10);
       await tx.execute(
         `INSERT INTO attendance_audit (
-          id, attendance_id, action, old_status, new_status, actor_user_id, reason, created_at
-        ) VALUES (?, ?, 'VOID', ?, 'VOID', ?, ?, ?)`,
-        [auditId, attendanceId, existing.status, actorUserId, reason.trim(), now]
+          id, attendance_id, occurrence_id, student_id, action, old_status, new_status, actor_user_id, reason, created_at, performed_by_user_id, performed_at
+        ) VALUES (?, ?, ?, ?, 'VOID', ?, 'VOID', ?, ?, ?, ?, ?)`,
+        [auditId, attendanceId, existing.occurrence_id, existing.student_id, existing.status, actorUserId, reason.trim(), now, actorUserId, now]
+      );
+
+      // Enqueue sync outbox VOID operation
+      const outboxId = 'op_att_rev_' + Math.random().toString(36).substring(2, 10);
+      await tx.execute(
+        `INSERT INTO sync_outbox (
+          id, device_id, entity_type, entity_id, operation, payload_json,
+          schema_version, created_at, retry_count
+        ) VALUES (?, 'dev_default', 'ATTENDANCE', ?, 'VOID', ?, 1, ?, 0)`,
+        [
+          outboxId,
+          attendanceId,
+          JSON.stringify({
+            id: attendanceId,
+            status: 'REVOKED',
+            revocation_reason: reason.trim(),
+            revoked_at: now,
+            revoked_by_user_id: actorUserId,
+            version: newVersion,
+            updated_at: now,
+          }),
+          now,
+        ]
       );
     });
+  }
+
+  public static async recheckAttendance(
+    attendanceId: string,
+    reason: string,
+    actorUserId: string,
+    targetStatus: 'PRESENT' | 'LATE' = 'PRESENT',
+    adapter?: DatabaseAdapter
+  ): Promise<void> {
+    if (!reason || reason.trim().length === 0) {
+      throw new Error('A reason is mandatory to approve an attendance recheck.');
+    }
+
+    const db = await this.getDb(adapter);
+    await db.transaction(async (tx) => {
+      const existing = await tx.queryOne<AttendanceRecord>(
+        'SELECT * FROM attendance_records WHERE id = ?',
+        [attendanceId]
+      );
+      if (!existing) {
+        throw new Error('Attendance record not found.');
+      }
+
+      const now = new Date().toISOString();
+      const newVersion = (existing.version || 1) + 1;
+      await tx.execute(
+        `UPDATE attendance_records
+         SET status = ?, voided_at = NULL, voided_by_user_id = NULL, void_reason = NULL,
+             revoked_at = NULL, revoked_by_user_id = NULL, revocation_reason = NULL,
+             identity_verified_by_user_id = ?, version = ?, updated_at = ?
+         WHERE id = ?`,
+        [targetStatus, actorUserId, newVersion, now, attendanceId]
+      );
+
+      const auditId = 'aud_' + Math.random().toString(36).substring(2, 10);
+      await tx.execute(
+        `INSERT INTO attendance_audit (
+          id, attendance_id, occurrence_id, student_id, action, old_status, new_status, actor_user_id, reason, created_at, performed_by_user_id, performed_at
+        ) VALUES (?, ?, ?, ?, 'REINSTATE', 'VOID', ?, ?, ?, ?, ?, ?)`,
+        [auditId, attendanceId, existing.occurrence_id, existing.student_id, targetStatus, actorUserId, reason.trim(), now, actorUserId, now]
+      );
+
+      const outboxId = 'op_att_recheck_' + Math.random().toString(36).substring(2, 10);
+      await tx.execute(
+        `INSERT INTO sync_outbox (
+          id, device_id, entity_type, entity_id, operation, payload_json,
+          schema_version, created_at, retry_count
+        ) VALUES (?, 'dev_default', 'ATTENDANCE', ?, 'UPDATE', ?, 1, ?, 0)`,
+        [
+          outboxId,
+          attendanceId,
+          JSON.stringify({
+            id: attendanceId,
+            status: targetStatus,
+            voided_at: null,
+            void_reason: null,
+            revoked_at: null,
+            revocation_reason: null,
+            identity_verified_by_user_id: actorUserId,
+            version: newVersion,
+            updated_at: now,
+          }),
+          now,
+        ]
+      );
+    });
+  }
+
+  public static async getAuditTrail(
+    attendanceId: string,
+    adapter?: DatabaseAdapter
+  ): Promise<Array<{
+    id: string;
+    action: string;
+    old_status?: string | null;
+    new_status: string;
+    reason?: string | null;
+    actor_user_id: string;
+    created_at: string;
+    performed_at?: string | null;
+  }>> {
+    const db = await this.getDb(adapter);
+    return db.query(
+      `SELECT * FROM attendance_audit WHERE attendance_id = ? ORDER BY coalesce(performed_at, created_at) DESC`,
+      [attendanceId]
+    );
   }
 
   public static async getRecord(

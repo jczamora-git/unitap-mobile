@@ -237,7 +237,7 @@ export interface AttendanceRecord {
   id: string;
   occurrence_id: string;
   student_id: string;
-  status: 'PENDING' | 'PRESENT' | 'LATE' | 'ABSENT' | 'EXCUSED' | 'VOID';
+  status: 'PENDING' | 'PRESENT' | 'LATE' | 'ABSENT' | 'EXCUSED' | 'VOID' | 'REVOKED';
   checked_in_at?: string | null;
   method?: 'NFC' | 'MANUAL' | null;
   identity_verified_by_user_id?: string | null;
@@ -245,6 +245,10 @@ export interface AttendanceRecord {
   voided_at?: string | null;
   voided_by_user_id?: string | null;
   void_reason?: string | null;
+  revoked_at?: string | null;
+  revoked_by_user_id?: string | null;
+  revocation_reason?: string | null;
+  version?: number;
   updated_at: string;
 }
 

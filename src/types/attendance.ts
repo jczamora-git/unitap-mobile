@@ -3,11 +3,15 @@ import type { EventOccurrence, OccurrenceParticipant, AttendanceStatus } from '.
 
 export type ScanResultType =
   | 'ACCEPTED'
+  | 'RECORDED'
   | 'DUPLICATE'
+  | 'ALREADY_RECORDED'
   | 'INVALID'
   | 'UNREGISTERED'
   | 'NOT_ELIGIBLE'
-  | 'SESSION_CLOSED';
+  | 'SESSION_CLOSED'
+  | 'REVOKED_REVIEW_REQUIRED'
+  | 'CONFLICT_REQUIRES_RECONCILIATION';
 
 export interface AttendanceScanResult {
   type: ScanResultType;
@@ -18,6 +22,8 @@ export interface AttendanceScanResult {
   attendanceStatus?: AttendanceStatus;
   timestamp: string;
   rfidUid: string;
+  recordId?: string;
+  revocationReason?: string;
 }
 
 export interface AttendanceScanLog {

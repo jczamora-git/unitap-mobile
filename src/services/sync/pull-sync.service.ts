@@ -43,6 +43,7 @@ export class PullSyncService {
             'student_enrollments',
             'nfc_cards',
             'attendance_records',
+            'attendance_audit',
             'student_obligations',
             'payments',
             'payment_allocations',

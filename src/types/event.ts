@@ -47,7 +47,7 @@ export interface EventOccurrence {
   createdAt: string;
 }
 
-export type AttendanceStatus = 'PENDING' | 'PRESENT' | 'LATE' | 'ABSENT' | 'EXCUSED';
+export type AttendanceStatus = 'PENDING' | 'PRESENT' | 'LATE' | 'ABSENT' | 'EXCUSED' | 'VOID' | 'REVOKED';
 
 export type AttendanceMethod = 'NFC' | 'MANUAL';
 

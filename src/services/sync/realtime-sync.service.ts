@@ -21,6 +21,14 @@ export class RealtimeSyncService {
       )
       .on(
         'postgres_changes',
+        { event: '*', schema: 'public', table: 'attendance_audit' },
+        (payload) => {
+          console.log('[Realtime] Attendance audit change detected:', payload);
+          SyncManager.triggerRealtimeSync();
+        }
+      )
+      .on(
+        'postgres_changes',
         { event: '*', schema: 'public', table: 'payments' },
         (payload) => {
           console.log('[Realtime] Payment change detected:', payload);

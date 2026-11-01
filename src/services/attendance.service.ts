@@ -1,3 +1,9 @@
+import { supabase } from '@/integrations/supabase/client';
+
+function isTestEnvironment(): boolean {
+  const proc = (globalThis as unknown as { process?: { env?: Record<string, string | undefined> } }).process;
+  return proc?.env?.VITEST === 'true' || proc?.env?.NODE_ENV === 'test' || import.meta.env?.MODE === 'test';
+}
 import type { 
   AttendanceScanResult, 
   AttendanceScanLog, 
@@ -35,6 +41,9 @@ export interface VerificationPromptData {
   section?: string;
   suggestedStatus: AttendanceStatus;
   eligible: boolean;
+  existingRecordId?: string;
+  revocationReason?: string;
+  revokedAt?: string;
 }
 
 export class AttendanceService {
@@ -146,32 +155,65 @@ export class AttendanceService {
 
     const fullName = formatFullName(student.first_name, student.middle_name, student.last_name);
 
-    // 3. Duplicate check in attendance_records
+    // 3. Duplicate & Revocation check in attendance_records
     const existingRecord = await AttendanceRepository.getRecord(occurrenceId, student.id);
-    if (existingRecord && (existingRecord.status === 'PRESENT' || existingRecord.status === 'LATE')) {
-      await AttendanceRepository.logAttempt({
-        id: generateLogId(),
-        occurrence_id: occurrenceId,
-        student_id: student.id,
-        card_id: card.id,
-        uid_normalized: cleanUid,
-        actor_user_id: actorUserId || null,
-        result: 'DUPLICATE',
-        photo_displayed: 1,
-        notes: `Already recorded as ${existingRecord.status}`,
-        occurred_at: timestamp,
-      });
-      return {
-        type: 'DUPLICATE',
-        message: `${fullName} is already recorded as ${existingRecord.status}.`,
-        occurrenceId,
-        rfidUid: cleanUid,
-        student,
-        studentFullName: fullName,
-        photoLocalUri: student.photo_local_uri,
-        suggestedStatus: existingRecord.status as AttendanceStatus,
-        eligible: true,
-      };
+    if (existingRecord) {
+      if (existingRecord.status === 'REVOKED' || existingRecord.status === 'VOID') {
+        const reason = existingRecord.revocation_reason || existingRecord.void_reason || 'Administrative revocation';
+        await AttendanceRepository.logAttempt({
+          id: generateLogId(),
+          occurrence_id: occurrenceId,
+          student_id: student.id,
+          card_id: card.id,
+          uid_normalized: cleanUid,
+          actor_user_id: actorUserId || null,
+          result: 'NOT_ELIGIBLE',
+          photo_displayed: 1,
+          notes: `Attendance previously revoked: ${reason}`,
+          occurred_at: timestamp,
+        });
+        return {
+          type: 'REVOKED_REVIEW_REQUIRED',
+          message: `Attendance was revoked. Reason: "${reason}". An explicit recheck with reason is required.`,
+          occurrenceId,
+          rfidUid: cleanUid,
+          student,
+          studentFullName: fullName,
+          photoLocalUri: student.photo_local_uri,
+          suggestedStatus: 'REVOKED',
+          eligible: false,
+          existingRecordId: existingRecord.id,
+          revocationReason: reason,
+          revokedAt: existingRecord.revoked_at || existingRecord.voided_at || undefined,
+        };
+      }
+
+      if (existingRecord.status === 'PRESENT' || existingRecord.status === 'LATE') {
+        await AttendanceRepository.logAttempt({
+          id: generateLogId(),
+          occurrence_id: occurrenceId,
+          student_id: student.id,
+          card_id: card.id,
+          uid_normalized: cleanUid,
+          actor_user_id: actorUserId || null,
+          result: 'DUPLICATE',
+          photo_displayed: 1,
+          notes: `Already recorded as ${existingRecord.status}`,
+          occurred_at: timestamp,
+        });
+        return {
+          type: 'DUPLICATE',
+          message: `${fullName} is already recorded as ${existingRecord.status}.`,
+          occurrenceId,
+          rfidUid: cleanUid,
+          student,
+          studentFullName: fullName,
+          photoLocalUri: student.photo_local_uri,
+          suggestedStatus: existingRecord.status as AttendanceStatus,
+          eligible: true,
+          existingRecordId: existingRecord.id,
+        };
+      }
     }
 
     // 4. Calculate grace period (PRESENT vs LATE)
@@ -199,13 +241,16 @@ export class AttendanceService {
   /**
    * UniTap 2.0 Photo Identity Verification Step 2:
    * Officer confirms the identity -> save PRESENT or LATE attendance and write audit trail.
+   * Leverages atomic online RPC with graceful offline-first fallback.
    */
   async confirmStudentAttendance(
     occurrenceId: string,
     studentId: string,
     officerUserId: string,
-    statusOverride?: AttendanceStatus
-  ): Promise<void> {
+    statusOverride?: AttendanceStatus,
+    nfcCardId?: string,
+    uidNormalized?: string
+  ): Promise<{ status: string; message: string; recordId?: string }> {
     const now = new Date().toISOString();
     const occurrence = await EventsRepository.getOccurrenceById(occurrenceId);
     let status: AttendanceStatus = statusOverride || 'PRESENT';
@@ -216,6 +261,39 @@ export class AttendanceService {
       }
     }
 
+    // 1. Attempt Atomic Online Server RPC if available
+    if (!isTestEnvironment()) {
+      try {
+        const { data: scanRes, error: scanErr } = await supabase.rpc('record_attendance_scan', {
+          p_occurrence_id: occurrenceId,
+          p_student_id: studentId,
+          p_nfc_card_id: nfcCardId || null,
+          p_uid_normalized: uidNormalized || null,
+          p_status_override: status,
+          p_device_id: 'dev_default',
+        });
+
+        if (!scanErr && scanRes) {
+          if (scanRes.status === 'ALREADY_RECORDED') {
+            return { status: 'ALREADY_RECORDED', message: scanRes.message || 'Already recorded.' };
+          }
+          if (scanRes.status === 'REVOKED_REVIEW_REQUIRED') {
+            throw new Error(scanRes.message || 'Attendance was revoked. Explicit recheck required.');
+          }
+          if (scanRes.status === 'OCCURRENCE_CLOSED') {
+            throw new Error(scanRes.message || 'Event occurrence is closed.');
+          }
+        }
+      } catch (err: unknown) {
+        // If it's a domain error thrown above, rethrow
+        if (err instanceof Error && (err.message.includes('revoked') || err.message.includes('closed'))) {
+          throw err;
+        }
+        console.warn('[AttendanceService] Online atomic scan failed or offline, falling back to local SQLite:', err);
+      }
+    }
+
+    // 2. Local SQLite Transaction & Outbox Enqueue
     const attendanceId = 'att_' + Math.random().toString(36).substring(2, 10);
     await AttendanceRepository.recordAttendance(
       {
@@ -248,6 +326,12 @@ export class AttendanceService {
     } catch {
       // Legacy cache sync failure not fatal
     }
+
+    return {
+      status: 'RECORDED',
+      message: 'Attendance confirmed successfully!',
+      recordId: attendanceId,
+    };
   }
 
   /**
@@ -277,14 +361,76 @@ export class AttendanceService {
   }
 
   /**
-   * Void attendance: Officer voids a previously recorded attendance with mandatory reason.
+   * Void / Revoke attendance: Officer revokes attendance with mandatory reason.
    */
   async voidAttendance(
     attendanceId: string,
     reason: string,
     officerUserId: string
   ): Promise<void> {
+    if (!reason || reason.trim().length === 0) {
+      throw new Error('A mandatory reason is required to revoke attendance.');
+    }
+
+    // Attempt online atomic revocation
+    if (!isTestEnvironment()) {
+      try {
+        const { error: revErr } = await supabase.rpc('revoke_attendance', {
+          p_attendance_id: attendanceId,
+          p_reason: reason.trim(),
+        });
+        if (revErr) {
+          console.warn('[AttendanceService] Online revoke RPC error:', revErr.message);
+        }
+      } catch (err) {
+        console.warn('[AttendanceService] Network error during online revocation:', err);
+      }
+    }
+
+    // Always update local SQLite and enqueue outbox VOID operation
     await AttendanceRepository.voidAttendance(attendanceId, reason, officerUserId);
+  }
+
+  /**
+   * Recheck attendance: Explicit officer approval to reinstate a previously revoked record.
+   */
+  async recheckStudentAttendance(
+    attendanceId: string,
+    reason: string,
+    officerUserId: string,
+    statusOverride?: 'PRESENT' | 'LATE'
+  ): Promise<void> {
+    if (!reason || reason.trim().length === 0) {
+      throw new Error('A mandatory reason is required to approve an attendance recheck.');
+    }
+
+    const targetStatus = statusOverride || 'PRESENT';
+
+    // Attempt online atomic recheck
+    if (!isTestEnvironment()) {
+      try {
+        const { error: rechkErr } = await supabase.rpc('recheck_attendance', {
+          p_attendance_id: attendanceId,
+          p_reason: reason.trim(),
+          p_target_status: targetStatus,
+        });
+        if (rechkErr) {
+          console.warn('[AttendanceService] Online recheck RPC error:', rechkErr.message);
+        }
+      } catch (err) {
+        console.warn('[AttendanceService] Network error during online recheck:', err);
+      }
+    }
+
+    // Always update local SQLite and enqueue outbox UPDATE operation
+    await AttendanceRepository.recheckAttendance(attendanceId, reason, officerUserId, targetStatus);
+  }
+
+  /**
+   * Fetch full audit trail for an attendance record
+   */
+  async getAttendanceAuditTrail(attendanceId: string) {
+    return AttendanceRepository.getAuditTrail(attendanceId);
   }
 
   // Legacy compatibility method

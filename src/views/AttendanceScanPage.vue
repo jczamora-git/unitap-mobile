@@ -120,9 +120,13 @@ watch(lastTag, async (newTag) => {
         type: prep.type,
         message: prep.message,
         timestamp: new Date().toISOString(),
-        rfidUid: newTag.id
+        rfidUid: newTag.id,
+        recordId: prep.existingRecordId,
+        revocationReason: prep.revocationReason,
       };
       if (prep.type === 'DUPLICATE') {
+        await haptics.warning();
+      } else if (prep.type === 'REVOKED_REVIEW_REQUIRED') {
         await haptics.warning();
       } else {
         await haptics.error();
@@ -204,6 +208,27 @@ async function handleVoidAttendance(recordId: string) {
   try {
     await attendanceService.voidAttendance(recordId, reason.trim(), officerId);
     alert('Attendance record voided with audit log.');
+    await refreshSessionData();
+  } catch (err: unknown) {
+    alert((err as Error).message);
+  }
+}
+
+async function handleRecheckAttendance(recordId?: string) {
+  if (!recordId) {
+    alert('No attendance record found to recheck.');
+    return;
+  }
+  const reason = window.prompt('Enter mandatory reason to approve rechecking this student:');
+  if (!reason || !reason.trim()) {
+    alert('A reason is mandatory to approve an attendance recheck.');
+    return;
+  }
+  const officerId = authService.user.value?.id || 'officer_user';
+  try {
+    await attendanceService.recheckStudentAttendance(recordId, reason.trim(), officerId);
+    alert('Attendance reinstated successfully with immutable audit trail.');
+    lastResult.value = null;
     await refreshSessionData();
   } catch (err: unknown) {
     alert((err as Error).message);
@@ -438,9 +463,23 @@ function handleRegisterCard() {
               type="button"
               class="btn-reject-scan"
               style="font-size: 0.8rem; padding: 6px 12px; width: auto;"
-              @click="handleVoidAttendance(lastResult.rfidUid)"
+              @click="handleVoidAttendance(lastResult.recordId || lastResult.rfidUid)"
             >
               Void Attendance
+            </button>
+          </div>
+
+          <div v-if="lastResult.type === 'REVOKED_REVIEW_REQUIRED'" style="margin-top: 12px;">
+            <div style="background: rgba(239, 68, 68, 0.1); border-left: 3px solid #ef4444; padding: 8px 12px; border-radius: 4px; margin-bottom: 10px; font-size: 0.85rem;">
+              <strong>Previous Revocation Reason:</strong> {{ lastResult.revocationReason || 'Administrative revocation' }}
+            </div>
+            <button
+              type="button"
+              class="btn-confirm-scan"
+              style="font-size: 0.85rem; padding: 8px 16px; width: 100%; border-radius: 6px;"
+              @click="handleRecheckAttendance(lastResult.recordId)"
+            >
+              🛡️ Approve Recheck (Requires Identity Verification & Reason)
             </button>
           </div>
 
