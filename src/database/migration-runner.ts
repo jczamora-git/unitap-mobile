@@ -5,6 +5,8 @@ import { SYSTEM_SETUP_MIGRATION_SQL } from './migrations/003_system_setup_academ
 import { STUDENT_ACTIVATION_MIGRATION_SQL } from './migrations/004_student_activation_audit';
 import { OFFICER_MANAGEMENT_MIGRATION_SQL } from './migrations/005_officer_management';
 import { ATTENDANCE_CONCURRENCY_MIGRATION_SQL } from './migrations/006_attendance_concurrency_audit';
+import { SCHEMA_COMPATIBILITY_MIGRATION_SQL } from './migrations/007_schema_compatibility_and_sync_alignment';
+import { ENTITY_CHECKPOINTS_MIGRATION_SQL } from './migrations/008_entity_sync_checkpoints';
 
 export interface Migration {
   version: number;
@@ -43,6 +45,16 @@ export const MIGRATIONS: Migration[] = [
     description: 'UniTap 2.0 Multi-Officer Attendance Concurrency, Optimistic Versioning & Revocation Audit',
     sql: ATTENDANCE_CONCURRENCY_MIGRATION_SQL,
   },
+  {
+    version: 7,
+    description: 'UniTap 2.0 SQLite Schema Compatibility & Safe Data Ingestion',
+    sql: SCHEMA_COMPATIBILITY_MIGRATION_SQL,
+  },
+  {
+    version: 8,
+    description: 'UniTap 2.0 SQLite Entity Sync Checkpoints & Lossless Pagination',
+    sql: ENTITY_CHECKPOINTS_MIGRATION_SQL,
+  },
 ];
 
 export class MigrationRunner {
@@ -64,12 +76,42 @@ export class MigrationRunner {
     for (const migration of MIGRATIONS) {
       if (!appliedVersions.has(migration.version)) {
         console.log(`[UniTap Database] Applying migration v${migration.version}: ${migration.description}`);
-        try {
+        if (migration.version === 1) {
           await adapter.execute(migration.sql);
-        } catch (err: unknown) {
-          const error = err as Error;
-          if (!error.message.includes('already exists') && !error.message.includes('UNIQUE constraint failed')) {
-            throw error;
+        } else {
+          // Strip comments and split by semicolon to execute statement-by-statement
+          const cleanSql = migration.sql.replace(/--.*$/gm, '');
+          const statements = cleanSql
+            .split(';')
+            .map((s) => s.trim())
+            .filter((s) => s.length > 0);
+
+          for (const stmt of statements) {
+            try {
+              await adapter.execute(stmt);
+            } catch (err: unknown) {
+              const error = err as Error;
+              const isAlterAddColumn = /^\s*ALTER\s+TABLE\s+.*ADD\s+(COLUMN\s+)?/i.test(stmt);
+              const isDuplicateColumn = error.message.toLowerCase().includes('duplicate column name');
+
+              if (isAlterAddColumn && isDuplicateColumn) {
+                // Expected when column already exists from a prior execution
+                continue;
+              }
+
+              // Preserve backwards tolerance only for older bootstrap migrations (v2-v6)
+              if (migration.version < 7) {
+                if (
+                  error.message.includes('already exists') ||
+                  error.message.includes('UNIQUE constraint failed') ||
+                  isDuplicateColumn
+                ) {
+                  continue;
+                }
+              }
+
+              throw error;
+            }
           }
         }
         // Ensure migration version is registered
@@ -175,6 +217,7 @@ export class MigrationRunner {
       'sync_outbox', 'sync_state', 'sync_conflicts',
       'event_categories', 'year_levels', 'sections',
       'officer_appointments',
+      'entity_sync_checkpoints',
     ];
 
     const tables = await adapter.query<{ name: string }>(

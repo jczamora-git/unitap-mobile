@@ -1,6 +1,7 @@
 import { getDatabase } from '../database';
 import type { DatabaseAdapter } from '../adapters/database-adapter.interface';
 import type { StudentRecord, ProfileConfirmation } from '../../types/database';
+import { getSchoolIdVariants, normalizeSchoolId } from '@/utilities/school-id-normalizer';
 
 export interface StudentWithEnrollment extends StudentRecord {
   enrollment_id?: string;
@@ -89,9 +90,30 @@ export class StudentsRepository {
 
   public static async getStudentBySchoolId(schoolId: string, adapter?: DatabaseAdapter): Promise<StudentRecord | null> {
     const db = await this.getDb(adapter);
+    const clean = (schoolId || '').trim();
+    if (!clean) return null;
+
+    const variants = getSchoolIdVariants(clean);
+    const placeholders = variants.map(() => '?').join(', ');
     return db.queryOne<StudentRecord>(
-      'SELECT * FROM students WHERE school_id = ? COLLATE NOCASE',
-      [schoolId]
+      `SELECT * FROM students WHERE school_id IN (${placeholders}) COLLATE NOCASE LIMIT 1`,
+      variants
+    );
+  }
+
+  public static async getStudentsByCanonicalSchoolId(
+    schoolId: string,
+    adapter?: DatabaseAdapter
+  ): Promise<StudentRecord[]> {
+    const db = await this.getDb(adapter);
+    const clean = (schoolId || '').trim();
+    if (!clean) return [];
+
+    const variants = getSchoolIdVariants(clean);
+    const placeholders = variants.map(() => '?').join(', ');
+    return db.query<StudentRecord>(
+      `SELECT * FROM students WHERE school_id IN (${placeholders}) COLLATE NOCASE`,
+      variants
     );
   }
 
@@ -198,5 +220,98 @@ export class StudentsRepository {
        WHERE id = ?`,
       [status, now, reviewedByUserId || null, remarks || null, id]
     );
+  }
+
+  public static async reconcileStudentId(
+    oldId: string,
+    newId: string,
+    canonicalSchoolId?: string,
+    adapter?: DatabaseAdapter
+  ): Promise<void> {
+    if (oldId === newId) return;
+    const db = await this.getDb(adapter);
+    await db.transaction(async (tx) => {
+      const oldStudent = await tx.queryOne<StudentRecord>('SELECT * FROM students WHERE id = ?', [oldId]);
+      const targetStudent = await tx.queryOne<StudentRecord>('SELECT * FROM students WHERE id = ?', [newId]);
+
+      if (!oldStudent && !targetStudent) {
+        return;
+      }
+
+      const now = new Date().toISOString();
+      const resolvedSchoolId = canonicalSchoolId
+        ? normalizeSchoolId(canonicalSchoolId)
+        : targetStudent
+          ? normalizeSchoolId(targetStudent.school_id)
+          : oldStudent
+            ? normalizeSchoolId(oldStudent.school_id)
+            : undefined;
+
+      // 1. If target row does not exist in students table yet, create it first so foreign key checks succeed
+      if (!targetStudent && oldStudent) {
+        // Temporarily avoid unique school_id collision by prefixing old student's school_id
+        await tx.execute('UPDATE students SET school_id = ? WHERE id = ?', [`tmp_${oldId}`, oldId]);
+
+        await tx.execute(
+          `INSERT INTO students (id, school_id, first_name, middle_name, last_name, photo_local_uri, photo_content_hash, status, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            newId,
+            resolvedSchoolId || oldStudent.school_id,
+            oldStudent.first_name,
+            oldStudent.middle_name || null,
+            oldStudent.last_name,
+            oldStudent.photo_local_uri || null,
+            oldStudent.photo_content_hash || null,
+            oldStudent.status || 'ACTIVE',
+            oldStudent.created_at || now,
+            now,
+          ]
+        );
+      }
+
+      // 2. Now newId is guaranteed to exist in students table. Remap child records from oldId to newId
+      await tx.execute('UPDATE student_enrollments SET student_id = ? WHERE student_id = ?', [newId, oldId]);
+      await tx.execute('UPDATE nfc_cards SET student_id = ? WHERE student_id = ?', [newId, oldId]);
+      await tx.execute('UPDATE attendance_records SET student_id = ? WHERE student_id = ?', [newId, oldId]);
+      await tx.execute('UPDATE student_obligations SET student_id = ? WHERE student_id = ?', [newId, oldId]);
+      await tx.execute('UPDATE payments SET student_id = ? WHERE student_id = ?', [newId, oldId]);
+      await tx.execute('UPDATE simulated_wallets SET student_id = ? WHERE student_id = ?', [newId, oldId]);
+      await tx.execute('UPDATE users SET student_id = ? WHERE student_id = ?', [newId, oldId]);
+      await tx.execute('UPDATE officer_appointments SET student_id = ? WHERE student_id = ?', [newId, oldId]);
+      await tx.execute('UPDATE activation_claims SET student_id = ? WHERE student_id = ?', [newId, oldId]);
+      await tx.execute('UPDATE activation_claims_audit SET student_id = ? WHERE student_id = ?', [newId, oldId]);
+      await tx.execute('UPDATE profile_confirmations SET student_id = ? WHERE student_id = ?', [newId, oldId]);
+      await tx.execute('UPDATE import_rows SET student_id = ? WHERE student_id = ?', [newId, oldId]);
+      await tx.execute(
+        'UPDATE sync_outbox SET entity_id = ? WHERE entity_id = ? AND entity_type = "STUDENT"',
+        [newId, oldId]
+      );
+      await tx.execute(
+        'UPDATE audit_events SET entity_id = ? WHERE entity_id = ? AND entity_type = "STUDENT"',
+        [newId, oldId]
+      );
+
+      // 3. If targetStudent already existed, merge photo and school_id if needed
+      if (targetStudent) {
+        if (!targetStudent.photo_local_uri && oldStudent?.photo_local_uri) {
+          await tx.execute(
+            'UPDATE students SET photo_local_uri = ?, updated_at = ? WHERE id = ?',
+            [oldStudent.photo_local_uri, now, newId]
+          );
+        }
+        if (resolvedSchoolId) {
+          await tx.execute(
+            'UPDATE students SET school_id = ?, updated_at = ? WHERE id = ?',
+            [resolvedSchoolId, now, newId]
+          );
+        }
+      }
+
+      // 4. Delete old row now that all child references have been remapped
+      if (oldStudent) {
+        await tx.execute('DELETE FROM students WHERE id = ?', [oldId]);
+      }
+    });
   }
 }

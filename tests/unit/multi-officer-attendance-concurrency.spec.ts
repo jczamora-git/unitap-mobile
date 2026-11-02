@@ -274,4 +274,112 @@ describe('UniTap 2.0 Multi-Officer Attendance Concurrency, Duplicate Prevention 
     expect(outboxAfterRecheck.length).toBe(1);
     expect(outboxAfterRecheck[0].entity_id).toBe(record!.id);
   });
+
+  it('7. Detects stale version conflict during concurrent revocation', async () => {
+    // Confirm Student C
+    await attendanceService.confirmStudentAttendance(occurrenceId, studentC.id, 'officer_gate_1', 'PRESENT');
+    const record = await AttendanceRepository.getRecord(occurrenceId, studentC.id);
+    expect(record).not.toBeNull();
+
+    // Officer 1 revokes the record, incrementing version to 2
+    await attendanceService.voidAttendance(record!.id, 'Officer 1 revoking', 'officer_gate_1', record!.version);
+
+    // Officer 2 attempts to revoke using stale version 1
+    await expect(
+      attendanceService.voidAttendance(record!.id, 'Officer 2 revoking stale', 'officer_gate_2', 1)
+    ).rejects.toThrow();
+  });
+
+  it('8. Detects stale version conflict during concurrent recheck', async () => {
+    // Confirm and revoke Student C
+    await attendanceService.confirmStudentAttendance(occurrenceId, studentC.id, 'officer_gate_1', 'PRESENT');
+    const record = await AttendanceRepository.getRecord(occurrenceId, studentC.id);
+    await attendanceService.voidAttendance(record!.id, 'Mistake', 'officer_gate_1');
+
+    const revokedRecord = await AttendanceRepository.getRecord(occurrenceId, studentC.id);
+    const currentVersion = revokedRecord!.version || 2;
+
+    // Recheck with wrong version throws stale conflict
+    await expect(
+      attendanceService.recheckStudentAttendance(
+        record!.id,
+        'Valid excuse',
+        'officer_gate_2',
+        'PRESENT',
+        currentVersion - 1
+      )
+    ).rejects.toThrow('The record was modified concurrently');
+
+    // Recheck with correct version succeeds
+    await attendanceService.recheckStudentAttendance(
+      record!.id,
+      'Valid excuse',
+      'officer_gate_2',
+      'PRESENT',
+      currentVersion
+    );
+    const reinstatedRecord = await AttendanceRepository.getRecord(occurrenceId, studentC.id);
+    expect(reinstatedRecord?.status).toBe('PRESENT');
+    expect(reinstatedRecord?.version).toBe(currentVersion + 1);
+  });
+
+  it('9. Prevents invalid state transitions (cannot recheck active, cannot revoke already revoked)', async () => {
+    // 1. Confirm Student A
+    await attendanceService.confirmStudentAttendance(occurrenceId, studentA.id, 'officer_gate_1', 'PRESENT');
+    const record = await AttendanceRepository.getRecord(occurrenceId, studentA.id);
+
+    // Cannot recheck an attendance that is already PRESENT
+    await expect(
+      attendanceService.recheckStudentAttendance(record!.id, 'Attempting recheck on present', 'officer_gate_1')
+    ).rejects.toThrow('not in REVOKED state');
+
+    // Revoke
+    await attendanceService.voidAttendance(record!.id, 'Revoking', 'officer_gate_1');
+
+    // Cannot revoke an attendance that is already REVOKED
+    await expect(
+      attendanceService.voidAttendance(record!.id, 'Revoking again', 'officer_gate_1')
+    ).rejects.toThrow('already revoked');
+  });
+
+  it('10. Applies authoritative offline timestamp policy: on-time 8:05 AM scan uploaded at 10:00 AM remains PRESENT', async () => {
+    // Event occurrence begins 08:00:00 with 30 min grace period (up to 08:30:00)
+    // Client scanned at 8:05 AM on 2026-09-01
+    const offlineScanTime = '2026-09-01T08:05:00';
+
+    const confirmRes = await attendanceService.confirmStudentAttendance(
+      occurrenceId,
+      studentA.id,
+      'officer_gate_1',
+      undefined, // auto-compute from timestamp, not manual override
+      `card_${studentA.id}`,
+      studentA.cardUid,
+      'idem_offline_test_001',
+      offlineScanTime // client scanned at 8:05 AM
+    );
+
+    expect(confirmRes.status).toBe('RECORDED');
+
+    const record = await AttendanceRepository.getRecord(occurrenceId, studentA.id);
+    expect(record).not.toBeNull();
+    // Must be PRESENT because scan happened at 8:05 AM within the 8:30 grace threshold, even if uploaded at 10:00 AM
+    expect(record?.status).toBe('PRESENT');
+    expect(record?.client_scanned_at).toBe(offlineScanTime);
+  });
+
+  it('11. Requires explicit version precondition for attendance revocation', async () => {
+    await attendanceService.confirmStudentAttendance(occurrenceId, studentB.id, 'officer_gate_1', 'PRESENT');
+    const record = await AttendanceRepository.getRecord(occurrenceId, studentB.id);
+
+    // Revocation without expected version or with invalid version throws
+    await expect(
+      AttendanceRepository.voidAttendance(record!.id, 'Missing version test', 'officer_gate_1', 0)
+    ).rejects.toThrow();
+
+    // Revocation with exact matching version succeeds
+    await AttendanceRepository.voidAttendance(record!.id, 'Valid version test', 'officer_gate_1', record!.version);
+    const updated = await AttendanceRepository.getRecord(occurrenceId, studentB.id);
+    expect(updated?.status).toBe('VOID');
+    expect(updated?.version).toBe((record!.version || 1) + 1);
+  });
 });

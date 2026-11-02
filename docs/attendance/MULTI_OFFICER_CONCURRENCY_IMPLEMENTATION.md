@@ -96,3 +96,4 @@ Added `attendance_audit` to the single-transaction batch pull payload so all ter
 - Displays `REVOKED_REVIEW_REQUIRED` warning badge.
 - Shows previous revocation reason and timestamp.
 - Renders **Approve Recheck** action button requiring explicit officer confirmation and explanation.
+

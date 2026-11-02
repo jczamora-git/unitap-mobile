@@ -1,4 +1,6 @@
 import { Preferences } from '@capacitor/preferences';
+import { Capacitor } from '@capacitor/core';
+import { StatusBar, Style } from '@capacitor/status-bar';
 
 export type ThemePreference = 'light' | 'dark' | 'system';
 
@@ -129,6 +131,9 @@ export class ThemeService {
       metaTheme.setAttribute('content', isDark ? '#0F1117' : '#F8FAFC');
     }
 
+    // Synchronize native Android/iOS status bar
+    this.updateNativeStatusBar(isDark);
+
     // Manage system media query listener
     if (preference === 'system' && typeof window !== 'undefined' && typeof window.matchMedia === 'function') {
       if (!this.mediaQueryListener) {
@@ -154,6 +159,25 @@ export class ThemeService {
         console.error('Error in theme listener:', err);
       }
     });
+  }
+
+  /**
+   * Updates native Android/iOS status bar background color and icons style to match theme.
+   */
+  private async updateNativeStatusBar(isDark: boolean): Promise<void> {
+    if (!Capacitor.isNativePlatform()) return;
+    try {
+      await StatusBar.setOverlaysWebView({ overlay: false });
+      if (isDark) {
+        await StatusBar.setStyle({ style: Style.Dark });
+        await StatusBar.setBackgroundColor({ color: '#0F1117' });
+      } else {
+        await StatusBar.setStyle({ style: Style.Light });
+        await StatusBar.setBackgroundColor({ color: '#F8FAFC' });
+      }
+    } catch (err) {
+      console.warn('[ThemeService] Native StatusBar update error:', err);
+    }
   }
 
   /**

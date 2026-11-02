@@ -8,6 +8,7 @@ import type {
 } from '@/types/student';
 import { localStudentRepository, type IStudentRepository } from './student-storage.service';
 import { formatFullName } from '@/utilities/student-formatters';
+import { normalizeSchoolId } from '@/utilities/school-id-normalizer';
 
 function generateStudentId(): string {
   if (typeof crypto !== 'undefined' && crypto.randomUUID) {
@@ -174,7 +175,7 @@ export class StudentService {
   async createStudent(dto: CreateStudentDto): Promise<Student> {
     const firstName = dto.firstName?.trim();
     const lastName = dto.lastName?.trim();
-    const studentNumber = dto.studentNumber?.trim();
+    const studentNumber = dto.studentNumber?.trim() ? normalizeSchoolId(dto.studentNumber.trim()) : '';
 
     if (!firstName) {
       throw new Error('First Name is required.');
@@ -286,7 +287,7 @@ export class StudentService {
 
     const updated: Student = {
       ...student,
-      studentNumber: dto.studentNumber !== undefined ? (dto.studentNumber.trim() || undefined) : student.studentNumber,
+      studentNumber: dto.studentNumber !== undefined ? (dto.studentNumber.trim() ? normalizeSchoolId(dto.studentNumber.trim()) : undefined) : student.studentNumber,
       firstName: dto.firstName !== undefined ? dto.firstName.trim() : student.firstName,
       middleName: dto.middleName !== undefined ? (dto.middleName.trim() || undefined) : student.middleName,
       lastName: dto.lastName !== undefined ? dto.lastName.trim() : student.lastName,

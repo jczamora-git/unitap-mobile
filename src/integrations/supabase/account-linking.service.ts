@@ -3,6 +3,7 @@ import { supabase } from './client';
 import { getDatabase } from '@/database/database';
 import { StudentsRepository } from '@/database/repositories/students.repository';
 import { AuthRepository } from '@/database/repositories/auth.repository';
+import { normalizeSchoolId } from '@/utilities/school-id-normalizer';
 
 export interface VerifyActivationClaimResult {
   success: boolean;
@@ -35,7 +36,7 @@ export class AccountLinkingService {
     schoolId: string,
     rawCode: string
   ): Promise<VerifyActivationClaimResult> {
-    const cleanSchoolId = schoolId.trim();
+    const cleanSchoolId = normalizeSchoolId(schoolId);
     const tokenHash = await this.hashActivationCode(rawCode);
     const isTestEnv = isTestEnvironment();
 
@@ -101,7 +102,7 @@ export class AccountLinkingService {
     schoolId: string,
     rawCode: string
   ): Promise<{ valid: boolean; error?: string; studentName?: string }> {
-    const cleanSchoolId = schoolId.trim();
+    const cleanSchoolId = normalizeSchoolId(schoolId);
     const cleanCode = rawCode.trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
 
     if (!cleanSchoolId) {
@@ -123,7 +124,14 @@ export class AccountLinkingService {
           p_token_hash: tokenHash,
         });
 
-        if (!error && data) {
+        if (error) {
+          return {
+            valid: false,
+            error: error.message || 'Server error while validating activation code.',
+          };
+        }
+
+        if (data) {
           if (data.success) {
             return {
               valid: true,
@@ -136,8 +144,11 @@ export class AccountLinkingService {
             };
           }
         }
-      } catch (netErr) {
-        console.warn('[AccountLinking] Online validation error, falling back to local SQLite:', netErr);
+      } catch (netErr: any) {
+        return {
+          valid: false,
+          error: netErr?.message || 'Network error connecting to activation server. Please check your connection.',
+        };
       }
     }
 
@@ -206,7 +217,7 @@ export class AccountLinkingService {
     rawCode: string,
     authUserId: string
   ): Promise<VerifyActivationClaimResult> {
-    const cleanSchoolId = schoolId.trim();
+    const cleanSchoolId = normalizeSchoolId(schoolId);
     const tokenHash = await this.hashActivationCode(rawCode);
     const isTestEnv = isTestEnvironment();
 
@@ -219,7 +230,14 @@ export class AccountLinkingService {
           p_auth_user_id: authUserId,
         });
 
-        if (!error && data && data.success) {
+        if (error) {
+          return {
+            success: false,
+            error: error.message || 'Server error during account activation.',
+          };
+        }
+
+        if (data && data.success) {
           // Mirror linkage in local SQLite database for offline consistency
           await this.linkStudentAccount(
             authUserId,
@@ -242,12 +260,11 @@ export class AccountLinkingService {
             error: data.error || 'Invalid activation code or school ID.',
           };
         }
-
-        if (error) {
-          console.warn('[AccountLinking] RPC error, attempting local fallback:', error.message);
-        }
-      } catch (netErr) {
-        console.warn('[AccountLinking] Network error during activation:', netErr);
+      } catch (netErr: any) {
+        return {
+          success: false,
+          error: netErr?.message || 'Network error during account activation. Please check your connection.',
+        };
       }
     }
 

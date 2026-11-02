@@ -1,6 +1,8 @@
 import { sha256 } from 'hash-wasm';
 import { supabase } from '@/integrations/supabase/client';
 import { AuthRepository } from '@/database/repositories/auth.repository';
+import { StudentsRepository } from '@/database/repositories/students.repository';
+import { normalizeSchoolId, getSchoolIdVariants } from '@/utilities/school-id-normalizer';
 import type {
   ActivationClaim,
   ActivationClaimAuditRecord,
@@ -61,6 +63,36 @@ export class StudentActivationService {
   }
 
   /**
+   * Resolves a student identifier to a valid UUID format expected by Supabase.
+   * If local student has a non-UUID ID (e.g. stu_...), looks up by school_id
+   * and reconciles SQLite to the authoritative UUID.
+   */
+  public static async resolveStudentUuid(studentId: string): Promise<string | null> {
+    const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(studentId);
+    if (isUuid) return studentId;
+
+    try {
+      const localStu = await StudentsRepository.getStudentById(studentId);
+      if (localStu?.school_id) {
+        const variants = getSchoolIdVariants(localStu.school_id);
+        const { data: remoteStu } = await supabase
+          .from('students')
+          .select('id')
+          .in('school_id', variants)
+          .maybeSingle();
+
+        if (remoteStu?.id) {
+          await StudentsRepository.reconcileStudentId(studentId, remoteStu.id, localStu.school_id);
+          return remoteStu.id;
+        }
+      }
+    } catch (err) {
+      console.warn('[StudentActivationService] Could not resolve student UUID:', err);
+    }
+    return null;
+  }
+
+  /**
    * Evaluates student activation status and audit history
    */
   public static async getStudentActivationStatus(
@@ -70,26 +102,29 @@ export class StudentActivationService {
 
     // 1. Online check if Supabase is connected
     if (!isTestEnv) {
-      try {
-        const { data, error } = await supabase.rpc('officer_get_student_activation_status', {
-          p_student_id: studentId,
-        });
+      const targetUuid = await this.resolveStudentUuid(studentId);
+      if (targetUuid) {
+        try {
+          const { data, error } = await supabase.rpc('officer_get_student_activation_status', {
+            p_student_id: targetUuid,
+          });
 
-        if (!error && data) {
-          return {
-            status: data.status as StudentActivationStatus,
-            studentId: data.student_id,
-            claimId: data.claim_id,
-            expiresAt: data.expires_at,
-            attemptCount: data.attempt_count,
-            maxAttempts: data.max_attempts,
-            linkedUserId: data.linked_user_id,
-            linkedUsername: data.linked_username,
-            auditHistory: data.audit_history || [],
-          };
+          if (!error && data && data.status !== 'NOT_FOUND') {
+            return {
+              status: data.status as StudentActivationStatus,
+              studentId: data.student_id || targetUuid,
+              claimId: data.claim_id,
+              expiresAt: data.expires_at,
+              attemptCount: data.attempt_count,
+              maxAttempts: data.max_attempts,
+              linkedUserId: data.linked_user_id,
+              linkedUsername: data.linked_username,
+              auditHistory: data.audit_history || [],
+            };
+          }
+        } catch {
+          // Fallback to local SQLite
         }
-      } catch {
-        // Fallback to local SQLite
       }
     }
 
@@ -161,16 +196,24 @@ export class StudentActivationService {
 
     // 1. Online check if Supabase is connected
     if (!isTestEnv) {
+      const targetIdentifier = (await this.resolveStudentUuid(studentId)) || studentId;
       try {
         const { data, error } = await supabase.rpc('officer_issue_activation_code', {
-          p_student_id: studentId,
+          p_student_id: targetIdentifier,
           p_token_hash: tokenHash,
           p_expires_hours: expiresHours,
         });
 
-        if (!error && data && data.success) {
-          // Also replicate locally for offline availability
-          await this.persistLocalClaim(studentId, tokenHash, issuedByUserId, expiresAt, data.claim_id || claimId);
+        if (error) {
+          return {
+            success: false,
+            error: error.message || 'Server error while issuing activation code.',
+          };
+        }
+
+        if (data && data.success) {
+          // Replicate locally for offline cache
+          await this.persistLocalClaim(data.student_id || targetIdentifier, tokenHash, issuedByUserId, data.expires_at || expiresAt, data.claim_id || claimId);
           return {
             success: true,
             rawCode,
@@ -179,8 +222,16 @@ export class StudentActivationService {
             action: data.action,
           };
         }
-      } catch {
-        // Fall through to local execution
+
+        return {
+          success: false,
+          error: data?.error || 'Failed to issue activation code.',
+        };
+      } catch (err: any) {
+        return {
+          success: false,
+          error: err?.message || 'Network error while issuing activation code. Please check your connection.',
+        };
       }
     }
 

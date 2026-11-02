@@ -199,11 +199,17 @@ async function confirmRevoke() {
 async function handleResendInvitation(officer: OfficerListRecord) {
   isProcessing.value = true;
   try {
-    const res = await OfficerManagementService.resendInvitation(officer.id);
+    const { SupabaseAuthService } = await import('@/integrations/supabase/auth.service');
+    const { authService } = await import('@/services/auth.service');
+    const callerId = SupabaseAuthService.user.value?.id || authService.user.value?.id || officer.assigned_by_user_id;
+
+    const res = await OfficerManagementService.resendInvitation(officer.id, callerId);
     if (res.success) {
       haptics.success();
       await showToast(`New code generated: ${res.code}`, 'success');
       await loadOfficers();
+    } else {
+      throw new Error(res.error || 'Failed to refresh invitation');
     }
   } catch (err: unknown) {
     await showToast((err as Error).message || 'Failed to refresh invitation', 'error');

@@ -12,6 +12,7 @@ import {
 } from '@/database/repositories/students.repository';
 import { AcademicRepository } from '@/database/repositories/academic.repository';
 import { getDatabase } from '@/database/database';
+import { areSchoolIdsEquivalent, normalizeSchoolId } from '@/utilities/school-id-normalizer';
 
 const STUDENTS_STORAGE_KEY = 'nfc_inspector_students_v1';
 
@@ -97,10 +98,10 @@ export class LocalStudentRepository implements IStudentRepository {
 
   async getByStudentNumber(studentNumber: string): Promise<Student | null> {
     if (!studentNumber || !studentNumber.trim()) return null;
-    const cleanNum = studentNumber.trim().toLowerCase();
+    const cleanNum = studentNumber.trim();
     try {
       const records = await StudentsRepository.getStudents();
-      const found = records.find(r => r.school_id && r.school_id.trim().toLowerCase() === cleanNum);
+      const found = records.find(r => r.school_id && areSchoolIdsEquivalent(r.school_id, cleanNum));
       if (found) {
         return this.mapSqliteToStudent(found);
       }
@@ -109,7 +110,7 @@ export class LocalStudentRepository implements IStudentRepository {
     }
 
     const students = await this.getAll();
-    return students.find(s => s.studentNumber && s.studentNumber.trim().toLowerCase() === cleanNum) || null;
+    return students.find(s => s.studentNumber && areSchoolIdsEquivalent(s.studentNumber, cleanNum)) || null;
   }
 
   async getByRfid(rfidUid: string): Promise<Student | null> {

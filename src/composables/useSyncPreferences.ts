@@ -4,6 +4,8 @@ import { SyncStatusService, type UserFacingSyncStatus } from '@/services/sync/sy
 import { SyncManager } from '@/services/sync/sync-manager';
 import { InitialSyncService } from '@/services/sync/initial-sync.service';
 import { PushSyncService } from '@/services/sync/push-sync.service';
+import { PullSyncService } from '@/services/sync/pull-sync.service';
+import { PullReconciliationService, type PullPreviewPlan } from '@/services/sync/pull-reconciliation.service';
 import { authService } from '@/services/auth.service';
 import { SupabaseAuthService } from '@/integrations/supabase/auth.service';
 import type { UserRole } from '@/services/sync/sync-scope.service';
@@ -63,6 +65,58 @@ export function useSyncPreferences() {
     }
   }
 
+  const isPreviewOpen = ref(false);
+  const isPreviewLoading = ref(false);
+  const previewPlan = ref<PullPreviewPlan | null>(null);
+
+  async function openPullPreview(): Promise<PullPreviewPlan | null> {
+    isPreviewOpen.value = true;
+    isPreviewLoading.value = true;
+    syncError.value = null;
+
+    try {
+      const plan = await PullSyncService.fetchPullPreview('students');
+      previewPlan.value = plan;
+      return plan;
+    } catch (err: unknown) {
+      syncError.value = (err as Error).message || 'Failed to fetch pull preview.';
+      return null;
+    } finally {
+      isPreviewLoading.value = false;
+    }
+  }
+
+  function closePullPreview() {
+    isPreviewOpen.value = false;
+    previewPlan.value = null;
+  }
+
+  async function applyPullPreview(plan: PullPreviewPlan): Promise<boolean> {
+    isRefreshing.value = true;
+    syncError.value = null;
+
+    try {
+      const res = await PullReconciliationService.applyApprovedPlan(plan);
+      if (!res.success) {
+        syncError.value = res.error || 'Failed to apply approved sync operations.';
+        return false;
+      }
+
+      closePullPreview();
+      // Follow with role-based hydration for remaining entities
+      const role = (SupabaseAuthService.role.value || authService.role.value || 'STUDENT') as UserRole;
+      const userId = SupabaseAuthService.user.value?.id || authService.user.value?.id || 'dev_user';
+      const studentId = SupabaseAuthService.user.value?.student_id || authService.user.value?.student_id;
+      await InitialSyncService.refreshLocalData(role, userId, studentId);
+      return true;
+    } catch (err: unknown) {
+      syncError.value = (err as Error).message || 'Failed to apply pull preview.';
+      return false;
+    } finally {
+      isRefreshing.value = false;
+    }
+  }
+
   return {
     syncMode,
     syncStatus,
@@ -72,6 +126,12 @@ export function useSyncPreferences() {
     isSyncing,
     isRefreshing,
     syncError,
+    isPreviewOpen,
+    isPreviewLoading,
+    previewPlan,
+    openPullPreview,
+    closePullPreview,
+    applyPullPreview,
     setSyncMode,
     triggerSyncNow,
     triggerRefreshLocalData,

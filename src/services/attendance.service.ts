@@ -249,17 +249,22 @@ export class AttendanceService {
     officerUserId: string,
     statusOverride?: AttendanceStatus,
     nfcCardId?: string,
-    uidNormalized?: string
+    uidNormalized?: string,
+    idempotencyKey?: string,
+    clientScannedAt?: string,
+    scanMethod: 'NFC' | 'MANUAL' = 'NFC'
   ): Promise<{ status: string; message: string; recordId?: string }> {
-    const now = new Date().toISOString();
+    const now = clientScannedAt || new Date().toISOString();
     const occurrence = await EventsRepository.getOccurrenceById(occurrenceId);
     let status: AttendanceStatus = statusOverride || 'PRESENT';
 
     if (!statusOverride && occurrence?.occurs_on && occurrence?.starts_at) {
-      if (isPastTime(occurrence.occurs_on, occurrence.starts_at, occurrence.grace_minutes || 15)) {
+      if (isPastTime(occurrence.occurs_on, occurrence.starts_at, occurrence.grace_minutes || 15, now)) {
         status = 'LATE';
       }
     }
+
+    const effectiveIdempotencyKey = idempotencyKey || `idem_scan_${occurrenceId}_${studentId}_${Date.now()}`;
 
     // 1. Attempt Atomic Online Server RPC if available
     if (!isTestEnvironment()) {
@@ -271,6 +276,9 @@ export class AttendanceService {
           p_uid_normalized: uidNormalized || null,
           p_status_override: status,
           p_device_id: 'dev_default',
+          p_idempotency_key: effectiveIdempotencyKey,
+          p_client_scanned_at: now,
+          p_scan_method: scanMethod,
         });
 
         if (!scanErr && scanRes) {
@@ -283,10 +291,26 @@ export class AttendanceService {
           if (scanRes.status === 'OCCURRENCE_CLOSED') {
             throw new Error(scanRes.message || 'Event occurrence is closed.');
           }
+          if (scanRes.status === 'FORBIDDEN_SCOPE' || scanRes.status === 'UNAUTHORIZED') {
+            throw new Error(scanRes.message || 'Officer authorization or scope error.');
+          }
+          if (scanRes.status === 'RECORDED') {
+            return {
+              status: 'RECORDED',
+              message: scanRes.message,
+              recordId: scanRes.attendance_record?.id,
+            };
+          }
         }
       } catch (err: unknown) {
         // If it's a domain error thrown above, rethrow
-        if (err instanceof Error && (err.message.includes('revoked') || err.message.includes('closed'))) {
+        if (
+          err instanceof Error &&
+          (err.message.includes('revoked') ||
+            err.message.includes('closed') ||
+            err.message.includes('authorization') ||
+            err.message.includes('scope'))
+        ) {
           throw err;
         }
         console.warn('[AttendanceService] Online atomic scan failed or offline, falling back to local SQLite:', err);
@@ -302,7 +326,8 @@ export class AttendanceService {
         student_id: studentId,
         status: status as any,
         checked_in_at: now,
-        method: 'NFC',
+        client_scanned_at: now,
+        method: scanMethod,
         identity_verified_by_user_id: officerUserId,
         photo_checked: 1,
         updated_at: now,
@@ -366,29 +391,40 @@ export class AttendanceService {
   async voidAttendance(
     attendanceId: string,
     reason: string,
-    officerUserId: string
+    officerUserId: string,
+    expectedVersion?: number,
+    idempotencyKey?: string
   ): Promise<void> {
     if (!reason || reason.trim().length === 0) {
       throw new Error('A mandatory reason is required to revoke attendance.');
     }
 
+    const effectiveIdempotencyKey = idempotencyKey || `idem_rev_${attendanceId}_${Date.now()}`;
+
     // Attempt online atomic revocation
     if (!isTestEnvironment()) {
       try {
-        const { error: revErr } = await supabase.rpc('revoke_attendance', {
+        const { data: revRes, error: revErr } = await supabase.rpc('revoke_attendance', {
           p_attendance_id: attendanceId,
           p_reason: reason.trim(),
+          p_expected_version: expectedVersion || null,
+          p_idempotency_key: effectiveIdempotencyKey,
         });
         if (revErr) {
           console.warn('[AttendanceService] Online revoke RPC error:', revErr.message);
+        } else if (revRes && revRes.status === 'STALE_STATE_CONFLICT') {
+          throw new Error(revRes.error || 'The record was modified concurrently. Please refresh.');
         }
       } catch (err) {
+        if (err instanceof Error && err.message.includes('modified concurrently')) {
+          throw err;
+        }
         console.warn('[AttendanceService] Network error during online revocation:', err);
       }
     }
 
     // Always update local SQLite and enqueue outbox VOID operation
-    await AttendanceRepository.voidAttendance(attendanceId, reason, officerUserId);
+    await AttendanceRepository.voidAttendance(attendanceId, reason, officerUserId, expectedVersion);
   }
 
   /**
@@ -398,32 +434,42 @@ export class AttendanceService {
     attendanceId: string,
     reason: string,
     officerUserId: string,
-    statusOverride?: 'PRESENT' | 'LATE'
+    statusOverride?: 'PRESENT' | 'LATE',
+    expectedVersion?: number,
+    idempotencyKey?: string
   ): Promise<void> {
     if (!reason || reason.trim().length === 0) {
       throw new Error('A mandatory reason is required to approve an attendance recheck.');
     }
 
     const targetStatus = statusOverride || 'PRESENT';
+    const effectiveIdempotencyKey = idempotencyKey || `idem_rech_${attendanceId}_${Date.now()}`;
 
     // Attempt online atomic recheck
     if (!isTestEnvironment()) {
       try {
-        const { error: rechkErr } = await supabase.rpc('recheck_attendance', {
+        const { data: rechkRes, error: rechkErr } = await supabase.rpc('recheck_attendance', {
           p_attendance_id: attendanceId,
           p_reason: reason.trim(),
           p_target_status: targetStatus,
+          p_expected_version: expectedVersion || null,
+          p_idempotency_key: effectiveIdempotencyKey,
         });
         if (rechkErr) {
           console.warn('[AttendanceService] Online recheck RPC error:', rechkErr.message);
+        } else if (rechkRes && rechkRes.status === 'STALE_STATE_CONFLICT') {
+          throw new Error(rechkRes.error || 'The record was modified concurrently. Please refresh.');
         }
       } catch (err) {
+        if (err instanceof Error && err.message.includes('modified concurrently')) {
+          throw err;
+        }
         console.warn('[AttendanceService] Network error during online recheck:', err);
       }
     }
 
     // Always update local SQLite and enqueue outbox UPDATE operation
-    await AttendanceRepository.recheckAttendance(attendanceId, reason, officerUserId, targetStatus);
+    await AttendanceRepository.recheckAttendance(attendanceId, reason, officerUserId, targetStatus, expectedVersion);
   }
 
   /**

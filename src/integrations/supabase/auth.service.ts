@@ -78,11 +78,23 @@ export class SupabaseAuthService {
   public static async login(identifier: string, password: string): Promise<LoginResult> {
     const cleanId = identifier.trim().toLowerCase();
 
-    // Support both direct email and username aliases (e.g. 'devadmin' or 'admin' -> 'admin@unitap.com')
+    // Support both direct email and username / School ID aliases
     const candidates: string[] = [];
     if (cleanId.includes('@')) {
       candidates.push(cleanId);
     } else {
+      // 1. Try resolving login email from School ID or username via server RPC
+      try {
+        const { data: resolvedEmail } = await supabase.rpc('resolve_login_email', {
+          p_identifier: cleanId,
+        });
+        if (resolvedEmail && typeof resolvedEmail === 'string' && resolvedEmail.includes('@')) {
+          candidates.push(resolvedEmail.toLowerCase());
+        }
+      } catch {
+        // Fallback to domain aliases
+      }
+
       if (cleanId === 'admin' || cleanId === 'devadmin') {
         candidates.push('admin@unitap.com');
       }
@@ -244,7 +256,25 @@ export class SupabaseAuthService {
   private static async handleOnlineSession(userId: string, email: string): Promise<'DEVADMIN' | 'OFFICER' | 'STUDENT'> {
     const now = new Date().toISOString();
 
-    // 1. Determine authoritative role from Supabase PostgreSQL user_roles table
+    // 1. Fetch remote user record for student linkage
+    let remoteStudentId: string | null = null;
+    let remoteUsername: string | null = null;
+    try {
+      const { data: remoteUser } = await supabase
+        .from('users')
+        .select('id, username, student_id, account_status')
+        .eq('id', userId)
+        .maybeSingle();
+
+      if (remoteUser) {
+        if (remoteUser.student_id) remoteStudentId = remoteUser.student_id;
+        if (remoteUser.username) remoteUsername = remoteUser.username;
+      }
+    } catch (e) {
+      console.warn('[SupabaseAuth] Could not query remote users profile:', e);
+    }
+
+    // 2. Determine authoritative role from Supabase PostgreSQL user_roles table
     let authoritativeRole: 'DEVADMIN' | 'OFFICER' | 'STUDENT' | null = null;
     try {
       const { data: remoteRoles, error: remoteRoleErr } = await supabase
@@ -266,7 +296,7 @@ export class SupabaseAuthService {
       console.warn('[SupabaseAuth] Could not query remote user_roles:', e);
     }
 
-    // 2. Check Supabase user app_metadata / user_metadata
+    // 3. Check Supabase user app_metadata / user_metadata
     if (!authoritativeRole) {
       try {
         const { data: { user: sbUser } } = await supabase.auth.getUser();
@@ -279,7 +309,12 @@ export class SupabaseAuthService {
       }
     }
 
-    // 3. Fallback to existing local SQLite role
+    // 4. Fallback based on student linkage
+    if (!authoritativeRole && remoteStudentId) {
+      authoritativeRole = 'STUDENT';
+    }
+
+    // 5. Fallback to existing local SQLite role
     if (!authoritativeRole) {
       const localRoles = await AuthRepository.getUserRoles(userId);
       if (localRoles.length > 0) {
@@ -287,16 +322,16 @@ export class SupabaseAuthService {
       }
     }
 
-    // 4. Fallback default based on identifier or default to STUDENT
+    // 6. Safe default: DEVADMIN if admin email, otherwise STUDENT (never default unknown to OFFICER)
     if (!authoritativeRole) {
-      authoritativeRole = email.toLowerCase().includes('admin') ? 'DEVADMIN' : 'OFFICER';
+      authoritativeRole = email.toLowerCase().includes('admin') ? 'DEVADMIN' : 'STUDENT';
     }
 
     let user = await AuthRepository.getUserById(userId);
 
     // If not found in SQLite yet, provision local stub
     if (!user) {
-      const baseUsername = email.split('@')[0];
+      const baseUsername = remoteUsername || email.split('@')[0];
       const existingUser = await AuthRepository.getUserByUsername(baseUsername);
       const safeUsername = (existingUser && existingUser.id !== userId)
         ? `${baseUsername}_${userId.substring(0, 6)}`
@@ -305,6 +340,7 @@ export class SupabaseAuthService {
       user = {
         id: userId,
         username: safeUsername,
+        student_id: remoteStudentId || undefined,
         account_status: 'ACTIVE',
         created_at: now,
         updated_at: now,
@@ -321,6 +357,14 @@ export class SupabaseAuthService {
         newRole
       );
     } else {
+      // Reconcile student_id if updated on server
+      if (remoteStudentId && user.student_id !== remoteStudentId) {
+        user.student_id = remoteStudentId;
+        const { getDatabase } = await import('@/database/database');
+        const db = await getDatabase();
+        await db.execute('UPDATE users SET student_id = ? WHERE id = ?', [remoteStudentId, userId]);
+      }
+
       // Ensure local SQLite user_roles matches authoritative role
       const localRoles = await AuthRepository.getUserRoles(userId);
       const hasMatchingActiveRole = localRoles.some((r) => r.role === authoritativeRole && !r.revoked_at);
@@ -348,6 +392,21 @@ export class SupabaseAuthService {
     let studentRecord: StudentRecord | null = null;
     if (user.student_id) {
       studentRecord = await StudentsRepository.getStudentById(user.student_id);
+      if (!studentRecord) {
+        try {
+          const { data: remoteStu } = await supabase
+            .from('students')
+            .select('*')
+            .eq('id', user.student_id)
+            .maybeSingle();
+          if (remoteStu) {
+            studentRecord = remoteStu as StudentRecord;
+            await StudentsRepository.createStudent(remoteStu);
+          }
+        } catch {
+          // Ignored
+        }
+      }
       this.currentStudent.value = studentRecord;
     }
 

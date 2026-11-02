@@ -494,10 +494,31 @@ export class OfficerManagementService {
    * Resend / Refresh invitation code.
    */
   public static async resendInvitation(
-    appointmentId: string
+    appointmentId: string,
+    callerUserId?: string
   ): Promise<{ success: boolean; code?: string; error?: string }> {
     try {
-      const newCode = StudentActivationService.generateCode();
+      const appt = await OfficerRepository.getAppointmentById(appointmentId);
+      if (!appt) {
+        return { success: false, error: 'Appointment record not found.' };
+      }
+
+      let newCode: string;
+      if (appt.student_id) {
+        const issuerId = callerUserId || appt.assigned_by_user_id;
+        const claimRes = await StudentActivationService.issueActivationCode(
+          appt.student_id,
+          issuerId,
+          48
+        );
+        if (!claimRes.success || !claimRes.rawCode) {
+          return { success: false, error: claimRes.error || 'Failed to generate new activation code.' };
+        }
+        newCode = claimRes.rawCode;
+      } else {
+        newCode = StudentActivationService.generateCode();
+      }
+
       const now = new Date().toISOString();
       await OfficerRepository.updateAppointment(appointmentId, {
         invitation_code: newCode,
@@ -516,6 +537,13 @@ export class OfficerManagementService {
     appointmentId: string
   ): Promise<{ success: boolean; error?: string }> {
     try {
+      const appt = await OfficerRepository.getAppointmentById(appointmentId);
+      if (appt && appt.student_id) {
+        const claim = await AuthRepository.getLatestActivationClaimByStudentId(appt.student_id);
+        if (claim && !claim.used_at && !claim.revoked_at) {
+          await AuthRepository.revokeActivationClaim(claim.id);
+        }
+      }
       await OfficerRepository.updateAppointment(appointmentId, {
         status: 'REVOKED',
         revoked_at: new Date().toISOString(),
@@ -547,5 +575,72 @@ export class OfficerManagementService {
     }
 
     return perms.includes(permission);
+  }
+
+  /**
+   * Search student candidates across SQLite and remote Supabase (limit 10).
+   */
+  public static async searchCandidates(
+    query: string,
+    limit = 10
+  ): Promise<any[]> {
+    const clean = (query || '').trim();
+
+    // 1. Search local SQLite
+    const local = await OfficerRepository.searchStudentsForOfficer(clean, null, limit);
+    const resultMap = new Map<string, any>();
+    local.forEach((item: any) => {
+      resultMap.set(item.school_id?.toLowerCase() || item.student_id, item);
+    });
+
+    // 2. If under limit, query is non-empty, and online, supplement from Supabase
+    if (resultMap.size < limit && clean.length > 0) {
+      try {
+        const { supabase } = await import('@/integrations/supabase/client');
+        const { data: remote } = await supabase
+          .from('students')
+          .select('id, school_id, first_name, middle_name, last_name, status, users (id, username, account_status)')
+          .or(`school_id.ilike.%${clean}%,first_name.ilike.%${clean}%,last_name.ilike.%${clean}%`)
+          .limit(limit);
+
+        if (remote && remote.length > 0) {
+          for (const r of remote) {
+            const key = r.school_id?.toLowerCase() || r.id;
+            if (!resultMap.has(key) && resultMap.size < limit) {
+              const u = Array.isArray(r.users) ? r.users[0] : r.users;
+              const mapped = {
+                student_id: r.id,
+                school_id: r.school_id,
+                first_name: r.first_name,
+                middle_name: r.middle_name,
+                last_name: r.last_name,
+                user_id: u?.id || null,
+                username: u?.username || null,
+                account_status: u?.account_status || null,
+                is_registered: u?.id && u.account_status === 'ACTIVE' ? 1 : 0,
+                is_officer: 0,
+              };
+              resultMap.set(key, mapped);
+
+              // Cache into local SQLite for consistency
+              StudentsRepository.createStudent({
+                id: r.id,
+                school_id: r.school_id,
+                first_name: r.first_name,
+                middle_name: r.middle_name,
+                last_name: r.last_name,
+                status: r.status || 'ACTIVE',
+                created_at: new Date().toISOString(),
+                updated_at: new Date().toISOString(),
+              }).catch(() => {});
+            }
+          }
+        }
+      } catch {
+        // Fall back to local SQLite results
+      }
+    }
+
+    return Array.from(resultMap.values()).slice(0, limit);
   }
 }

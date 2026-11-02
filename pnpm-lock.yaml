@@ -26,6 +26,9 @@ importers:
       '@capacitor/preferences':
         specifier: ^8.0.1
         version: 8.0.1(@capacitor/core@8.5.2)
+      '@capacitor/status-bar':
+        specifier: ^8.0.4
+        version: 8.0.4(@capacitor/core@8.5.2)
       '@capgo/capacitor-nfc':
         specifier: ^8.2.7
         version: 8.2.7(@capacitor/core@8.5.2)
@@ -57,6 +60,9 @@ importers:
         specifier: ^5.0.0
         version: 5.3.1(@vue/compiler-sfc@3.5.42)(rolldown@1.2.8)(vite@8.3.0(@types/node@26.5.1)(terser@5.51.2))(vue@3.5.42(typescript@5.9.3))
     devDependencies:
+      '@electric-sql/pglite':
+        specifier: ^0.5.14
+        version: 0.5.14
       '@vitejs/plugin-legacy':
         specifier: ^8.0.0
         version: 8.2.3(supports-color@7.2.0)(terser@5.51.2)(vite@8.3.0(@types/node@26.5.1)(terser@5.51.2))
@@ -622,10 +628,18 @@ packages:
     peerDependencies:
       '@capacitor/core': '>=8.0.0'
 
+  '@capacitor/status-bar@8.0.4':
+    resolution: {integrity: sha512-ZMzBUyHBzwDUxcHadEhvOvmoPmMQGMZgaMRJu8ohELeI6IaxoVH9ZhdF/OHnY3/yykv3Glev8Tnbh4aZY/0B0w==}
+    peerDependencies:
+      '@capacitor/core': '>=8.0.0'
+
   '@capgo/capacitor-nfc@8.2.7':
     resolution: {integrity: sha512-xIxZqs74Y/FdWNz2JW4i1g9MOxgnyh3UIChHir8mmh5eLR2th9w0PKUoeUM5SRnepX7cf9BUfqNIbWxzez4WiA==}
     peerDependencies:
       '@capacitor/core': '>=8.0.0'
+
+  '@electric-sql/pglite@0.5.14':
+    resolution: {integrity: sha512-aAQe7iArcFB2w1xtx91l3l9trxhMzD6aZf+WnosSHNhwgp70EJz80Igw/bHnW14fUEFYWPBoQ1sGom8Xc0Jttg==}
 
   '@eslint-community/eslint-utils@4.10.1':
     resolution: {integrity: sha512-cuadcxVFE8sDK6iWJbs8Sn0av2Nrh2QSGQhVlBW9AaAHqHwjWsZHT8LJ4hFGPh7ASBV2deFdM7H/DPjulmh8rg==}
@@ -3489,9 +3503,15 @@ snapshots:
     dependencies:
       '@capacitor/core': 8.5.2
 
+  '@capacitor/status-bar@8.0.4(@capacitor/core@8.5.2)':
+    dependencies:
+      '@capacitor/core': 8.5.2
+
   '@capgo/capacitor-nfc@8.2.7(@capacitor/core@8.5.2)':
     dependencies:
       '@capacitor/core': 8.5.2
+
+  '@electric-sql/pglite@0.5.14': {}
 
   '@eslint-community/eslint-utils@4.10.1(eslint@8.57.1(supports-color@7.2.0))':
     dependencies:

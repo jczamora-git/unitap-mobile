@@ -9,14 +9,19 @@ import {
 } from '@ionic/vue';
 import {
   schoolOutline,
-  cloudDownloadOutline,
   personAddOutline,
   searchOutline,
   checkmarkCircleOutline,
   copyOutline,
   checkmarkOutline,
-  arrowForwardOutline,
   closeOutline,
+  chevronDownOutline,
+  chevronUpOutline,
+  personOutline,
+  shieldCheckmarkOutline,
+  cashOutline,
+  flashOutline,
+  optionsOutline,
 } from 'ionicons/icons';
 import {
   UniPageHeader,
@@ -29,20 +34,19 @@ import {
   OFFICER_PERMISSIONS,
 } from '@/services/officer-management.service';
 import type { OfficerPermissionPreset, OfficerScopeType } from '@/types/database';
-import { OfficerRepository } from '@/database/repositories/officer.repository';
 import { SystemSetupService } from '@/services/system-setup.service';
 import { authService } from '@/services/auth.service';
+import { SupabaseAuthService } from '@/integrations/supabase/auth.service';
 import { haptics } from '@/utilities/haptics';
 import { useToast } from '@/composables/useToast';
 
 const router = useRouter();
 const { showToast } = useToast();
 
-type ScenarioType = 'EXISTING_STUDENT' | 'IMPORTED_STUDENT' | 'NEW_OFFICER';
+type CandidateType = 'STUDENT' | 'EXTERNAL';
+const candidateType = ref<CandidateType>('STUDENT');
 
-const selectedScenario = ref<ScenarioType>('EXISTING_STUDENT');
-
-// Search states for Option A & B
+// Search & Auto-Suggestion states
 const studentSearchQuery = ref('');
 const isSearchingStudents = ref(false);
 const searchResults = ref<any[]>([]);
@@ -62,6 +66,9 @@ const academicYears = ref<{ id: string; label: string }[]>([]);
 const selectedAcademicYearId = ref('');
 const semesters = ref<{ id: string; term: string; academic_year_id: string }[]>([]);
 const selectedSemesterId = ref('');
+
+// Advanced options toggle
+const showAdvancedOptions = ref(false);
 
 // Submission & Feedback states
 const isSubmitting = ref(false);
@@ -96,48 +103,66 @@ onMounted(async () => {
     } else if (ays.length > 0) {
       selectedAcademicYearId.value = ays[0].id;
     }
+
+    // Preload top candidate suggestions (limit 10)
+    searchResults.value = await OfficerManagementService.searchCandidates('', 10);
   } catch (e) {
-    console.error('Error loading academic terms:', e);
+    console.error('Error loading initial officer setup data:', e);
   }
 });
 
-// Student Search Debounce
+// Student Search Debounce with max 10 auto-suggestions
 let searchTimeout: any = null;
 function handleSearchInput() {
   if (searchTimeout) clearTimeout(searchTimeout);
-  if (!studentSearchQuery.value.trim() || studentSearchQuery.value.trim().length < 2) {
-    searchResults.value = [];
-    return;
-  }
+  const clean = studentSearchQuery.value.trim();
 
+  isSearchingStudents.value = true;
   searchTimeout = setTimeout(async () => {
-    isSearchingStudents.value = true;
     try {
-      const registeredOnly = selectedScenario.value === 'EXISTING_STUDENT';
-      searchResults.value = await OfficerRepository.searchStudentsForOfficer(
-        studentSearchQuery.value,
-        registeredOnly
-      );
+      searchResults.value = await OfficerManagementService.searchCandidates(clean, 10);
     } catch (e) {
       console.error('Search error:', e);
+      searchResults.value = [];
     } finally {
       isSearchingStudents.value = false;
     }
-  }, 250);
+  }, 180);
+}
+
+async function handleSearchFocus() {
+  if (selectedStudent.value) return;
+  if (searchResults.value.length === 0) {
+    try {
+      isSearchingStudents.value = true;
+      searchResults.value = await OfficerManagementService.searchCandidates(studentSearchQuery.value.trim(), 10);
+    } catch (e) {
+      console.error('Focus suggestion error:', e);
+    } finally {
+      isSearchingStudents.value = false;
+    }
+  }
 }
 
 function selectStudent(st: any) {
   haptics.light();
   selectedStudent.value = st;
   fullName.value = `${st.first_name} ${st.last_name}`.trim();
-  email.value = st.username ? `${st.username}@univ.edu` : `${st.school_id.toLowerCase()}@univ.edu`;
+  email.value = st.username ? `${st.username}@univ.edu` : `${st.school_id?.toLowerCase() || 'student'}@univ.edu`;
   searchResults.value = [];
+  studentSearchQuery.value = '';
 }
 
-function clearSelectedStudent() {
+async function clearSelectedStudent() {
   selectedStudent.value = null;
   fullName.value = '';
   email.value = '';
+  studentSearchQuery.value = '';
+  try {
+    searchResults.value = await OfficerManagementService.searchCandidates('', 10);
+  } catch {
+    searchResults.value = [];
+  }
 }
 
 function toggleCustomPermission(perm: string) {
@@ -151,72 +176,83 @@ function toggleCustomPermission(perm: string) {
 }
 
 const isFormValid = computed(() => {
-  if (selectedScenario.value === 'EXISTING_STUDENT') {
-    return selectedStudent.value && selectedStudent.value.user_id && fullName.value.trim();
+  if (candidateType.value === 'STUDENT') {
+    return selectedStudent.value && fullName.value.trim().length > 0;
   }
-  if (selectedScenario.value === 'IMPORTED_STUDENT') {
-    return selectedStudent.value && fullName.value.trim() && email.value.trim();
+  return fullName.value.trim().length > 2 && email.value.includes('@');
+});
+
+const submitButtonLabel = computed(() => {
+  if (candidateType.value === 'STUDENT') {
+    if (selectedStudent.value?.user_id && selectedStudent.value?.is_registered) {
+      return 'Confirm Officer Promotion';
+    }
+    return 'Issue Officer Activation Code';
   }
-  if (selectedScenario.value === 'NEW_OFFICER') {
-    return fullName.value.trim().length > 2 && email.value.includes('@');
-  }
-  return false;
+  return 'Send Officer Invitation';
 });
 
 async function handleSubmit() {
   if (!isFormValid.value || isSubmitting.value) return;
 
   isSubmitting.value = true;
-  const devAdminUserId = authService.user.value?.id || 'devadmin_local';
+  const devAdminUserId = SupabaseAuthService.user.value?.id || authService.user.value?.id || 'devadmin_local';
 
   try {
-    if (selectedScenario.value === 'EXISTING_STUDENT') {
-      const res = await OfficerManagementService.assignExistingStudentAsOfficer({
-        studentId: selectedStudent.value.student_id,
-        userId: selectedStudent.value.user_id,
-        fullName: fullName.value.trim(),
-        email: email.value.trim(),
-        permissionPreset: permissionPreset.value,
-        customPermissions: permissionPreset.value === 'CUSTOM' ? customPermissions.value : undefined,
-        academicYearId: selectedAcademicYearId.value,
-        semesterId: selectedSemesterId.value,
-        startDate: appointmentStart.value,
-        endDate: appointmentEnd.value,
-        scopeType: scopeType.value,
-        devAdminUserId,
-      });
+    if (candidateType.value === 'STUDENT') {
+      const isRegistered = selectedStudent.value.user_id && selectedStudent.value.is_registered;
 
-      if (!res.success) throw new Error(res.error || 'Failed to assign officer.');
-      haptics.success();
-      createdResult.value = {
-        success: true,
-        officerName: fullName.value,
-      };
-      isSuccessDialogOpen.value = true;
-    } else if (selectedScenario.value === 'IMPORTED_STUDENT') {
-      const res = await OfficerManagementService.prepareImportedStudentOfficerActivation({
-        studentId: selectedStudent.value.student_id,
-        fullName: fullName.value.trim(),
-        email: email.value.trim(),
-        permissionPreset: permissionPreset.value,
-        customPermissions: permissionPreset.value === 'CUSTOM' ? customPermissions.value : undefined,
-        academicYearId: selectedAcademicYearId.value,
-        semesterId: selectedSemesterId.value,
-        startDate: appointmentStart.value,
-        endDate: appointmentEnd.value,
-        scopeType: scopeType.value,
-        devAdminUserId,
-      });
+      if (isRegistered) {
+        // Registered Student: promote directly
+        const res = await OfficerManagementService.assignExistingStudentAsOfficer({
+          studentId: selectedStudent.value.student_id,
+          userId: selectedStudent.value.user_id,
+          fullName: fullName.value.trim(),
+          email: email.value.trim(),
+          permissionPreset: permissionPreset.value,
+          customPermissions: permissionPreset.value === 'CUSTOM' ? customPermissions.value : undefined,
+          academicYearId: selectedAcademicYearId.value,
+          semesterId: selectedSemesterId.value,
+          startDate: appointmentStart.value,
+          endDate: appointmentEnd.value,
+          scopeType: scopeType.value,
+          devAdminUserId,
+        });
 
-      if (!res.success) throw new Error(res.error || 'Failed to prepare officer activation.');
-      haptics.success();
-      createdResult.value = {
-        success: true,
-        officerName: fullName.value,
-        activationCode: res.rawActivationCode,
-      };
-      isSuccessDialogOpen.value = true;
-    } else if (selectedScenario.value === 'NEW_OFFICER') {
+        if (!res.success) throw new Error(res.error || 'Failed to assign officer.');
+        haptics.success();
+        createdResult.value = {
+          success: true,
+          officerName: fullName.value,
+        };
+        isSuccessDialogOpen.value = true;
+      } else {
+        // Unregistered Roster Student: issue activation claim code
+        const res = await OfficerManagementService.prepareImportedStudentOfficerActivation({
+          studentId: selectedStudent.value.student_id,
+          fullName: fullName.value.trim(),
+          email: email.value.trim(),
+          permissionPreset: permissionPreset.value,
+          customPermissions: permissionPreset.value === 'CUSTOM' ? customPermissions.value : undefined,
+          academicYearId: selectedAcademicYearId.value,
+          semesterId: selectedSemesterId.value,
+          startDate: appointmentStart.value,
+          endDate: appointmentEnd.value,
+          scopeType: scopeType.value,
+          devAdminUserId,
+        });
+
+        if (!res.success) throw new Error(res.error || 'Failed to prepare officer activation.');
+        haptics.success();
+        createdResult.value = {
+          success: true,
+          officerName: fullName.value,
+          activationCode: res.rawActivationCode,
+        };
+        isSuccessDialogOpen.value = true;
+      }
+    } else {
+      // External Non-Student Invite
       const res = await OfficerManagementService.inviteNewOfficer({
         fullName: fullName.value.trim(),
         email: email.value.trim(),
@@ -252,7 +288,7 @@ async function copyCode(code: string) {
     await navigator.clipboard.writeText(code);
     copiedCode.value = true;
     haptics.success();
-    await showToast('Code copied to clipboard', 'success');
+    await showToast('Activation code copied to clipboard', 'success');
     setTimeout(() => {
       copiedCode.value = false;
     }, 2500);
@@ -271,129 +307,125 @@ function handleDone() {
   <ion-page>
     <UniPageHeader
       title="Create Officer"
-      subtitle="Select candidate scenario & configure authorization"
+      subtitle="Assign operational capabilities and permissions"
       :back-button="true"
       default-back-href="/settings/system-setup/officers"
     />
 
     <ion-content class="create-officer-content">
       <div class="page-container">
-        <!-- Scenario Selector Cards -->
-        <div class="scenarios-grid">
-          <!-- Option A -->
-          <div
-            class="scenario-card minimal-card"
-            :class="{ 'is-active': selectedScenario === 'EXISTING_STUDENT' }"
-            @click="selectedScenario = 'EXISTING_STUDENT'; clearSelectedStudent()"
+        <!-- Candidate Type Segment -->
+        <div class="type-segment-wrap">
+          <button
+            type="button"
+            class="type-segment-btn"
+            :class="{ 'is-active': candidateType === 'STUDENT' }"
+            @click="candidateType = 'STUDENT'; clearSelectedStudent()"
           >
-            <div class="scenario-icon-wrap icon-student">
-              <ion-icon :icon="schoolOutline" />
-            </div>
-            <div class="scenario-text">
-              <div class="scenario-title">Existing Student</div>
-              <p class="scenario-desc">Promote an active student without duplicating account or wiping role.</p>
-            </div>
-          </div>
-
-          <!-- Option B -->
-          <div
-            class="scenario-card minimal-card"
-            :class="{ 'is-active': selectedScenario === 'IMPORTED_STUDENT' }"
-            @click="selectedScenario = 'IMPORTED_STUDENT'; clearSelectedStudent()"
+            <ion-icon :icon="schoolOutline" />
+            <span>Student Roster</span>
+          </button>
+          <button
+            type="button"
+            class="type-segment-btn"
+            :class="{ 'is-active': candidateType === 'EXTERNAL' }"
+            @click="candidateType = 'EXTERNAL'; clearSelectedStudent()"
           >
-            <div class="scenario-icon-wrap icon-import">
-              <ion-icon :icon="cloudDownloadOutline" />
-            </div>
-            <div class="scenario-text">
-              <div class="scenario-title">Imported Student</div>
-              <p class="scenario-desc">Prepare verified officer activation for an imported student awaiting signup.</p>
-            </div>
-          </div>
-
-          <!-- Option C -->
-          <div
-            class="scenario-card minimal-card"
-            :class="{ 'is-active': selectedScenario === 'NEW_OFFICER' }"
-            @click="selectedScenario = 'NEW_OFFICER'; clearSelectedStudent()"
-          >
-            <div class="scenario-icon-wrap icon-new">
-              <ion-icon :icon="personAddOutline" />
-            </div>
-            <div class="scenario-text">
-              <div class="scenario-title">New Officer</div>
-              <p class="scenario-desc">Invite a new individual without creating an unnecessary student record.</p>
-            </div>
-          </div>
+            <ion-icon :icon="personAddOutline" />
+            <span>Non-Student Invite</span>
+          </button>
         </div>
 
-        <!-- Candidate Search (Option A & B) -->
-        <div v-if="selectedScenario !== 'NEW_OFFICER'" class="section-card minimal-card">
+        <!-- 1. Candidate Selection: Student Roster -->
+        <div v-if="candidateType === 'STUDENT'" class="section-card minimal-card">
           <div class="section-header">
-            <span class="section-title">
-              {{ selectedScenario === 'EXISTING_STUDENT' ? 'Find Registered Student' : 'Find Imported Student' }}
-            </span>
-            <span class="section-sub">
-              {{ selectedScenario === 'EXISTING_STUDENT' ? 'Search by name or student ID' : 'Search roster records awaiting activation' }}
-            </span>
+            <span class="section-title">Select Student Candidate</span>
+            <span class="section-sub">Type student name or School ID for auto-suggestions</span>
           </div>
 
-          <!-- Selected Student Banner -->
+          <!-- Selected Student Compact Chip -->
           <div v-if="selectedStudent" class="selected-student-box">
-            <div class="selected-student-info">
-              <div class="student-name">{{ selectedStudent.first_name }} {{ selectedStudent.last_name }}</div>
-              <div class="student-meta font-mono">ID: {{ selectedStudent.school_id }}</div>
-              <UniStatusBadge
-                :variant="selectedStudent.account_status === 'ACTIVE' ? 'success' : 'warning'"
-              >
-                {{ selectedStudent.account_status === 'ACTIVE' ? 'Registered User' : 'Awaiting Activation' }}
+            <div class="selected-avatar">
+              <ion-icon :icon="personOutline" />
+            </div>
+            <div class="selected-info">
+              <div class="selected-name">{{ selectedStudent.first_name }} {{ selectedStudent.last_name }}</div>
+              <div class="selected-meta font-mono">{{ selectedStudent.school_id }}</div>
+            </div>
+            <div class="selected-badge">
+              <UniStatusBadge :variant="selectedStudent.is_registered ? 'success' : 'neutral'">
+                {{ selectedStudent.is_registered ? 'Registered Account' : 'Roster (Awaiting Signup)' }}
               </UniStatusBadge>
             </div>
-            <button type="button" class="btn-clear-student" @click="clearSelectedStudent">
+            <button type="button" class="btn-clear" title="Change Student" @click="clearSelectedStudent">
               <ion-icon :icon="closeOutline" />
             </button>
           </div>
 
-          <!-- Search Input -->
-          <div v-else class="search-wrap">
-            <div class="input-with-icon">
-              <ion-icon :icon="searchOutline" class="input-icon" />
+          <!-- Search Input with Auto-Suggestions -->
+          <div v-else class="search-input-wrap">
+            <div class="search-bar-row">
+              <ion-icon :icon="searchOutline" class="search-icon" />
               <input
                 v-model="studentSearchQuery"
                 type="text"
-                class="form-input"
-                :placeholder="selectedScenario === 'EXISTING_STUDENT' ? 'Search registered student name or ID...' : 'Search imported student roster...'"
+                class="search-input"
+                placeholder="Search name or ID (e.g. MCC-2026-0001)..."
+                autocomplete="off"
+                @focus="handleSearchFocus"
                 @input="handleSearchInput"
               />
+              <ion-spinner v-if="isSearchingStudents" name="crescent" class="search-spinner" />
+              <button
+                v-else-if="studentSearchQuery.length > 0"
+                type="button"
+                class="btn-clear-input"
+                @click="studentSearchQuery = ''; searchResults = []"
+              >
+                <ion-icon :icon="closeOutline" />
+              </button>
             </div>
 
-            <!-- Autocomplete Results -->
-            <div v-if="isSearchingStudents" class="search-loading">
-              <ion-spinner name="crescent" />
-              <span>Searching directory...</span>
-            </div>
-
-            <div v-else-if="searchResults.length > 0" class="search-results-list">
+            <!-- Auto-Suggestions Dropdown List (Limit 10) -->
+            <div v-if="searchResults.length > 0" class="auto-suggestions-dropdown">
+              <div class="suggestions-header">
+                <span>Top Results ({{ searchResults.length }})</span>
+              </div>
               <div
                 v-for="st in searchResults"
                 :key="st.student_id"
-                class="search-result-item"
+                class="suggestion-row"
                 @click="selectStudent(st)"
+                @mousedown.prevent="selectStudent(st)"
               >
-                <div class="res-info">
-                  <span class="res-name">{{ st.first_name }} {{ st.last_name }}</span>
-                  <span class="res-id font-mono">ID: {{ st.school_id }}</span>
+                <div class="sugg-avatar">
+                  <ion-icon :icon="schoolOutline" />
                 </div>
-                <ion-icon :icon="arrowForwardOutline" class="res-arrow" />
+                <div class="sugg-details">
+                  <span class="sugg-name">{{ st.first_name }} {{ st.last_name }}</span>
+                  <span class="sugg-id font-mono">{{ st.school_id }}</span>
+                </div>
+                <div class="sugg-tag">
+                  <span v-if="st.is_registered" class="tag-registered">Registered</span>
+                  <span v-else class="tag-roster">Roster</span>
+                </div>
               </div>
+            </div>
+
+            <div
+              v-else-if="studentSearchQuery.trim().length >= 2 && !isSearchingStudents"
+              class="empty-suggestions"
+            >
+              No matching students found in directory.
             </div>
           </div>
         </div>
 
-        <!-- Candidate Details (Option C) -->
-        <div v-if="selectedScenario === 'NEW_OFFICER'" class="section-card minimal-card">
+        <!-- 1B. Candidate Selection: External Invite -->
+        <div v-else class="section-card minimal-card">
           <div class="section-header">
-            <span class="section-title">Officer Contact Information</span>
-            <span class="section-sub">Enter official email where invitation code will be sent</span>
+            <span class="section-title">Candidate Details</span>
+            <span class="section-sub">Enter official contact details for officer invitation</span>
           </div>
 
           <div class="form-grid">
@@ -406,7 +438,6 @@ function handleDone() {
                 placeholder="e.g. Maria Santos"
               />
             </div>
-
             <div class="form-group">
               <label class="form-label">Email Address</label>
               <input
@@ -419,11 +450,11 @@ function handleDone() {
           </div>
         </div>
 
-        <!-- Permission Preset Section -->
+        <!-- 2. Officer Role & Permission Preset -->
         <div class="section-card minimal-card">
           <div class="section-header">
-            <span class="section-title">Officer Authorization Preset</span>
-            <span class="section-sub">Select operational capabilities and privileges</span>
+            <span class="section-title">Officer Role Preset</span>
+            <span class="section-sub">Select primary responsibilities and system capabilities</span>
           </div>
 
           <div class="preset-cards-grid">
@@ -433,8 +464,13 @@ function handleDone() {
               :class="{ 'is-selected': permissionPreset === 'ATTENDANCE' }"
               @click="permissionPreset = 'ATTENDANCE'"
             >
-              <div class="preset-name">Attendance Officer</div>
-              <p class="preset-desc">NFC check-in scanning, attendance verification, absentees tracking, reports.</p>
+              <div class="preset-icon-wrap icon-attendance">
+                <ion-icon :icon="shieldCheckmarkOutline" />
+              </div>
+              <div class="preset-content">
+                <div class="preset-name">Attendance Officer</div>
+                <p class="preset-desc">NFC check-in scanning, attendance logs & absentees tracking.</p>
+              </div>
             </div>
 
             <!-- Finance -->
@@ -443,8 +479,13 @@ function handleDone() {
               :class="{ 'is-selected': permissionPreset === 'FINANCE' }"
               @click="permissionPreset = 'FINANCE'"
             >
-              <div class="preset-name">Finance Officer</div>
-              <p class="preset-desc">Collect fines & contributions, rapid NFC payment, transaction history.</p>
+              <div class="preset-icon-wrap icon-finance">
+                <ion-icon :icon="cashOutline" />
+              </div>
+              <div class="preset-content">
+                <div class="preset-name">Finance Officer</div>
+                <p class="preset-desc">Rapid NFC payment collection, fine issuance & obligation tracking.</p>
+              </div>
             </div>
 
             <!-- Full -->
@@ -453,8 +494,13 @@ function handleDone() {
               :class="{ 'is-selected': permissionPreset === 'FULL' }"
               @click="permissionPreset = 'FULL'"
             >
-              <div class="preset-name">Full Officer</div>
-              <p class="preset-desc">Comprehensive operational access across attendance, finance, and events.</p>
+              <div class="preset-icon-wrap icon-full">
+                <ion-icon :icon="flashOutline" />
+              </div>
+              <div class="preset-content">
+                <div class="preset-name">Full Officer</div>
+                <p class="preset-desc">Comprehensive access across attendance, finance, and events.</p>
+              </div>
             </div>
 
             <!-- Custom -->
@@ -463,14 +509,19 @@ function handleDone() {
               :class="{ 'is-selected': permissionPreset === 'CUSTOM' }"
               @click="permissionPreset = 'CUSTOM'"
             >
-              <div class="preset-name">Custom Permissions</div>
-              <p class="preset-desc">Tailor granular permissions per operational necessity.</p>
+              <div class="preset-icon-wrap icon-custom">
+                <ion-icon :icon="optionsOutline" />
+              </div>
+              <div class="preset-content">
+                <div class="preset-name">Custom Permissions</div>
+                <p class="preset-desc">Granularly select capabilities per officer necessity.</p>
+              </div>
             </div>
           </div>
 
-          <!-- Custom Permissions Matrix -->
+          <!-- Custom Permissions Matrix (if Custom selected) -->
           <div v-if="permissionPreset === 'CUSTOM'" class="custom-perms-matrix">
-            <div class="matrix-title">Individual Capabilities</div>
+            <div class="matrix-title">Selected Capabilities ({{ customPermissions.length }})</div>
             <div class="perms-chips">
               <button
                 v-for="(val, key) in OFFICER_PERMISSIONS"
@@ -486,36 +537,47 @@ function handleDone() {
           </div>
         </div>
 
-        <!-- Appointment Period & Scope -->
+        <!-- 3. Advanced Duration & Scope (Collapsible, Minimal by default) -->
         <div class="section-card minimal-card">
-          <div class="section-header">
-            <span class="section-title">Appointment Schedule & Scope</span>
-            <span class="section-sub">Configure term duration and organizational reach</span>
-          </div>
-
-          <div class="form-grid">
-            <div class="form-group">
-              <label class="form-label">Appointment Start Date</label>
-              <input v-model="appointmentStart" type="date" class="form-input" />
+          <button
+            type="button"
+            class="advanced-toggle-btn"
+            @click="showAdvancedOptions = !showAdvancedOptions"
+          >
+            <div class="toggle-left">
+              <span class="section-title">Term Duration & Scope</span>
+              <span class="toggle-hint">
+                {{ showAdvancedOptions ? 'Hide options' : 'Campus-Wide, 1-Year term (Default)' }}
+              </span>
             </div>
+            <ion-icon :icon="showAdvancedOptions ? chevronUpOutline : chevronDownOutline" />
+          </button>
 
-            <div class="form-group">
-              <label class="form-label">Appointment End Date</label>
-              <input v-model="appointmentEnd" type="date" class="form-input" />
-            </div>
+          <div v-if="showAdvancedOptions" class="advanced-body">
+            <div class="form-grid">
+              <div class="form-group">
+                <label class="form-label">Appointment Start</label>
+                <input v-model="appointmentStart" type="date" class="form-input" />
+              </div>
 
-            <div class="form-group">
-              <label class="form-label">Scope Reach</label>
-              <select v-model="scopeType" class="form-input form-select">
-                <option value="ORGANIZATION">All Organization (Campus-Wide)</option>
-                <option value="PROGRAM">Specific Program</option>
-                <option value="SECTION">Specific Section</option>
-              </select>
+              <div class="form-group">
+                <label class="form-label">Appointment End</label>
+                <input v-model="appointmentEnd" type="date" class="form-input" />
+              </div>
+
+              <div class="form-group">
+                <label class="form-label">Scope Reach</label>
+                <select v-model="scopeType" class="form-input form-select">
+                  <option value="ORGANIZATION">All Organization (Campus-Wide)</option>
+                  <option value="PROGRAM">Specific Program</option>
+                  <option value="SECTION">Specific Section</option>
+                </select>
+              </div>
             </div>
           </div>
         </div>
 
-        <!-- Submit Button -->
+        <!-- Form Actions Bar -->
         <div class="form-actions-bar">
           <UniButton
             variant="outline"
@@ -531,15 +593,7 @@ function handleDone() {
           >
             <ion-spinner v-if="isSubmitting" name="crescent" slot="start" />
             <ion-icon v-else :icon="checkmarkCircleOutline" slot="start" />
-            <span>
-              {{
-                selectedScenario === 'EXISTING_STUDENT'
-                  ? 'Confirm Officer Promotion'
-                  : selectedScenario === 'IMPORTED_STUDENT'
-                  ? 'Generate Officer Activation'
-                  : 'Send Officer Invitation'
-              }}
-            </span>
+            <span>{{ submitButtonLabel }}</span>
           </UniButton>
         </div>
       </div>
@@ -548,11 +602,11 @@ function handleDone() {
     <!-- Success Dialog with Activation/Invitation Code -->
     <UniDialog
       :is-open="isSuccessDialogOpen"
-      :title="selectedScenario === 'EXISTING_STUDENT' ? 'Officer Role Assigned' : 'Activation Code Generated'"
+      :title="createdResult?.activationCode ? 'Officer Code Issued' : 'Officer Assigned'"
       :description="
-        selectedScenario === 'EXISTING_STUDENT'
-          ? `${createdResult?.officerName} has been assigned the Officer role. Their student identity remains active.`
-          : `Provide this activation code to ${createdResult?.officerName} to complete enrollment.`
+        createdResult?.activationCode
+          ? `Provide this single-use code to ${createdResult?.officerName} to complete officer enrollment.`
+          : `${createdResult?.officerName} has been assigned officer privileges.`
       "
       type="info"
       confirm-text="Done"
@@ -561,7 +615,7 @@ function handleDone() {
       @close="isSuccessDialogOpen = false"
     >
       <div v-if="createdResult?.activationCode" class="dialog-code-box">
-        <span class="code-label">Single-Use Code</span>
+        <span class="code-label">Single-Use Activation Code</span>
         <div class="code-flex font-mono">
           <span class="code-str">{{ createdResult.activationCode }}</span>
           <button
@@ -573,7 +627,7 @@ function handleDone() {
             <span>{{ copiedCode ? 'Copied' : 'Copy' }}</span>
           </button>
         </div>
-        <span class="code-note">Expires in 48 hours. Activates officer privileges upon account claim.</span>
+        <span class="code-note">Expires in 48 hours. Officer privileges activate automatically upon signup.</span>
       </div>
     </UniDialog>
   </ion-page>
@@ -581,95 +635,64 @@ function handleDone() {
 
 <style scoped>
 .create-officer-content {
-  --background: var(--uni-background, #f8fafc);
+  --background: var(--uni-background, #0f1117);
 }
 
 .page-container {
-  max-width: 680px;
+  max-width: 600px;
   margin: 0 auto;
   padding: 16px;
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: 14px;
 }
 
-@media (max-width: 380px) {
-  .page-container {
-    padding: 12px;
-    gap: 12px;
-  }
-}
-
-.minimal-card {
-  background: var(--uni-surface, #ffffff);
-  border: 1px solid var(--uni-border, #e2e8f0);
-  border-radius: 14px;
-}
-
-.scenarios-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-  gap: 10px;
-}
-
-.scenario-card {
-  padding: 14px;
+/* Type Segmented Control */
+.type-segment-wrap {
   display: flex;
-  flex-direction: column;
-  gap: 10px;
-  cursor: pointer;
-  transition: all 0.16s ease;
-  border: 1.5px solid var(--uni-border, #e2e8f0);
+  background: var(--uni-surface, #1e222d);
+  padding: 4px;
+  border-radius: 12px;
+  gap: 4px;
+  border: 1px solid var(--uni-border, rgba(255, 255, 255, 0.08));
 }
 
-.scenario-card.is-active {
-  border-color: var(--uni-primary, #0f766e);
-  background: rgba(15, 118, 110, 0.05);
-}
-
-.scenario-icon-wrap {
-  width: 36px;
-  height: 36px;
-  border-radius: 10px;
+.type-segment-btn {
+  flex: 1;
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 18px;
+  gap: 8px;
+  padding: 10px 14px;
+  border-radius: 8px;
+  border: none;
+  background: transparent;
+  color: var(--uni-text-secondary, #94a3b8);
+  font-size: 0.9rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.18s ease;
 }
 
-.icon-student {
-  background: rgba(15, 118, 110, 0.12);
-  color: var(--uni-primary, #0f766e);
+.type-segment-btn ion-icon {
+  font-size: 1.15rem;
 }
 
-.icon-import {
-  background: rgba(2, 132, 199, 0.12);
-  color: #0284c7;
+.type-segment-btn.is-active {
+  background: var(--uni-primary, #0f766e);
+  color: #ffffff;
+  box-shadow: 0 2px 8px rgba(15, 118, 110, 0.35);
 }
 
-.icon-new {
-  background: rgba(124, 58, 237, 0.12);
-  color: #7c3aed;
-}
-
-.scenario-title {
-  font-size: 13.5px;
-  font-weight: 700;
-  color: var(--uni-text, #0f172a);
-}
-
-.scenario-desc {
-  font-size: 11.5px;
-  color: var(--uni-text-secondary, #64748b);
-  margin: 2px 0 0 0;
-  line-height: 1.35;
-}
-
+/* Section Card */
 .section-card {
+  background: var(--uni-surface, #1e222d);
+  border: 1px solid var(--uni-border, rgba(255, 255, 255, 0.08));
+  border-radius: 14px;
   padding: 16px;
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: 12px;
 }
 
 .section-header {
@@ -679,189 +702,313 @@ function handleDone() {
 }
 
 .section-title {
-  font-size: 14px;
+  font-size: 0.95rem;
   font-weight: 700;
-  color: var(--uni-text, #0f172a);
+  color: var(--uni-text, #f1f5f9);
 }
 
 .section-sub {
-  font-size: 12px;
-  color: var(--uni-text-secondary, #64748b);
+  font-size: 0.8rem;
+  color: var(--uni-text-secondary, #94a3b8);
 }
 
-.input-with-icon {
-  position: relative;
-  display: flex;
-  align-items: center;
-}
-
-.input-icon {
-  position: absolute;
-  left: 12px;
-  font-size: 18px;
-  color: var(--uni-text-secondary, #64748b);
-}
-
-.input-with-icon .form-input {
-  padding-left: 38px;
-}
-
-.form-input {
-  width: 100%;
-  height: 42px;
-  padding: 0 12px;
-  background: var(--uni-surface-secondary, #f1f5f9);
-  border: 1px solid var(--uni-border, #e2e8f0);
-  border-radius: 10px;
-  font-size: 13.5px;
-  color: var(--uni-text, #0f172a);
-  outline: none;
-  box-sizing: border-box;
-}
-
-.form-select {
-  cursor: pointer;
-}
-
+/* Selected Student Box */
 .selected-student-box {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  padding: 10px 14px;
+  gap: 12px;
+  background: rgba(15, 118, 110, 0.1);
+  border: 1px solid rgba(15, 118, 110, 0.35);
+  padding: 12px 14px;
+  border-radius: 12px;
+}
+
+.selected-avatar {
+  width: 40px;
+  height: 40px;
   border-radius: 10px;
-  background: rgba(15, 118, 110, 0.08);
-  border: 1px solid var(--uni-primary, #0f766e);
+  background: var(--uni-primary, #0f766e);
+  color: #ffffff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.3rem;
+  flex-shrink: 0;
 }
 
-.student-name {
-  font-size: 14px;
+.selected-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.selected-name {
+  font-size: 0.95rem;
   font-weight: 700;
-  color: var(--uni-text, #0f172a);
+  color: var(--uni-text, #f1f5f9);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
-.student-meta {
-  font-size: 12px;
-  color: var(--uni-text-secondary, #64748b);
-  margin-bottom: 4px;
+.selected-meta {
+  font-size: 0.8rem;
+  color: var(--uni-text-secondary, #94a3b8);
 }
 
-.btn-clear-student {
+.btn-clear {
+  background: rgba(255, 255, 255, 0.08);
+  border: none;
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  color: var(--uni-text-secondary, #94a3b8);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.btn-clear:hover {
+  background: rgba(239, 68, 68, 0.2);
+  color: #ef4444;
+}
+
+/* Search Input & Dropdown */
+.search-input-wrap {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+}
+
+.search-bar-row {
+  display: flex;
+  align-items: center;
+  background: var(--uni-surface-secondary, #f8fafc);
+  border: 1.5px solid var(--uni-border, #e2e8f0);
+  border-radius: 10px;
+  padding: 0 12px;
+  gap: 10px;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.search-bar-row:focus-within {
+  border-color: var(--uni-primary, #0f766e);
+  box-shadow: 0 0 0 2px rgba(15, 118, 110, 0.18);
+}
+
+.search-icon {
+  font-size: 1.2rem;
+  color: var(--uni-text-secondary, #94a3b8);
+}
+
+.search-input {
+  flex: 1;
   background: transparent;
   border: none;
-  font-size: 20px;
-  color: var(--uni-text-secondary, #64748b);
-  cursor: pointer;
-}
-
-.search-results-list {
-  display: flex;
-  flex-direction: column;
-  margin-top: 6px;
-  max-height: 180px;
-  overflow-y: auto;
-  border: 1px solid var(--uni-border, #e2e8f0);
-  border-radius: 10px;
-  background: var(--uni-surface, #ffffff);
-}
-
-.search-result-item {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 10px 14px;
-  border-bottom: 1px solid var(--uni-border, #e2e8f0);
-  cursor: pointer;
-}
-
-.search-result-item:last-child {
-  border-bottom: none;
-}
-
-.res-name {
-  font-size: 13px;
-  font-weight: 600;
+  outline: none;
+  height: 44px;
   color: var(--uni-text, #0f172a);
+  font-size: 0.92rem;
 }
 
-.res-id {
-  font-size: 11px;
+.search-input::placeholder {
   color: var(--uni-text-secondary, #64748b);
 }
 
-.search-loading {
+.search-spinner {
+  width: 20px;
+  height: 20px;
+  color: var(--uni-primary, #0f766e);
+}
+
+.btn-clear-input {
+  background: transparent;
+  border: none;
+  color: var(--uni-text-secondary, #94a3b8);
+  cursor: pointer;
+  padding: 4px;
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 10px 0;
-  font-size: 12px;
-  color: var(--uni-text-secondary, #64748b);
 }
 
-.form-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-  gap: 12px;
+/* Auto-Suggestions Dropdown */
+.auto-suggestions-dropdown {
+  position: relative;
+  margin-top: 6px;
+  background: var(--uni-surface, #1e222d);
+  border: 1px solid var(--uni-border, rgba(255, 255, 255, 0.15));
+  border-radius: 10px;
+  overflow: hidden;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+  max-height: 280px;
+  overflow-y: auto;
+  z-index: 20;
 }
 
-.form-group {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-
-.form-label {
-  font-size: 11.5px;
+.suggestions-header {
+  padding: 8px 12px;
+  font-size: 0.75rem;
   font-weight: 700;
   text-transform: uppercase;
-  color: var(--uni-text-secondary, #64748b);
   letter-spacing: 0.05em;
+  color: var(--uni-text-secondary, #94a3b8);
+  border-bottom: 1px solid var(--uni-border, rgba(255, 255, 255, 0.06));
 }
 
+.suggestion-row {
+  display: flex;
+  align-items: center;
+  padding: 10px 12px;
+  gap: 10px;
+  cursor: pointer;
+  border-bottom: 1px solid var(--uni-border, rgba(255, 255, 255, 0.04));
+  transition: background 0.12s ease;
+}
+
+.suggestion-row:hover,
+.suggestion-row:active {
+  background: rgba(15, 118, 110, 0.15);
+}
+
+.sugg-avatar {
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--uni-primary, #14b8a6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.1rem;
+  flex-shrink: 0;
+}
+
+.sugg-details {
+  flex: 1;
+  min-width: 0;
+}
+
+.sugg-name {
+  display: block;
+  font-size: 0.88rem;
+  font-weight: 600;
+  color: var(--uni-text, #f1f5f9);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.sugg-id {
+  display: block;
+  font-size: 0.78rem;
+  color: var(--uni-text-secondary, #94a3b8);
+}
+
+.sugg-tag {
+  flex-shrink: 0;
+}
+
+.tag-registered {
+  font-size: 0.72rem;
+  font-weight: 700;
+  padding: 3px 7px;
+  border-radius: 6px;
+  background: rgba(16, 185, 129, 0.15);
+  color: #10b981;
+}
+
+.tag-roster {
+  font-size: 0.72rem;
+  font-weight: 600;
+  padding: 3px 7px;
+  border-radius: 6px;
+  background: rgba(148, 163, 184, 0.12);
+  color: #94a3b8;
+}
+
+.empty-suggestions {
+  padding: 12px;
+  font-size: 0.82rem;
+  color: var(--uni-text-secondary, #94a3b8);
+  text-align: center;
+}
+
+/* Preset Cards Grid */
 .preset-cards-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  grid-template-columns: 1fr;
   gap: 8px;
+}
+
+@media (min-width: 500px) {
+  .preset-cards-grid {
+    grid-template-columns: 1fr 1fr;
+  }
 }
 
 .preset-card {
-  padding: 10px 12px;
-  border-radius: 10px;
-  border: 1.5px solid var(--uni-border, #e2e8f0);
-  background: var(--uni-surface-secondary, #f8fafc);
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 12px;
+  background: var(--uni-background, #0f1117);
+  border: 1px solid var(--uni-border, rgba(255, 255, 255, 0.08));
+  border-radius: 12px;
   cursor: pointer;
-  transition: all 0.16s ease;
+  transition: all 0.15s ease;
 }
 
 .preset-card.is-selected {
   border-color: var(--uni-primary, #0f766e);
-  background: rgba(15, 118, 110, 0.06);
+  background: rgba(15, 118, 110, 0.12);
+}
+
+.preset-icon-wrap {
+  width: 36px;
+  height: 36px;
+  border-radius: 9px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.15rem;
+  flex-shrink: 0;
+}
+
+.icon-attendance { background: rgba(59, 130, 246, 0.15); color: #3b82f6; }
+.icon-finance { background: rgba(16, 185, 129, 0.15); color: #10b981; }
+.icon-full { background: rgba(168, 85, 247, 0.15); color: #a855f7; }
+.icon-custom { background: rgba(245, 158, 11, 0.15); color: #f59e0b; }
+
+.preset-content {
+  flex: 1;
 }
 
 .preset-name {
-  font-size: 13px;
+  font-size: 0.88rem;
   font-weight: 700;
-  color: var(--uni-text, #0f172a);
+  color: var(--uni-text, #f1f5f9);
 }
 
 .preset-desc {
-  font-size: 11px;
-  color: var(--uni-text-secondary, #64748b);
-  margin-top: 2px;
+  font-size: 0.75rem;
+  color: var(--uni-text-secondary, #94a3b8);
+  margin: 2px 0 0;
   line-height: 1.3;
 }
 
+/* Custom Permissions Matrix */
 .custom-perms-matrix {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
+  margin-top: 8px;
   padding-top: 10px;
-  border-top: 1px solid var(--uni-border, #e2e8f0);
+  border-top: 1px solid var(--uni-border, rgba(255, 255, 255, 0.08));
 }
 
 .matrix-title {
-  font-size: 12px;
+  font-size: 0.8rem;
   font-weight: 700;
-  color: var(--uni-text, #0f172a);
+  color: var(--uni-text, #f1f5f9);
+  margin-bottom: 8px;
 }
 
 .perms-chips {
@@ -871,112 +1018,147 @@ function handleDone() {
 }
 
 .perm-chip {
-  padding: 4px 10px;
-  border-radius: 6px;
-  font-size: 11px;
-  font-family: monospace;
-  border: 1px solid var(--uni-border, #e2e8f0);
-  background: var(--uni-surface, #ffffff);
-  color: var(--uni-text-secondary, #64748b);
+  padding: 5px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--uni-border, rgba(255, 255, 255, 0.1));
+  background: var(--uni-background, #0f1117);
+  color: var(--uni-text-secondary, #94a3b8);
+  font-size: 0.75rem;
+  font-weight: 600;
   cursor: pointer;
+  transition: all 0.12s ease;
 }
 
 .perm-chip.is-checked {
   background: var(--uni-primary, #0f766e);
-  color: white;
+  color: #ffffff;
   border-color: var(--uni-primary, #0f766e);
 }
 
-.form-actions-bar {
+/* Advanced Toggle */
+.advanced-toggle-btn {
   display: flex;
   align-items: center;
-  justify-content: flex-end;
-  gap: 10px;
-  padding-top: 8px;
+  justify-content: space-between;
+  width: 100%;
+  background: transparent;
+  border: none;
+  padding: 0;
+  color: inherit;
+  cursor: pointer;
+  text-align: left;
 }
 
+.toggle-left {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.toggle-hint {
+  font-size: 0.78rem;
+  color: var(--uni-text-secondary, #94a3b8);
+}
+
+.advanced-body {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--uni-border, rgba(255, 255, 255, 0.08));
+}
+
+/* Form Grid */
+.form-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.form-group {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.form-label {
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--uni-text-secondary, #94a3b8);
+}
+
+.form-input {
+  height: 42px;
+  background: var(--uni-background, #0f1117);
+  border: 1px solid var(--uni-border, rgba(255, 255, 255, 0.12));
+  border-radius: 8px;
+  padding: 0 12px;
+  color: var(--uni-text, #f1f5f9);
+  font-size: 0.88rem;
+  outline: none;
+}
+
+.form-input:focus {
+  border-color: var(--uni-primary, #0f766e);
+}
+
+/* Actions Bar */
+.form-actions-bar {
+  display: flex;
+  gap: 10px;
+  justify-content: flex-end;
+  margin-top: 6px;
+}
+
+/* Dialog Code Box */
 .dialog-code-box {
+  background: rgba(15, 118, 110, 0.1);
+  border: 1px solid rgba(15, 118, 110, 0.3);
+  padding: 14px;
+  border-radius: 12px;
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 6px;
-  padding: 12px;
-  border-radius: 10px;
-  background: rgba(15, 118, 110, 0.08);
-  border: 1px dashed var(--uni-primary, #0f766e);
-  margin: 12px 0 6px 0;
-  width: 100%;
-  box-sizing: border-box;
+  gap: 8px;
+  margin: 12px 0 6px;
 }
 
 .code-label {
-  font-size: 11px;
+  font-size: 0.75rem;
   font-weight: 700;
   text-transform: uppercase;
-  color: var(--uni-primary, #0f766e);
+  color: var(--uni-primary, #14b8a6);
 }
 
 .code-flex {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 10px;
 }
 
 .code-str {
-  font-size: 22px;
+  font-size: 1.6rem;
   font-weight: 800;
-  letter-spacing: 0.18em;
-  color: var(--uni-primary, #0f766e);
+  letter-spacing: 0.15em;
+  color: var(--uni-text, #f1f5f9);
 }
 
 .copy-btn {
-  display: inline-flex;
+  display: flex;
   align-items: center;
   gap: 4px;
-  padding: 4px 10px;
-  border-radius: 6px;
-  border: 1px solid var(--uni-primary, #0f766e);
-  background: white;
-  color: var(--uni-primary, #0f766e);
-  font-size: 11px;
-  font-weight: 700;
+  background: var(--uni-primary, #0f766e);
+  color: #ffffff;
+  border: none;
+  padding: 6px 12px;
+  border-radius: 8px;
+  font-size: 0.82rem;
+  font-weight: 600;
   cursor: pointer;
 }
 
 .code-note {
-  font-size: 11px;
-  color: var(--uni-text-secondary, #64748b);
+  font-size: 0.75rem;
+  color: var(--uni-text-secondary, #94a3b8);
   text-align: center;
-}
-
-:global(.dark) .create-officer-content {
-  --background: var(--uni-background, #0f1117);
-}
-
-:global(.dark) .minimal-card,
-:global(.dark) .search-results-list {
-  background: var(--uni-surface, #1b1d23);
-  border-color: var(--uni-border, #30343d);
-}
-
-:global(.dark) .scenario-card,
-:global(.dark) .preset-card {
-  background: var(--uni-surface-secondary, #252830);
-  border-color: var(--uni-border, #30343d);
-}
-
-:global(.dark) .scenario-card.is-active,
-:global(.dark) .preset-card.is-selected {
-  background: rgba(94, 234, 212, 0.08);
-  border-color: var(--uni-primary, #5eead4);
-}
-
-:global(.dark) .form-input {
-  background: var(--uni-surface-secondary, #252830);
-  border-color: var(--uni-border, #30343d);
-}
-
-:global(.dark) .copy-btn {
-  background: var(--uni-surface, #1b1d23);
+  line-height: 1.3;
 }
 </style>

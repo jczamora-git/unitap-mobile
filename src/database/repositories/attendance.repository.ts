@@ -53,12 +53,13 @@ export class AttendanceRepository {
       // 1. Insert or update attendance record
       await tx.execute(
         `INSERT INTO attendance_records (
-          id, occurrence_id, student_id, status, checked_in_at, method,
+          id, occurrence_id, student_id, status, checked_in_at, client_scanned_at, method,
           identity_verified_by_user_id, photo_checked, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(occurrence_id, student_id) DO UPDATE SET
           status = excluded.status,
           checked_in_at = excluded.checked_in_at,
+          client_scanned_at = excluded.client_scanned_at,
           method = excluded.method,
           identity_verified_by_user_id = excluded.identity_verified_by_user_id,
           photo_checked = excluded.photo_checked,
@@ -69,6 +70,7 @@ export class AttendanceRepository {
           record.student_id,
           record.status,
           record.checked_in_at || new Date().toISOString(),
+          record.client_scanned_at || null,
           record.method || 'NFC',
           record.identity_verified_by_user_id || actorUserId,
           record.photo_checked,
@@ -106,6 +108,7 @@ export class AttendanceRepository {
             student_id: record.student_id,
             status: record.status,
             checked_in_at: record.checked_in_at,
+            client_scanned_at: record.client_scanned_at || record.checked_in_at,
             identity_verified_by_user_id: record.identity_verified_by_user_id,
             method: record.method,
             photo_checked: record.photo_checked,
@@ -121,6 +124,7 @@ export class AttendanceRepository {
     attendanceId: string,
     reason: string,
     actorUserId: string,
+    expectedVersion?: number,
     adapter?: DatabaseAdapter
   ): Promise<void> {
     if (!reason || reason.trim().length === 0) {
@@ -138,6 +142,11 @@ export class AttendanceRepository {
       }
       if (existing.status === 'VOID' || existing.status === 'REVOKED') {
         throw new Error('Attendance record is already revoked.');
+      }
+      if (expectedVersion !== undefined && existing.version !== expectedVersion) {
+        throw new Error(
+          `The record was modified concurrently (current version ${existing.version} vs expected ${expectedVersion}). Please refresh.`
+        );
       }
 
       const now = new Date().toISOString();
@@ -188,6 +197,7 @@ export class AttendanceRepository {
     reason: string,
     actorUserId: string,
     targetStatus: 'PRESENT' | 'LATE' = 'PRESENT',
+    expectedVersion?: number,
     adapter?: DatabaseAdapter
   ): Promise<void> {
     if (!reason || reason.trim().length === 0) {
@@ -202,6 +212,14 @@ export class AttendanceRepository {
       );
       if (!existing) {
         throw new Error('Attendance record not found.');
+      }
+      if (existing.status !== 'VOID' && existing.status !== 'REVOKED') {
+        throw new Error('Attendance record is not in REVOKED state.');
+      }
+      if (expectedVersion !== undefined && existing.version !== expectedVersion) {
+        throw new Error(
+          `The record was modified concurrently (current version ${existing.version} vs expected ${expectedVersion}). Please refresh.`
+        );
       }
 
       const now = new Date().toISOString();

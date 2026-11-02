@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { resetDatabaseForTests } from '@/database/database';
+import { getDatabase, resetDatabaseForTests, clearLocalDatabase } from '@/database/database';
 import { MigrationRunner } from '@/database/migration-runner';
 import { LegacyMigrationService } from '@/services/legacy-migration.service';
 import { Preferences } from '@capacitor/preferences';
@@ -114,6 +114,36 @@ describe('UniTap 2.0 Database & Migrations', () => {
     // Verify raw Preferences backup was preserved
     const backupKey = (await Preferences.get({ key: 'unitap_legacy_backup_timestamp' })).value;
     expect(backupKey).toBeDefined();
+  });
+
+  it('clearLocalDatabase completely wipes records and restores a pristine empty database', async () => {
+    const db = await getDatabase();
+    // Insert some records
+    await db.execute(
+      `INSERT INTO academic_years (id, label, starts_on, ends_on, status)
+       VALUES ('ay_clear_test', '2026-2027', '2026-08-01', '2027-05-31', 'ACTIVE')`
+    );
+    await db.execute(
+      `INSERT INTO students (id, school_id, first_name, last_name, status, created_at, updated_at)
+       VALUES ('stu_clear_test', 'MCC2026-9999', 'Juan', 'Dela Cruz', 'ACTIVE', '2026-11-01T00:00:00.000Z', '2026-11-01T00:00:00.000Z')`
+    );
+
+    const countBefore = await db.queryOne<{ cnt: number }>('SELECT count(*) as cnt FROM students');
+    expect(countBefore?.cnt).toBeGreaterThanOrEqual(1);
+
+    // Call clearLocalDatabase
+    await clearLocalDatabase();
+
+    // Verify all tables are still valid schema
+    const isValid = await MigrationRunner.validateSchema(db);
+    expect(isValid).toBe(true);
+
+    // Verify data was wiped
+    const countAfter = await db.queryOne<{ cnt: number }>('SELECT count(*) as cnt FROM students');
+    expect(countAfter?.cnt).toBe(0);
+
+    const ayAfter = await db.queryOne<{ cnt: number }>('SELECT count(*) as cnt FROM academic_years');
+    expect(ayAfter?.cnt).toBe(0);
   });
 });
 

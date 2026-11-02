@@ -206,11 +206,12 @@ export class OfficerRepository {
 
   public static async searchStudentsForOfficer(
     query: string,
-    registeredOnly = false,
+    registeredOnly?: boolean | null,
+    limit = 10,
     adapter?: DatabaseAdapter
   ): Promise<any[]> {
     const db = await this.getDb(adapter);
-    const clean = `%${query.trim()}%`;
+    const clean = query && query.trim() ? `%${query.trim()}%` : '%';
     let sql = `
       SELECT 
         s.id as student_id,
@@ -221,20 +222,28 @@ export class OfficerRepository {
         u.id as user_id,
         u.username,
         u.account_status,
+        CASE WHEN u.id IS NOT NULL AND u.account_status = 'ACTIVE' THEN 1 ELSE 0 END as is_registered,
         (SELECT role FROM user_roles ur WHERE ur.user_id = u.id AND ur.role = 'OFFICER' AND ur.revoked_at IS NULL) as is_officer
       FROM students s
       LEFT JOIN users u ON u.student_id = s.id
-      WHERE (s.school_id LIKE ? OR s.first_name LIKE ? OR s.last_name LIKE ?)
+      WHERE (
+        s.school_id LIKE ? 
+        OR s.first_name LIKE ? 
+        OR s.last_name LIKE ?
+        OR (s.first_name || ' ' || s.last_name) LIKE ?
+        OR (s.last_name || ', ' || s.first_name) LIKE ?
+        OR u.username LIKE ?
+      )
     `;
 
-    if (registeredOnly) {
+    if (registeredOnly === true) {
       sql += ' AND u.id IS NOT NULL AND u.account_status = \'ACTIVE\'';
-    } else {
+    } else if (registeredOnly === false) {
       sql += ' AND (u.id IS NULL OR u.account_status != \'ACTIVE\')';
     }
 
-    sql += ' ORDER BY s.last_name ASC LIMIT 20';
-    return db.query(sql, [clean, clean, clean]);
+    sql += ` ORDER BY s.last_name ASC, s.first_name ASC LIMIT ${Math.max(1, Math.min(limit, 20))}`;
+    return db.query(sql, [clean, clean, clean, clean, clean, clean]);
   }
 }
 

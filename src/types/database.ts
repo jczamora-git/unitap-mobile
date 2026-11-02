@@ -248,6 +248,7 @@ export interface AttendanceRecord {
   revoked_at?: string | null;
   revoked_by_user_id?: string | null;
   revocation_reason?: string | null;
+  client_scanned_at?: string | null;
   version?: number;
   updated_at: string;
 }

@@ -34,6 +34,7 @@ import { useTheme, type ThemePreference } from '@/composables/useTheme';
 import { useSyncPreferences } from '@/composables/useSyncPreferences';
 import { authService } from '@/services/auth.service';
 import { SupabaseAuthService } from '@/integrations/supabase/auth.service';
+import { clearLocalDatabase } from '@/database/database';
 import { AcademicRepository } from '@/database/repositories/academic.repository';
 import type { Semester, AcademicYear, SyncOutboxRecord } from '@/types/database';
 import { demoDataService } from '@/services/demo-data.service';
@@ -43,6 +44,8 @@ import {
 } from '@/utilities/presentation-formatters';
 import { UniPageHeader, UniDialog, UniSegmentedControl, UniButton, UniSheet } from '@/components/ui';
 import WorkspaceSwitcher from '@/components/shared/WorkspaceSwitcher.vue';
+import SyncPreviewModal from '@/components/sync/SyncPreviewModal.vue';
+import type { PullPreviewPlan } from '@/services/sync/pull-reconciliation.service';
 import { haptics } from '@/utilities/haptics';
 
 const router = useRouter();
@@ -59,6 +62,13 @@ const {
   setSyncMode,
   triggerSyncNow,
   triggerRefreshLocalData,
+  isPreviewOpen,
+  isPreviewLoading,
+  previewPlan,
+  openPullPreview,
+  closePullPreview,
+  applyPullPreview,
+  syncError,
   getPendingOutbox,
   clearPendingOutbox,
   deletePendingItem,
@@ -76,6 +86,8 @@ const showResetAlert = ref(false);
 const showSignOutAlert = ref(false);
 const showAdvancedSyncSheet = ref(false);
 const showRefreshConfirmDialog = ref(false);
+const showClearDbDialog = ref(false);
+const isClearingDb = ref(false);
 const showPendingSheet = ref(false);
 const showClearPendingDialog = ref(false);
 const pendingList = ref<SyncOutboxRecord[]>([]);
@@ -242,12 +254,38 @@ async function onSyncNow() {
 async function handleConfirmRefreshData() {
   showRefreshConfirmDialog.value = false;
   haptics.medium();
-  const success = await triggerRefreshLocalData();
+  await openPullPreview();
+}
+
+async function handleConfirmClearDb() {
+  showClearDbDialog.value = false;
+  haptics.medium();
+  isClearingDb.value = true;
+  statusMessage.value = 'Clearing and rebuilding local database...';
+  try {
+    await clearLocalDatabase();
+    showAdvancedSyncSheet.value = false;
+    statusMessage.value = 'Local database reset successfully. Reloading application...';
+    setTimeout(() => {
+      if (typeof window !== 'undefined') {
+        window.location.reload();
+      }
+    }, 600);
+  } catch (err: unknown) {
+    statusMessage.value = err instanceof Error ? err.message : 'Failed to clear local database.';
+  } finally {
+    isClearingDb.value = false;
+  }
+}
+
+async function handleApprovePreview(plan: PullPreviewPlan) {
+  haptics.medium();
+  const success = await applyPullPreview(plan);
   if (success) {
     showAdvancedSyncSheet.value = false;
-    statusMessage.value = 'Local data refreshed successfully from cloud.';
+    statusMessage.value = 'Local data reconciled and updated successfully from cloud.';
   } else {
-    statusMessage.value = 'Failed to refresh local data.';
+    statusMessage.value = syncError.value || 'Failed to apply pull operations.';
   }
 }
 
@@ -754,19 +792,64 @@ function toggleNotifications() {
               View Diagnostics
             </UniButton>
           </div>
+
+          <!-- Reset / Clear Local Database Card -->
+          <div class="advanced-option-card">
+            <div class="option-header-row">
+              <ion-icon :icon="trashOutline" class="option-icon text-danger" />
+              <div class="option-text">
+                <span class="option-title text-danger">Reset Local Database</span>
+                <span class="option-desc">
+                  Completely wipes all local SQLite tables, duplicated students, offline outbox, and sync checkpoints. Rebuilds a clean, empty database.
+                </span>
+              </div>
+            </div>
+            <UniButton
+              variant="destructive"
+              size="sm"
+              :disabled="isClearingDb"
+              class="option-btn"
+              @click="showClearDbDialog = true"
+            >
+              {{ isClearingDb ? 'Clearing...' : 'Clear Local DB' }}
+            </UniButton>
+          </div>
         </div>
       </UniSheet>
+
+      <!-- Confirmation Dialog for Database Reset -->
+      <UniDialog
+        v-model:is-open="showClearDbDialog"
+        title="Wipe Local Database?"
+        description="This will permanently delete all local SQLite data, duplicated students, and sync checkpoints on this device, then recreate a clean, empty database structure. Are you sure?"
+        confirm-text="Wipe & Reset"
+        cancel-text="Cancel"
+        :destructive="true"
+        type="destructive"
+        @confirm="handleConfirmClearDb"
+        @cancel="showClearDbDialog = false"
+      />
 
       <!-- Confirmation Dialog for Refresh -->
       <UniDialog
         v-model:is-open="showRefreshConfirmDialog"
         title="Refresh Local Data?"
-        description="This will re-download all current authorized records for your account. Pending offline scans and payments will NOT be deleted."
-        confirm-text="Refresh Now"
+        description="This will analyze all current authorized records against your local database. A preflight preview will be displayed for your review before writing to SQLite."
+        confirm-text="Open Preview"
         cancel-text="Cancel"
         type="confirm"
         @confirm="handleConfirmRefreshData"
         @cancel="showRefreshConfirmDialog = false"
+      />
+
+      <!-- Preflight Sync Preview Modal -->
+      <SyncPreviewModal
+        :is-open="isPreviewOpen"
+        :plan="previewPlan"
+        :is-loading="isPreviewLoading"
+        @close="closePullPreview"
+        @cancel="closePullPreview"
+        @approve="handleApprovePreview"
       />
 
       <!-- Pending Changes & Outbox Logs Sheet -->

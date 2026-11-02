@@ -79,3 +79,4 @@ The previous implementation relied heavily on local SQLite client checks prior t
 4. **Client & UI Adaptations:**
    - Surface `REVOKED_REVIEW_REQUIRED` banner with revocation history and reason.
    - Provide explicit "Approve Recheck" modal for authorized officers with photo confirmation.
+

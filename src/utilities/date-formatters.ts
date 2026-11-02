@@ -57,12 +57,18 @@ export function formatDateTime(isoStr?: string | null): string {
   }
 }
 
-export function isPastTime(dateStr: string, timeStr: string, graceMinutes: number = 0): boolean {
+export function isPastTime(
+  dateStr: string,
+  timeStr: string,
+  graceMinutes: number = 0,
+  currentTime?: Date | string
+): boolean {
   try {
     const [h, m] = timeStr.split(':').map(Number);
     const target = new Date(`${dateStr}T${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')}:00`);
     target.setMinutes(target.getMinutes() + graceMinutes);
-    return Date.now() > target.getTime();
+    const comparisonTime = currentTime ? new Date(currentTime).getTime() : Date.now();
+    return comparisonTime > target.getTime();
   } catch {
     return false;
   }

@@ -3,6 +3,8 @@ import { getDatabase } from '@/database/database';
 import { SyncStatusService } from './sync-status.service';
 import { ConflictService } from './conflict.service';
 import { SyncRepository } from '@/database/repositories/sync.repository';
+import { StudentsRepository } from '@/database/repositories/students.repository';
+import { normalizeSchoolId, getSchoolIdVariants } from '@/utilities/school-id-normalizer';
 import type { SyncOutboxRecord } from '@/types/database';
 
 export class PushSyncService {
@@ -45,9 +47,39 @@ export class PushSyncService {
 
       if (!batchErr && batchRes && Array.isArray(batchRes.results)) {
         for (const res of batchRes.results) {
-          if (res.status === 'APPLIED') {
+          if (res.status === 'APPLIED' || res.status === 'CONFIRMED' || res.status === 'ALREADY_RECORDED') {
             await db.execute('DELETE FROM sync_outbox WHERE id = ?', [res.id]);
             pushedCount++;
+          } else if (res.status === 'REVIEW_REQUIRED') {
+            const originalOp = pendingOps.find((o) => o.id === res.id);
+            if (originalOp) {
+              await ConflictService.recordConflict({
+                id: 'conf_' + Math.random().toString(36).substring(2, 10),
+                entityType: originalOp.entity_type,
+                entityId: originalOp.entity_id,
+                conflictType: 'REVOKED_REVIEW_REQUIRED',
+                clientPayload: JSON.parse(originalOp.payload_json),
+                serverPayload: res.scan_result || res.revoke_result,
+                resolution: 'MANUAL_REQUIRED',
+              });
+            }
+            await db.execute('DELETE FROM sync_outbox WHERE id = ?', [res.id]);
+            errorCount++;
+          } else if (res.status === 'REJECTED_FINAL') {
+            const originalOp = pendingOps.find((o) => o.id === res.id);
+            if (originalOp) {
+              await ConflictService.recordConflict({
+                id: 'conf_' + Math.random().toString(36).substring(2, 10),
+                entityType: originalOp.entity_type,
+                entityId: originalOp.entity_id,
+                conflictType: 'REJECTED_FINAL',
+                clientPayload: JSON.parse(originalOp.payload_json),
+                serverPayload: res,
+                resolution: 'SERVER_WINS',
+              });
+            }
+            await db.execute('DELETE FROM sync_outbox WHERE id = ?', [res.id]);
+            errorCount++;
           } else if (res.status === 'COLLISION_AUDITED') {
             const originalOp = pendingOps.find((o) => o.id === res.id);
             if (originalOp) {
@@ -100,7 +132,100 @@ export class PushSyncService {
         const targetTable = this.mapEntityTypeToTable(op.entity_type);
 
         let success = false;
-        if (op.operation === 'CREATE') {
+        if (op.entity_type === 'ATTENDANCE') {
+          if (op.operation === 'CREATE' || op.operation === 'UPDATE') {
+            const { data: scanRes, error: scanErr } = await supabase.rpc('record_attendance_scan', {
+              p_occurrence_id: payload.occurrence_id,
+              p_student_id: payload.student_id,
+              p_nfc_card_id: payload.nfc_card_id || null,
+              p_uid_normalized: payload.uid_normalized || null,
+              p_status_override: payload.status,
+              p_device_id: 'outbox_push',
+              p_idempotency_key: op.id,
+              p_client_scanned_at: payload.client_scanned_at || payload.checked_in_at || null,
+              p_scan_method: payload.method || 'NFC',
+            });
+            if (!scanErr && (scanRes?.status === 'RECORDED' || scanRes?.status === 'ALREADY_RECORDED' || scanRes?.status === 'REVOKED_REVIEW_REQUIRED')) {
+              success = true;
+            } else {
+              console.warn(`[PushSync] RPC push attendance rejected:`, scanErr?.message || scanRes?.message);
+            }
+          } else if (op.operation === 'VOID' || op.operation === 'REVOKE') {
+            const { data: revRes, error: revErr } = await supabase.rpc('revoke_attendance', {
+              p_attendance_id: op.entity_id,
+              p_reason: payload.revocation_reason || payload.void_reason || 'Offline officer revocation',
+              p_expected_version: payload.version || null,
+              p_idempotency_key: op.id,
+            });
+            if (!revErr && (revRes?.success || revRes?.status === 'ALREADY_REVOKED')) {
+              success = true;
+            } else {
+              console.warn(`[PushSync] RPC push revoke rejected:`, revErr?.message || revRes?.error);
+            }
+          }
+        } else if (op.entity_type === 'PAYMENT') {
+          if (op.operation === 'CREATE') {
+            const payRow = payload.payment || payload;
+            const allocations = Array.isArray(payload.allocations) ? payload.allocations : [];
+            const { error: payErr } = await supabase.from('payments').upsert(payRow);
+            if (!payErr) {
+              success = true;
+              if (allocations.length > 0) {
+                const { error: allocErr } = await supabase.from('payment_allocations').upsert(allocations);
+                if (allocErr) {
+                  console.warn('[PushSync] Warning: Payment allocations insert error:', allocErr.message);
+                }
+              }
+            } else {
+              console.warn('[PushSync] Error syncing payment:', payErr.message);
+            }
+          } else if (op.operation === 'UPDATE' || payload.status === 'REVERSED') {
+            const { error: revErr } = await supabase
+              .from('payments')
+              .update({
+                status: 'REVERSED',
+                reversed_at: payload.reversed_at || new Date().toISOString(),
+                reversed_by_user_id: payload.reversed_by_user_id,
+                reversal_reason: payload.reversal_reason || 'Reversed by officer',
+              })
+              .eq('id', op.entity_id);
+            if (!revErr) success = true;
+            else console.warn('[PushSync] Error updating payment reversal:', revErr.message);
+          }
+        } else if (op.entity_type === 'OBLIGATION' && op.operation === 'VOID') {
+          const { error } = await supabase
+            .from('student_obligations')
+            .update({ status: 'VOID', updated_at: new Date().toISOString() })
+            .eq('id', op.entity_id);
+          if (!error) success = true;
+        } else if (op.entity_type === 'STUDENT' && op.operation === 'CREATE') {
+          const canonicalId = normalizeSchoolId(payload.school_id);
+          const variants = getSchoolIdVariants(payload.school_id);
+          const { data: existingRemote } = await supabase
+            .from('students')
+            .select('id, school_id')
+            .or(`id.eq.${op.entity_id},school_id.in.(${variants.join(',')})`)
+            .maybeSingle();
+
+          if (existingRemote) {
+            if (existingRemote.id !== op.entity_id) {
+              await StudentsRepository.reconcileStudentId(op.entity_id, existingRemote.id, canonicalId, db);
+            }
+            const { error: updErr } = await supabase
+              .from('students')
+              .update({ ...payload, id: existingRemote.id, school_id: existingRemote.school_id })
+              .eq('id', existingRemote.id);
+            if (!updErr) success = true;
+            else console.warn('[PushSync] Error updating existing remote student:', updErr.message);
+          } else {
+            const { error: insErr } = await supabase.from('students').insert({
+              ...payload,
+              school_id: canonicalId,
+            });
+            if (!insErr) success = true;
+            else console.warn('[PushSync] Error inserting new remote student:', insErr.message);
+          }
+        } else if (op.operation === 'CREATE') {
           const { error } = await supabase.from(targetTable).upsert(payload);
           if (!error) success = true;
           else if (error.code === '23505') {

@@ -6,9 +6,11 @@ ALTER TABLE attendance_records ADD COLUMN version INTEGER NOT NULL DEFAULT 1;
 ALTER TABLE attendance_records ADD COLUMN revoked_at TEXT;
 ALTER TABLE attendance_records ADD COLUMN revoked_by_user_id TEXT;
 ALTER TABLE attendance_records ADD COLUMN revocation_reason TEXT;
+ALTER TABLE attendance_records ADD COLUMN client_scanned_at TEXT;
 
 ALTER TABLE attendance_audit ADD COLUMN occurrence_id TEXT;
 ALTER TABLE attendance_audit ADD COLUMN student_id TEXT;
 ALTER TABLE attendance_audit ADD COLUMN performed_by_user_id TEXT;
 ALTER TABLE attendance_audit ADD COLUMN performed_at TEXT;
 `;
+

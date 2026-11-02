@@ -80,3 +80,4 @@ Total Project Test Results:
 To execute these concurrency operations against live Supabase PostgreSQL:
 1. Apply migration `supabase/migrations/20261101191000_multi_officer_attendance_concurrency.sql` via Supabase SQL Editor.
 2. The RPC `record_attendance_scan` executes within a PostgreSQL transaction with `FOR UPDATE` row-level locks on `attendance_records(occurrence_id, student_id)` and catches `unique_violation` to ensure zero lost updates under concurrent load.
+

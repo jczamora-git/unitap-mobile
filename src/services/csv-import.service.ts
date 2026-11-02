@@ -6,6 +6,7 @@ import { AcademicRepository } from '../database/repositories/academic.repository
 import { ImportsRepository } from '../database/repositories/imports.repository';
 import type { ImportBatchRecord } from '@/types/database';
 import type { DatabaseAdapter } from '../database/adapters/database-adapter.interface';
+import { normalizeSchoolId } from '@/utilities/school-id-normalizer';
 
 function isTestEnvironment(): boolean {
   if ((globalThis as unknown as { __FORCE_ONLINE_TEST__?: boolean }).__FORCE_ONLINE_TEST__) {
@@ -122,8 +123,8 @@ export class CsvImportService {
       const rowNum = i + 1;
 
       const rawSchoolId = parts[colIndex.school_id] || '';
-      // Sanitize formula injection
-      const schoolId = rawSchoolId.replace(/^[=+\-@]/, '');
+      // Sanitize formula injection and canonicalize School ID
+      const schoolId = normalizeSchoolId(rawSchoolId.replace(/^[=+\-@]/, ''));
       const firstName = (parts[colIndex.first_name] || '').replace(/^[=+\-@]/, '');
       const middleName = (parts[colIndex.middle_name] || '').replace(/^[=+\-@]/, '');
       const lastName = (parts[colIndex.lastname] || '').replace(/^[=+\-@]/, '');
@@ -265,41 +266,6 @@ export class CsvImportService {
     // 1. Attempt Atomic Online Server Ingest RPC via Supabase (if online and not in test)
     if (!isTestEnvironment()) {
       try {
-        // Pre-flight: Ensure target academic structure exists on Supabase
-        const targetSem = await AcademicRepository.getSemesterById(semesterId);
-        if (targetSem) {
-          const targetYear = await AcademicRepository.getYearById(targetSem.academic_year_id);
-          if (targetYear) {
-            await supabase.from('academic_years').upsert({
-              id: targetYear.id,
-              label: targetYear.label,
-              starts_on: targetYear.starts_on,
-              ends_on: targetYear.ends_on,
-              status: targetYear.status,
-            });
-          }
-          await supabase.from('semesters').upsert({
-            id: targetSem.id,
-            academic_year_id: targetSem.academic_year_id,
-            term: targetSem.term,
-            starts_on: targetSem.starts_on,
-            ends_on: targetSem.ends_on,
-            status: targetSem.status,
-          });
-        }
-
-        if (programId) {
-          const targetProg = await AcademicRepository.getProgramById(programId);
-          if (targetProg) {
-            await supabase.from('programs').upsert({
-              id: targetProg.id,
-              code: targetProg.code,
-              name: targetProg.name,
-              status: 'ACTIVE',
-            });
-          }
-        }
-
         const { data: rpcRes, error: rpcErr } = await supabase.rpc('import_student_roster_batch', {
           p_batch_id: batchId,
           p_source_filename: parseResult.filename,
@@ -320,108 +286,118 @@ export class CsvImportService {
           importedCount = (rpcRes.imported_count || 0) + (rpcRes.updated_count || 0);
           rejectedCount += (rpcRes.rejected_count || 0);
 
-          // Mirror server-authoritative results directly into local SQLite
-          await db.transaction(async (tx) => {
-            // Record invalid rows from parse
-            for (const inv of parseResult.invalidRows) {
-              await ImportsRepository.recordRow(
-                {
-                  id: 'row_' + generateUuid().substring(0, 8),
-                  batch_id: batchId,
-                  row_number: inv.rowNumber,
-                  raw_json: JSON.stringify(inv),
-                  result: 'REJECTED',
-                  error_message: inv.error,
-                },
-                tx
-              );
-            }
-
-            // Ingest server-returned students & enrollments
-            if (Array.isArray(rpcRes.students)) {
-              for (const st of rpcRes.students) {
-                const existing = await StudentsRepository.getStudentBySchoolId(st.school_id, tx);
-                const studentId = existing ? existing.id : st.id;
-
-                if (!existing) {
-                  await StudentsRepository.createStudent(
-                    {
-                      id: studentId,
-                      school_id: st.school_id,
-                      first_name: st.first_name,
-                      middle_name: st.middle_name || null,
-                      last_name: st.last_name,
-                      status: 'ACTIVE',
-                      created_at: now,
-                      updated_at: now,
-                    },
-                    tx
-                  );
-                } else {
-                  await StudentsRepository.updateStudent(
-                    {
-                      id: studentId,
-                      first_name: st.first_name,
-                      middle_name: st.middle_name || null,
-                      last_name: st.last_name,
-                      updated_at: now,
-                    },
-                    tx
-                  );
-                }
-
-                // Upsert enrollment in SQLite
-                const existingEnrollment = await AcademicRepository.getStudentEnrollmentInSemester(
-                  studentId,
-                  semesterId,
-                  tx
-                );
-
-                if (!existingEnrollment) {
-                  await AcademicRepository.createEnrollment(
-                    {
-                      id: st.enrollment_id || generateUuid(),
-                      student_id: studentId,
-                      semester_id: semesterId,
-                      program_id: programId,
-                      year_level: st.year,
-                      section: st.section,
-                      year_level_id: st.year_level_id || null,
-                      section_id: st.section_id || null,
-                      enrollment_status: 'ENROLLED',
-                      first_name_snapshot: st.first_name,
-                      middle_name_snapshot: st.middle_name || null,
-                      last_name_snapshot: st.last_name,
-                      updated_at: now,
-                    },
-                    tx
-                  );
-                }
-
+          try {
+            // Mirror server-authoritative results directly into local SQLite
+            await db.transaction(async (tx) => {
+              // Record invalid rows from parse
+              for (const inv of parseResult.invalidRows) {
                 await ImportsRepository.recordRow(
                   {
                     id: 'row_' + generateUuid().substring(0, 8),
                     batch_id: batchId,
-                    row_number: st.row_number || 0,
-                    raw_json: JSON.stringify(st),
-                    result: st.is_existing ? 'UPDATED' : 'IMPORTED',
-                    student_id: studentId,
+                    row_number: inv.rowNumber,
+                    raw_json: JSON.stringify(inv),
+                    result: 'REJECTED',
+                    error_message: inv.error,
                   },
                   tx
                 );
               }
-            }
 
-            const finalStatus = rejectedCount === 0 ? 'COMPLETED' : importedCount > 0 ? 'PARTIAL' : 'FAILED';
-            await ImportsRepository.updateBatchSummary(
-              batchId,
-              finalStatus,
-              parseResult.totalRows,
-              importedCount,
-              rejectedCount,
-              tx
-            );
-          });
+              // Ingest server-returned students & enrollments
+              if (Array.isArray(rpcRes.students)) {
+                for (let idx = 0; idx < rpcRes.students.length; idx++) {
+                  const st = rpcRes.students[idx];
+                  const existing = await StudentsRepository.getStudentBySchoolId(st.school_id, tx);
+                  const studentId = existing ? existing.id : st.id;
+
+                  if (!existing) {
+                    await StudentsRepository.createStudent(
+                      {
+                        id: studentId,
+                        school_id: st.school_id,
+                        first_name: st.first_name,
+                        middle_name: st.middle_name || null,
+                        last_name: st.last_name,
+                        status: 'ACTIVE',
+                        created_at: now,
+                        updated_at: now,
+                      },
+                      tx
+                    );
+                  } else {
+                    await StudentsRepository.updateStudent(
+                      {
+                        id: studentId,
+                        first_name: st.first_name,
+                        middle_name: st.middle_name || null,
+                        last_name: st.last_name,
+                        updated_at: now,
+                      },
+                      tx
+                    );
+                  }
+
+                  // Resolve local year level & section for SQLite foreign key integrity
+                  const yl = await AcademicRepository.getYearLevelByNumber(st.year, tx);
+                  const sec = yl ? await AcademicRepository.getSectionByName(st.section, yl.id, undefined, programId, tx) : null;
+
+                  // Upsert enrollment in SQLite
+                  const existingEnrollment = await AcademicRepository.getStudentEnrollmentInSemester(
+                    studentId,
+                    semesterId,
+                    tx
+                  );
+
+                  if (!existingEnrollment) {
+                    await AcademicRepository.createEnrollment(
+                      {
+                        id: st.enrollment_id || generateUuid(),
+                        student_id: studentId,
+                        semester_id: semesterId,
+                        program_id: programId,
+                        year_level: st.year,
+                        section: st.section,
+                        year_level_id: yl?.id || null,
+                        section_id: sec?.id || null,
+                        enrollment_status: 'ENROLLED' as const,
+                        first_name_snapshot: st.first_name,
+                        middle_name_snapshot: st.middle_name || null,
+                        last_name_snapshot: st.last_name,
+                        updated_at: now,
+                      },
+                      tx
+                    );
+                  }
+
+                  const rowNum = st.row_number || idx + 1;
+                  await ImportsRepository.recordRow(
+                    {
+                      id: 'row_' + generateUuid().substring(0, 8),
+                      batch_id: batchId,
+                      row_number: rowNum,
+                      raw_json: JSON.stringify(st),
+                      result: st.is_existing ? 'UPDATED' : 'IMPORTED',
+                      student_id: studentId,
+                    },
+                    tx
+                  );
+                }
+              }
+
+              const finalStatus = rejectedCount === 0 ? 'COMPLETED' : importedCount > 0 ? 'PARTIAL' : 'FAILED';
+              await ImportsRepository.updateBatchSummary(
+                batchId,
+                finalStatus,
+                parseResult.totalRows,
+                importedCount,
+                rejectedCount,
+                tx
+              );
+            });
+          } catch (mirrorErr) {
+            console.error('[CsvImportService] Error mirroring server batch to local SQLite:', mirrorErr);
+          }
 
           return { batchId, importedCount, rejectedCount, serverSynced: true };
         }
@@ -466,7 +442,7 @@ export class CsvImportService {
             const studentId = generateUuid();
             const newStudent = {
               id: studentId,
-              school_id: d.school_id,
+              school_id: normalizeSchoolId(d.school_id),
               first_name: d.first_name,
               middle_name: d.middle_name || null,
               last_name: d.lastname,
