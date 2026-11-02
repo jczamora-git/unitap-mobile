@@ -150,8 +150,8 @@ export class FinanceRepository {
           obligation.due_date || null,
           validActorId,
           obligation.batch_id || null,
-          obligation.issued_at,
-          obligation.updated_at,
+          obligation.issued_at || new Date().toISOString(),
+          obligation.updated_at || obligation.issued_at || new Date().toISOString(),
         ]
       );
 

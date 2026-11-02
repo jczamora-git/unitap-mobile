@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted } from 'vue';
+import { ref, computed, onMounted } from 'vue';
 import { useRouter } from 'vue-router';
 import {
   IonPage,
@@ -8,6 +8,9 @@ import {
   IonSpinner,
   onIonViewWillEnter
 } from '@ionic/vue';
+import { authService } from '@/services/auth.service';
+import { SupabaseAuthService } from '@/integrations/supabase/auth.service';
+import StudentEventsView from '@/components/student/StudentEventsView.vue';
 import {
   addOutline,
   calendarOutline,
@@ -28,6 +31,12 @@ import {
 } from '@/components/ui';
 
 const router = useRouter();
+
+const isStudent = computed(() => {
+  const role = authService.role.value || SupabaseAuthService.role.value;
+  return role === 'STUDENT';
+});
+
 const events = ref<Event[]>([]);
 const occurrencesByEvent = ref<Record<string, EventOccurrence[]>>({});
 const filterSegment = ref<'ALL' | 'ACTIVE' | 'COMPLETED'>('ALL');
@@ -39,6 +48,10 @@ function onEventClick(id: string) {
 }
 
 async function loadEvents() {
+  if (isStudent.value) {
+    isLoading.value = false;
+    return;
+  }
   isLoading.value = true;
   try {
     const list = await eventService.getEvents();
@@ -83,11 +96,16 @@ function filteredEvents() {
 
 <template>
   <ion-page>
-    <UniPageHeader
-      title="Events"
-      subtitle="Manage CSG activities"
-      variant="root"
-    >
+    <!-- 1. STUDENT ATTENDANCE MONITORING VIEW -->
+    <StudentEventsView v-if="isStudent" />
+
+    <!-- 2. OFFICER EVENTS MANAGEMENT WORKSPACE -->
+    <template v-else>
+      <UniPageHeader
+        title="Events"
+        subtitle="Manage CSG activities"
+        variant="root"
+      >
       <template #trailing>
         <UniButton
           size="sm"
@@ -181,6 +199,7 @@ function filteredEvents() {
         />
       </div>
     </ion-content>
+    </template>
   </ion-page>
 </template>
 

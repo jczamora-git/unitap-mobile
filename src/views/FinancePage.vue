@@ -23,6 +23,9 @@ import {
 
 import { financeService } from '@/services/finance.service';
 import { AcademicRepository } from '@/database/repositories/academic.repository';
+import { authService } from '@/services/auth.service';
+import { SupabaseAuthService } from '@/integrations/supabase/auth.service';
+import StudentFinanceView from '@/components/student/StudentFinanceView.vue';
 import type { Semester } from '@/types/database';
 import type {
   FinanceSummary,
@@ -52,6 +55,11 @@ import {
 import { haptics } from '@/utilities/haptics';
 
 const router = useRouter();
+
+const isStudent = computed(() => {
+  const role = authService.role.value || SupabaseAuthService.role.value;
+  return role === 'STUDENT';
+});
 
 const activeTab = ref<'OVERVIEW' | 'FINES' | 'CONTRIBUTIONS' | 'PAYMENTS'>('OVERVIEW');
 const tabRefs = ref<Record<string, HTMLElement | null>>({});
@@ -228,6 +236,10 @@ watch([filterStatus, searchQuery, selectedSemesterId], () => {
 
 
 async function loadFinanceData() {
+  if (isStudent.value) {
+    isLoading.value = false;
+    return;
+  }
   isLoading.value = true;
   try {
     const activeSem = await AcademicRepository.getActiveSemester();
@@ -337,11 +349,16 @@ onIonViewWillEnter(loadFinanceData);
 
 <template>
   <ion-page>
-    <UniPageHeader
-      title="Finance"
-      subtitle="Fines, contributions & payment records"
-      variant="root"
-    />
+    <!-- 1. STUDENT PERSONAL FINANCE & RECEIPTS VIEW -->
+    <StudentFinanceView v-if="isStudent" />
+
+    <!-- 2. OFFICER TREASURY & COLLECTIONS WORKSPACE -->
+    <template v-else>
+      <UniPageHeader
+        title="Finance"
+        subtitle="Fines, contributions & payment records"
+        variant="root"
+      />
 
     <ion-content class="safe-content">
       <div class="page-container">
@@ -958,6 +975,7 @@ onIonViewWillEnter(loadFinanceData);
         </div>
       </UniSheet>
     </ion-content>
+    </template>
   </ion-page>
 </template>
 

@@ -267,7 +267,7 @@ export class SchemaMapperService {
       case 'students':
         return {
           id: String(raw.id),
-          school_id: String(raw.school_id),
+          school_id: String(raw.school_id || raw.student_id_number || ''),
           first_name: String(raw.first_name),
           middle_name: raw.middle_name ? String(raw.middle_name) : null,
           last_name: String(raw.last_name),

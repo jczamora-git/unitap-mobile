@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted } from 'vue';
+import { ref, computed, onMounted } from 'vue';
 import { useRouter } from 'vue-router';
 import {
   IonPage,
@@ -7,6 +7,9 @@ import {
   IonIcon,
   onIonViewWillEnter
 } from '@ionic/vue';
+import { authService } from '@/services/auth.service';
+import { SupabaseAuthService } from '@/integrations/supabase/auth.service';
+import StudentHomeView from '@/components/student/StudentHomeView.vue';
 import {
   peopleOutline,
   calendarOutline,
@@ -33,6 +36,11 @@ import { haptics } from '@/utilities/haptics';
 import { UniPageHeader, UniStatCard, UniButton } from '@/components/ui';
 
 const router = useRouter();
+
+const isStudent = computed(() => {
+  const role = authService.role.value || SupabaseAuthService.role.value;
+  return role === 'STUDENT';
+});
 
 function navigateWithHaptic(path: string) {
   haptics.light();
@@ -61,6 +69,10 @@ const recentActivity = ref<AttendanceScanLog[]>([]);
 const isLoading = ref(true);
 
 async function loadDashboardData() {
+  if (isStudent.value) {
+    isLoading.value = false;
+    return;
+  }
   isLoading.value = true;
   try {
     // 1. Students
@@ -105,11 +117,16 @@ onIonViewWillEnter(loadDashboardData);
 
 <template>
   <ion-page>
-    <UniPageHeader
-      title="UniTap"
-      subtitle="CSG operations & attendance"
-      variant="root"
-    >
+    <!-- 1. STUDENT PORTAL DASHBOARD (MONITORING ONLY) -->
+    <StudentHomeView v-if="isStudent" />
+
+    <!-- 2. OFFICER / DEVADMIN WORKSPACE -->
+    <template v-else>
+      <UniPageHeader
+        title="UniTap"
+        subtitle="CSG operations & attendance"
+        variant="root"
+      >
       <template #trailing>
         <button 
           class="uni-header-action-btn" 
@@ -319,6 +336,7 @@ onIonViewWillEnter(loadDashboardData);
         </section>
       </div>
     </ion-content>
+    </template>
   </ion-page>
 </template>
 

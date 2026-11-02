@@ -628,16 +628,23 @@ describe('UniTap 2.0 Lossless Multi-Table Pull Pagination (Task 3)', { timeout: 
 
     // Simulate database error during page 2 execution
     const originalUpsert = SchemaMapperService.upsertBatchSafe;
+    const originalSafeUpsert = SchemaMapperService.safeUpsertRecord;
     SchemaMapperService.upsertBatchSafe = async () => {
       throw new Error('Simulated SQLite disk write failure on page 2');
     };
+    SchemaMapperService.safeUpsertRecord = async () => {
+      throw new Error('Simulated SQLite disk write failure on page 2');
+    };
 
-    await expect(PullSyncService.syncEntity(db, 'students')).rejects.toThrow(
-      'Simulated SQLite disk write failure on page 2'
-    );
-
-    // Restore mapper
-    SchemaMapperService.upsertBatchSafe = originalUpsert;
+    try {
+      await expect(PullSyncService.syncEntity(db, 'students')).rejects.toThrow(
+        'Simulated SQLite disk write failure on page 2'
+      );
+    } finally {
+      // Restore mappers
+      SchemaMapperService.upsertBatchSafe = originalUpsert;
+      SchemaMapperService.safeUpsertRecord = originalSafeUpsert;
+    }
 
     // Verify Bob was rolled back (does NOT exist in SQLite)
     const bob = await db.queryOne<{ first_name: string }>(

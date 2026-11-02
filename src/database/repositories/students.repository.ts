@@ -34,9 +34,9 @@ export class StudentsRepository {
         student.last_name,
         student.photo_local_uri || null,
         student.photo_content_hash || null,
-        student.status,
-        student.created_at,
-        student.updated_at,
+        student.status || 'ACTIVE',
+        student.created_at || new Date().toISOString(),
+        student.updated_at || new Date().toISOString(),
       ]
     );
   }

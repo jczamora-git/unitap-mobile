@@ -50,6 +50,11 @@ const router = useRouter();
 const { getStudentById, deleteStudent, removeRfid, currentStudent, isLoading } = useStudents();
 const { showToast, copyToClipboard } = useToast();
 
+const isStudent = computed(() => {
+  const role = authService.role.value || SupabaseAuthService.role.value;
+  return role === 'STUDENT';
+});
+
 const isEditModalOpen = ref(false);
 const isReplaceModalOpen = ref(false);
 const activeTab = ref<'OVERVIEW' | 'ATTENDANCE' | 'FINANCE'>('OVERVIEW');
@@ -87,12 +92,24 @@ const initials = computed(() => {
 
 async function loadProfile() {
   const id = route.params.id as string;
-  if (id) {
-    await getStudentById(id);
-    if (currentStudent.value) {
-      studentCharges.value = await financeService.getCharges(id);
-      studentPayments.value = await financeService.getPayments(id);
-      attendanceHistory.value = await attendanceService.getStudentAttendanceHistory(id);
+  if (!id) return;
+
+  if (isStudent.value) {
+    const authStu = authService.student.value;
+    const authUser = authService.user.value || SupabaseAuthService.user.value;
+    const myId = authStu?.id || authUser?.student_id;
+    if (myId && id !== myId) {
+      router.replace('/tabs/home');
+      return;
+    }
+  }
+
+  await getStudentById(id);
+  if (currentStudent.value) {
+    studentCharges.value = await financeService.getCharges(id);
+    studentPayments.value = await financeService.getPayments(id);
+    attendanceHistory.value = await attendanceService.getStudentAttendanceHistory(id);
+    if (!isStudent.value) {
       activationDetails.value = await StudentActivationService.getStudentActivationStatus(id);
     }
   }
@@ -298,8 +315,8 @@ async function handleDeleteStudent() {
                 </div>
               </div>
 
-              <!-- Actions Row -->
-              <div class="card-actions-row">
+              <!-- Actions Row (Officer only) -->
+              <div class="card-actions-row" v-if="!isStudent">
                 <button 
                   class="action-subtle-btn"
                   @click="isReplaceModalOpen = true"
@@ -336,7 +353,7 @@ async function handleDeleteStudent() {
             <div class="minimal-card overview-card">
               <div class="card-head-row">
                 <span class="card-title-text">Student Information</span>
-                <button class="edit-link-btn" @click="router.push(`/students/${currentStudent.id}/edit`)">
+                <button v-if="!isStudent" class="edit-link-btn" @click="router.push(`/students/${currentStudent.id}/edit`)">
                   <ion-icon :icon="createOutline" /> Edit
                 </button>
               </div>
@@ -365,8 +382,8 @@ async function handleDeleteStudent() {
               </div>
             </div>
 
-            <!-- Account & Activation Status Card -->
-            <div class="minimal-card overview-card activation-card">
+            <!-- Account & Activation Status Card (Officer only) -->
+            <div class="minimal-card overview-card activation-card" v-if="!isStudent">
               <div class="card-head-row">
                 <div class="activation-title-wrap">
                   <ion-icon :icon="keyOutline" class="text-primary text-base" />
@@ -564,7 +581,7 @@ async function handleDeleteStudent() {
                   <span class="card-title-text">Outstanding Balance</span>
                 </div>
                 <button 
-                  v-if="totalBalanceCentavos > 0"
+                  v-if="!isStudent && totalBalanceCentavos > 0"
                   class="action-subtle-btn"
                   @click="router.push({ path: '/finance/pay', query: { studentId: currentStudent.id } })"
                 >
@@ -585,6 +602,7 @@ async function handleDeleteStudent() {
               <div class="card-head-row">
                 <span class="card-title-text">Fee Obligations</span>
                 <button 
+                  v-if="!isStudent"
                   class="edit-link-btn"
                   @click="router.push({ path: '/finance/charges/create', query: { studentId: currentStudent.id } })"
                 >

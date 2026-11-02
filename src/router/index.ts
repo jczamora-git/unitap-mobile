@@ -37,6 +37,11 @@ const routes: Array<RouteRecordRaw> = [
         component: () => import('@/views/StudentsPage.vue')
       },
       {
+        path: 'pass',
+        name: 'StudentPass',
+        component: () => import('@/views/StudentPassPage.vue')
+      },
+      {
         path: 'finance',
         name: 'Finance',
         component: () => import('@/views/FinancePage.vue')
@@ -250,6 +255,31 @@ router.beforeEach(async (to, _from) => {
     const role = SupabaseAuthService.role.value || authService.role.value;
     if (role !== 'DEVADMIN') {
       return '/tabs/home';
+    }
+  } else {
+    const role = SupabaseAuthService.role.value || authService.role.value;
+    if (role === 'STUDENT') {
+      const officerOnlyPrefixes = [
+        '/tabs/scan',
+        '/tabs/students',
+        '/events/create',
+        '/register-student',
+        '/students/import',
+        '/finance/pay',
+        '/finance/absentees',
+        '/finance/contributions',
+        '/finance/charges',
+        '/finance/reports',
+        '/academic'
+      ];
+      const p = to.path;
+      if (
+        officerOnlyPrefixes.some((prefix) => p === prefix || p.startsWith(prefix + '/')) ||
+        p.includes('/attendance/') ||
+        p.endsWith('/edit')
+      ) {
+        return '/tabs/home';
+      }
     }
   }
   return true;

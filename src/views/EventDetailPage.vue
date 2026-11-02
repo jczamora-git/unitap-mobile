@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted } from 'vue';
+import { ref, computed, onMounted } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import {
   IonPage,
@@ -15,8 +15,13 @@ import {
   lockClosedOutline,
   radioOutline,
   addOutline,
-  createOutline
+  createOutline,
+  checkmarkCircle,
+  closeCircleOutline
 } from 'ionicons/icons';
+import { authService } from '@/services/auth.service';
+import { SupabaseAuthService } from '@/integrations/supabase/auth.service';
+import { AttendanceRepository } from '@/database/repositories/attendance.repository';
 import { eventService } from '@/services/event.service';
 import { studentService } from '@/services/student.service';
 import type { Event, EventOccurrence, OccurrenceParticipant, AttendanceStatus } from '@/types/event';
@@ -45,6 +50,13 @@ const statusOptions = [
 const route = useRoute();
 const router = useRouter();
 const eventId = route.params.id as string;
+
+const isStudent = computed(() => {
+  const role = authService.role.value || SupabaseAuthService.role.value;
+  return role === 'STUDENT';
+});
+
+const studentAttendanceMap = ref<Record<string, { status: string; checkedInAt?: string }>>({});
 
 const event = ref<Event | null>(null);
 const occurrences = ref<EventOccurrence[]>([]);
@@ -82,6 +94,25 @@ async function loadData() {
 
   const occs = await eventService.getOccurrences(eventId);
   occurrences.value = occs;
+
+  if (isStudent.value) {
+    const authStu = authService.student.value;
+    const authUser = authService.user.value || SupabaseAuthService.user.value;
+    let currentStudentId = authStu?.id || authUser?.student_id;
+    if (!currentStudentId && authUser?.username) {
+      const match = await studentService.findStudentByStudentNumber(authUser.username);
+      currentStudentId = match?.id;
+    }
+    if (currentStudentId) {
+      const history = await AttendanceRepository.getStudentAttendanceHistory(currentStudentId);
+      const map: Record<string, { status: string; checkedInAt?: string }> = {};
+      for (const h of history) {
+        map[h.occurrence_id] = { status: h.status, checkedInAt: h.checked_in_at || undefined };
+      }
+      studentAttendanceMap.value = map;
+    }
+    return;
+  }
 
   const studentsList = await studentService.getStudents();
   const sMap: Record<string, Student> = {};
@@ -175,7 +206,7 @@ async function handleAddSession() {
       default-back-href="/tabs/events"
       variant="detail"
     >
-      <template #trailing>
+      <template #trailing v-if="!isStudent">
         <div class="header-trailing-actions">
           <UniButton
             v-if="event"
@@ -242,69 +273,95 @@ async function handleAddSession() {
                 </span>
               </div>
 
-              <!-- Stats Bar -->
-              <div v-if="statsMap[occ.id]" class="stats-counter-grid">
-                <div class="stat-mini-box">
-                  <span class="num text-success tabular-nums font-mono">{{ statsMap[occ.id].presentCount }}</span>
-                  <span class="lbl">Present</span>
+              <!-- STUDENT VIEW: Personal Attendance Record -->
+              <div v-if="isStudent" class="student-session-status-box">
+                <div v-if="studentAttendanceMap[occ.id]" class="status-confirmed">
+                  <ion-icon :icon="checkmarkCircle" class="text-mint" />
+                  <span class="status-text">Your Status: <strong>{{ studentAttendanceMap[occ.id].status }}</strong></span>
+                  <span v-if="studentAttendanceMap[occ.id].checkedInAt" class="checkin-time-text font-mono">
+                    (Checked in at {{ formatTime(studentAttendanceMap[occ.id].checkedInAt!) }})
+                  </span>
                 </div>
-                <div class="stat-mini-box">
-                  <span class="num text-warning tabular-nums font-mono">{{ statsMap[occ.id].lateCount }}</span>
-                  <span class="lbl">Late</span>
+                <div v-else-if="occ.status === 'OPEN'" class="status-live-open">
+                  <span class="pulse-dot"></span>
+                  <span>Attendance Session is OPEN. Approach a CSG officer to tap your card.</span>
                 </div>
-                <div class="stat-mini-box">
-                  <span class="num tabular-nums font-mono">{{ statsMap[occ.id].pendingCount }}</span>
-                  <span class="lbl">Pending</span>
+                <div v-else-if="occ.status === 'SCHEDULED'" class="status-scheduled">
+                  <ion-icon :icon="calendarOutline" />
+                  <span>Session is Scheduled. Tapping will begin when the session opens.</span>
                 </div>
-                <div class="stat-mini-box">
-                  <span class="num text-danger tabular-nums font-mono">{{ statsMap[occ.id].absentCount }}</span>
-                  <span class="lbl">Absent</span>
-                </div>
-                <div class="stat-mini-box">
-                  <span class="num tabular-nums font-mono">{{ statsMap[occ.id].expectedCount }}</span>
-                  <span class="lbl">Expected</span>
+                <div v-else class="status-closed">
+                  <ion-icon :icon="closeCircleOutline" class="text-danger" />
+                  <span>Session Closed. No attendance was recorded for your account.</span>
                 </div>
               </div>
 
-              <!-- Actions Row -->
-              <div class="occ-actions-row">
-                <!-- SCHEDULED: Open Session -->
-                <button 
-                  v-if="occ.status === 'SCHEDULED'" 
-                  class="action-btn btn-primary"
-                  @click="handleOpenOccurrence(occ)"
-                >
-                  <ion-icon :icon="radioOutline" />
-                  <span>Open Session</span>
-                </button>
+              <!-- OFFICER VIEW: Stats Bar & Actions Row -->
+              <template v-else>
+                <!-- Stats Bar -->
+                <div v-if="statsMap[occ.id]" class="stats-counter-grid">
+                  <div class="stat-mini-box">
+                    <span class="num text-success tabular-nums font-mono">{{ statsMap[occ.id].presentCount }}</span>
+                    <span class="lbl">Present</span>
+                  </div>
+                  <div class="stat-mini-box">
+                    <span class="num text-warning tabular-nums font-mono">{{ statsMap[occ.id].lateCount }}</span>
+                    <span class="lbl">Late</span>
+                  </div>
+                  <div class="stat-mini-box">
+                    <span class="num tabular-nums font-mono">{{ statsMap[occ.id].pendingCount }}</span>
+                    <span class="lbl">Pending</span>
+                  </div>
+                  <div class="stat-mini-box">
+                    <span class="num text-danger tabular-nums font-mono">{{ statsMap[occ.id].absentCount }}</span>
+                    <span class="lbl">Absent</span>
+                  </div>
+                  <div class="stat-mini-box">
+                    <span class="num tabular-nums font-mono">{{ statsMap[occ.id].expectedCount }}</span>
+                    <span class="lbl">Expected</span>
+                  </div>
+                </div>
 
-                <!-- OPEN: Scan NFC & Close Session -->
-                <template v-if="occ.status === 'OPEN'">
+                <!-- Actions Row -->
+                <div class="occ-actions-row">
+                  <!-- SCHEDULED: Open Session -->
                   <button 
+                    v-if="occ.status === 'SCHEDULED'" 
                     class="action-btn btn-primary"
-                    @click="router.push(`/events/attendance/${occ.id}`)"
+                    @click="handleOpenOccurrence(occ)"
                   >
-                    <ion-icon :icon="scanOutline" />
-                    <span>Scan NFC</span>
+                    <ion-icon :icon="radioOutline" />
+                    <span>Open Session</span>
                   </button>
-                  <button 
-                    class="action-btn btn-danger-outline"
-                    @click="confirmCloseOccurrence(occ)"
-                  >
-                    <ion-icon :icon="lockClosedOutline" />
-                    <span>Close Session</span>
-                  </button>
-                </template>
 
-                <!-- CLOSED / View Roster -->
-                <button 
-                  class="action-btn btn-subtle"
-                  @click="viewRoster(occ)"
-                >
-                  <ion-icon :icon="peopleOutline" />
-                  <span>Roster</span>
-                </button>
-              </div>
+                  <!-- OPEN: Scan NFC & Close Session -->
+                  <template v-if="occ.status === 'OPEN'">
+                    <button 
+                      class="action-btn btn-primary"
+                      @click="router.push(`/events/attendance/${occ.id}`)"
+                    >
+                      <ion-icon :icon="scanOutline" />
+                      <span>Scan NFC</span>
+                    </button>
+                    <button 
+                      class="action-btn btn-danger-outline"
+                      @click="confirmCloseOccurrence(occ)"
+                    >
+                      <ion-icon :icon="lockClosedOutline" />
+                      <span>Close Session</span>
+                    </button>
+                  </template>
+
+                  <!-- CLOSED / View Roster -->
+                  <button 
+                    class="action-btn btn-subtle"
+                    @click="viewRoster(occ)"
+                  >
+                    <ion-icon :icon="peopleOutline" />
+                    <span>Roster</span>
+                  </button>
+                </div>
+              </template>
             </div>
           </div>
         </section>
@@ -449,6 +506,59 @@ async function handleAddSession() {
 </template>
 
 <style scoped>
+.student-session-status-box {
+  padding: 10px 14px;
+  background: rgba(255, 255, 255, 0.03);
+  border-radius: 12px;
+  font-size: 12.5px;
+  margin-top: 4px;
+}
+
+.status-confirmed {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--app-text-primary, #f5f6f7);
+}
+
+.text-mint {
+  color: var(--aurora-mint, #70f3cf);
+  font-size: 16px;
+}
+
+.text-danger {
+  color: #ef4444;
+  font-size: 16px;
+}
+
+.checkin-time-text {
+  font-size: 11px;
+  color: var(--aurora-mint, #70f3cf);
+}
+
+.status-live-open {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--aurora-mint, #70f3cf);
+  font-weight: 600;
+}
+
+.pulse-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--aurora-mint, #70f3cf);
+  box-shadow: 0 0 8px var(--aurora-mint, #70f3cf);
+}
+
+.status-scheduled,
+.status-closed {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--app-text-secondary, #949ba6);
+}
 .add-session-btn {
   display: inline-flex;
   align-items: center;

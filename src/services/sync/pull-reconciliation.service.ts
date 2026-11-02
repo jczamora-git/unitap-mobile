@@ -103,7 +103,7 @@ export class PullReconciliationService {
         operations.push({
           id: opId,
           remoteId: String(remote?.id || 'unknown'),
-          schoolId: String(remote?.school_id || 'UNKNOWN'),
+          schoolId: String(remote?.school_id || remote?.student_id_number || 'UNKNOWN'),
           canonicalSchoolId: '',
           studentName: 'Invalid Record',
           localState: 'Missing',
@@ -120,7 +120,7 @@ export class PullReconciliationService {
       }
 
       const remoteId = String(remote.id);
-      const rawSchoolId = String(remote.school_id || '');
+      const rawSchoolId = String(remote.school_id || remote.student_id_number || '');
       const canonicalSchoolId = normalizeSchoolId(rawSchoolId);
       const studentName = `${remote.first_name || ''} ${remote.last_name || ''}`.trim() || 'Unnamed Student';
 
