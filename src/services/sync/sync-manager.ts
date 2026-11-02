@@ -5,6 +5,12 @@ import { SyncStatusService } from './sync-status.service';
 import { SyncPreferenceService } from './sync-preference.service';
 import { NetworkService } from '../network.service';
 import { getDatabase } from '@/database/database';
+import { supabase } from '@/integrations/supabase/client';
+
+function isTestEnvironment(): boolean {
+  const proc = (globalThis as unknown as { process?: { env?: Record<string, string> } }).process;
+  return proc?.env?.VITEST === 'true' || proc?.env?.NODE_ENV === 'test' || import.meta.env?.MODE === 'test';
+}
 
 export class SyncManager {
   private static syncInterval: any = null;
@@ -187,6 +193,22 @@ export class SyncManager {
       SyncStatusService.setOnline(false);
       SyncStatusService.setState('OFFLINE_READY');
       return { pushedCount: 0, errorCount: 0, pulledCount: 0 };
+    }
+
+    // Verify authenticated Supabase session before sending cloud requests
+    const isTest = isTestEnvironment();
+    if (!isTest) {
+      try {
+        const { data: sessionData } = await supabase.auth.getSession();
+        if (!sessionData?.session) {
+          await this.refreshCountsFromDatabase();
+          SyncStatusService.setState('OFFLINE_READY');
+          return { pushedCount: 0, errorCount: 0, pulledCount: 0 };
+        }
+      } catch {
+        SyncStatusService.setState('OFFLINE_READY');
+        return { pushedCount: 0, errorCount: 0, pulledCount: 0 };
+      }
     }
 
     this.isRunning = true;

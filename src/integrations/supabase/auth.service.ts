@@ -94,30 +94,64 @@ export class SupabaseAuthService {
 
   /**
    * Asynchronously verifies role validity with Supabase in the background.
-   * If an administrator revoked user's role on the cloud database, revokes local
-   * permissions and clears cached offline session.
+   * If an administrator explicitly revoked all of user's roles on the cloud database,
+   * or marked the account DISABLED, revokes local permissions and clears cached offline session.
+   * Never forces logout for local accounts, unauthenticated sessions, or transient/RLS empty results.
    */
   public static async revalidateSessionOnline(userId: string, email: string): Promise<void> {
     try {
+      // 1. If user ID is not a valid UUID (e.g. local SQLite 'usr_devadmin'), do not check Supabase user_roles
+      const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(userId);
+      if (!isUuid) {
+        return;
+      }
+
+      // 2. Check if there is an active Supabase Auth session
+      const { data: sessionData } = await supabase.auth.getSession();
+      if (!sessionData?.session) {
+        // Not authenticated with Supabase Auth (e.g. local offline session) — preserve offline session!
+        return;
+      }
+
+      // 3. Query remote account status
+      const { data: remoteUser } = await supabase
+        .from('users')
+        .select('account_status')
+        .eq('id', userId)
+        .maybeSingle();
+
+      if (remoteUser && remoteUser.account_status === 'DISABLED') {
+        console.warn('[SupabaseAuth] Account has been disabled by administrator:', userId);
+        await this.logout();
+        return;
+      }
+
+      // 4. Check remote user roles
       const { data: remoteRoles, error } = await supabase
         .from('user_roles')
         .select('id, role, semester_id, assigned_at, revoked_at')
-        .eq('user_id', userId)
-        .is('revoked_at', null);
+        .eq('user_id', userId);
 
       if (error) {
         console.warn('[SupabaseAuth] Role revalidation error:', error.message);
         return;
       }
 
-      if (!remoteRoles || remoteRoles.length === 0) {
-        console.warn('[SupabaseAuth] Server indicates active roles were revoked for user:', userId);
-        const { getDatabase } = await import('@/database/database');
-        const db = await getDatabase();
-        const now = new Date().toISOString();
-        await db.execute('UPDATE user_roles SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL', [now, userId]);
-        await this.logout();
-        return;
+      // Only force logout if the server explicitly has role records for this user AND ALL of them are revoked
+      if (remoteRoles && remoteRoles.length > 0) {
+        const hasActiveRole = remoteRoles.some((r: { revoked_at: string | null }) => !r.revoked_at);
+        if (!hasActiveRole) {
+          console.warn('[SupabaseAuth] Server indicates all active roles were revoked for user:', userId);
+          const { getDatabase } = await import('@/database/database');
+          const db = await getDatabase();
+          const now = new Date().toISOString();
+          await db.execute(
+            'UPDATE user_roles SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL',
+            [now, userId]
+          );
+          await this.logout();
+          return;
+        }
       }
 
       // Refresh cached offline session expiry
