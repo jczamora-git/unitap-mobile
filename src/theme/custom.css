@@ -72,6 +72,17 @@ ion-content.register-content::part(scroll) {
   }
 }
 
+/* Non-tab detail and standalone pages without floating bottom dock */
+.non-tab-content,
+.detail-content {
+  --padding-bottom: calc(24px + var(--ion-safe-area-bottom, 0px)) !important;
+}
+
+/* Prevent runaway scroll overshooting */
+ion-content::part(scroll) {
+  overscroll-behavior-y: contain;
+}
+
 .page-container,
 .uni-page-container {
   width: 100%;

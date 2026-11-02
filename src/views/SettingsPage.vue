@@ -334,10 +334,12 @@ async function handleConfirmSignOut() {
   showSignOutAlert.value = false;
   haptics.medium();
   try {
+    await SupabaseAuthService.logout();
     await authService.logout();
-    router.replace('/login');
   } catch (err) {
     console.error('Sign out error:', err);
+  } finally {
+    router.replace('/login');
   }
 }
 
@@ -385,7 +387,7 @@ function toggleNotifications() {
       variant="detail"
     />
 
-    <ion-content class="safe-content">
+    <ion-content class="safe-content non-tab-content">
       <div class="page-container">
         <!-- Status Notification -->
         <div v-if="statusMessage" class="status-banner">
@@ -946,7 +948,7 @@ function toggleNotifications() {
 
 <style scoped>
 .page-container {
-  padding: 4px 0 calc(96px + var(--ion-safe-area-bottom, 0px)) 0;
+  padding: 4px 0 16px 0;
   max-width: 580px;
   margin: 0 auto;
   display: flex;

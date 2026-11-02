@@ -254,7 +254,7 @@ onIonViewDidLeave(() => {
       variant="detail"
     />
 
-    <ion-content class="safe-content">
+    <ion-content class="safe-content non-tab-content">
       <div class="page-container">
         <!-- Error Alert -->
         <div v-if="errorMessage" class="error-banner">
@@ -453,7 +453,7 @@ onIonViewDidLeave(() => {
 
 <style scoped>
 .page-container {
-  padding: 4px 0 calc(96px + var(--ion-safe-area-bottom, 0px)) 0;
+  padding: 4px 0 16px 0;
   max-width: 680px;
   margin: 0 auto;
   display: flex;

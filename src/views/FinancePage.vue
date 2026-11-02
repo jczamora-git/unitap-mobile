@@ -963,7 +963,7 @@ onIonViewWillEnter(loadFinanceData);
 
 <style scoped>
 .page-container {
-  padding: 4px 0 calc(96px + var(--ion-safe-area-bottom, 0px)) 0;
+  padding: 4px 0 16px 0;
   max-width: 720px;
   margin: 0 auto;
   display: flex;

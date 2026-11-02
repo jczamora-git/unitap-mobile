@@ -242,6 +242,13 @@ class AuthService {
     await Preferences.remove({ key: SESSION_STORAGE_KEY });
 
     try {
+      const { AuthSessionService } = await import('@/integrations/supabase/auth-session.service');
+      await AuthSessionService.clearOfflineSession();
+    } catch {
+      // Ignored
+    }
+
+    try {
       const { SyncManager } = await import('@/services/sync/sync-manager');
       SyncManager.stop();
     } catch {

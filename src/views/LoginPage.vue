@@ -108,7 +108,9 @@
 <script setup lang="ts">
 import { ref, onMounted } from 'vue';
 import { useRouter } from 'vue-router';
-import { IonPage, IonContent, IonIcon, IonSpinner } from '@ionic/vue';
+import { IonPage, IonContent, IonIcon, IonSpinner, onIonViewDidEnter, onIonViewWillLeave } from '@ionic/vue';
+import { StatusBar, Style } from '@capacitor/status-bar';
+import { Capacitor } from '@capacitor/core';
 import {
   cardOutline,
   mailOutline,
@@ -136,6 +138,23 @@ const showPassword = ref(false);
 
 onMounted(async () => {
   await LegacyMigrationService.runMigrationIfNeeded();
+});
+
+onIonViewDidEnter(async () => {
+  if (Capacitor.isNativePlatform()) {
+    try {
+      await StatusBar.setStyle({ style: Style.Light });
+    } catch (_) {}
+  }
+});
+
+onIonViewWillLeave(async () => {
+  if (Capacitor.isNativePlatform()) {
+    try {
+      const isDark = document.documentElement.classList.contains('dark') || document.documentElement.classList.contains('ion-palette-dark');
+      await StatusBar.setStyle({ style: isDark ? Style.Dark : Style.Light });
+    } catch (_) {}
+  }
 });
 
 async function handleSignIn() {
@@ -197,7 +216,10 @@ async function handleSignIn() {
   justify-content: space-between;
   width: 100%;
   min-height: 100%;
-  padding: 24px 28px calc(36px + var(--ion-safe-area-bottom, 0px));
+  padding-top: calc(24px + var(--ion-safe-area-top, env(safe-area-inset-top, 0px)));
+  padding-bottom: calc(36px + var(--ion-safe-area-bottom, 0px));
+  padding-left: 28px;
+  padding-right: 28px;
   max-width: 440px;
   margin: 0 auto;
   box-sizing: border-box;
@@ -206,7 +228,10 @@ async function handleSignIn() {
 
 @media (max-width: 380px) {
   .login-shell {
-    padding: 16px 20px 28px;
+    padding-top: calc(18px + var(--ion-safe-area-top, env(safe-area-inset-top, 0px)));
+    padding-bottom: calc(28px + var(--ion-safe-area-bottom, 0px));
+    padding-left: 20px;
+    padding-right: 20px;
   }
 }
 
