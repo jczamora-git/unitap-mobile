@@ -22,6 +22,12 @@ import {
   walletOutline 
 } from 'ionicons/icons';
 import { haptics } from '@/utilities/haptics';
+import { resetScrollPosition } from '@/utilities/scroll';
+
+function onTabButtonClick() {
+  haptics.light();
+  resetScrollPosition();
+}
 
 const route = useRoute();
 
@@ -46,7 +52,7 @@ const currentTab = computed(() => {
           href="/tabs/home" 
           aria-label="Home"
           :aria-current="currentTab === 'home' ? 'page' : undefined"
-          @click="haptics.light()"
+          @click="onTabButtonClick()"
         >
           <div class="dock-icon-wrap">
             <ion-icon :icon="currentTab === 'home' ? home : homeOutline" class="dock-icon" />
@@ -58,7 +64,7 @@ const currentTab = computed(() => {
           href="/tabs/events" 
           aria-label="Events"
           :aria-current="currentTab === 'events' ? 'page' : undefined"
-          @click="haptics.light()"
+          @click="onTabButtonClick()"
         >
           <div class="dock-icon-wrap">
             <ion-icon :icon="currentTab === 'events' ? calendar : calendarOutline" class="dock-icon" />
@@ -70,7 +76,7 @@ const currentTab = computed(() => {
           href="/tabs/scan" 
           aria-label="NFC Scan"
           :aria-current="currentTab === 'scan' ? 'page' : undefined"
-          @click="haptics.light()"
+          @click="onTabButtonClick()"
         >
           <div class="dock-icon-wrap">
             <ion-icon :icon="currentTab === 'scan' ? scan : scanOutline" class="dock-icon" />
@@ -82,7 +88,7 @@ const currentTab = computed(() => {
           href="/tabs/students" 
           aria-label="Students"
           :aria-current="currentTab === 'students' ? 'page' : undefined"
-          @click="haptics.light()"
+          @click="onTabButtonClick()"
         >
           <div class="dock-icon-wrap">
             <ion-icon :icon="currentTab === 'students' ? people : peopleOutline" class="dock-icon" />
@@ -94,7 +100,7 @@ const currentTab = computed(() => {
           href="/tabs/finance" 
           aria-label="Finance"
           :aria-current="currentTab === 'finance' ? 'page' : undefined"
-          @click="haptics.light()"
+          @click="onTabButtonClick()"
         >
           <div class="dock-icon-wrap">
             <ion-icon :icon="currentTab === 'finance' ? wallet : walletOutline" class="dock-icon" />

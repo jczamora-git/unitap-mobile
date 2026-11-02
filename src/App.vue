@@ -25,6 +25,7 @@ import { getDatabase } from '@/database/database';
 import { LegacyMigrationService } from '@/services/legacy-migration.service';
 import { authService } from '@/services/auth.service';
 import { themeService } from '@/services/theme.service';
+import { resetScrollPosition } from '@/utilities/scroll';
 
 const { isOnboardingOpen, checkOnboardingStatus, closeOnboardingTour } = useOnboarding();
 const { toastState } = useToast();
@@ -37,6 +38,11 @@ onMounted(async () => {
     await authService.initSession();
   } catch (err) {
     console.error('Initialization error:', err);
+  }
+  if (typeof window !== 'undefined') {
+    window.addEventListener('ionViewWillEnter', () => {
+      resetScrollPosition();
+    });
   }
   await checkOnboardingStatus();
 });

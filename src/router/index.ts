@@ -1,6 +1,7 @@
 import { createRouter, createWebHistory } from '@ionic/vue-router';
 import { RouteRecordRaw } from 'vue-router';
 import TabsPage from '@/views/TabsPage.vue';
+import { resetScrollPosition } from '@/utilities/scroll';
 
 const routes: Array<RouteRecordRaw> = [
   {
@@ -217,7 +218,16 @@ const routes: Array<RouteRecordRaw> = [
 
 const router = createRouter({
   history: createWebHistory(import.meta.env.BASE_URL),
-  routes
+  routes,
+  scrollBehavior() {
+    return { top: 0, left: 0 };
+  }
+});
+
+router.afterEach((to, from) => {
+  if (to.fullPath !== from.fullPath) {
+    resetScrollPosition();
+  }
 });
 
 // UniTap 2.0 Auth Navigation Guard

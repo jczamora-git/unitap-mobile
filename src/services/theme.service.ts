@@ -167,13 +167,11 @@ export class ThemeService {
   private async updateNativeStatusBar(isDark: boolean): Promise<void> {
     if (!Capacitor.isNativePlatform()) return;
     try {
-      await StatusBar.setOverlaysWebView({ overlay: false });
+      await StatusBar.setOverlaysWebView({ overlay: true });
       if (isDark) {
         await StatusBar.setStyle({ style: Style.Dark });
-        await StatusBar.setBackgroundColor({ color: '#0F1117' });
       } else {
         await StatusBar.setStyle({ style: Style.Light });
-        await StatusBar.setBackgroundColor({ color: '#F8FAFC' });
       }
     } catch (err) {
       console.warn('[ThemeService] Native StatusBar update error:', err);

@@ -89,7 +89,7 @@ function handleBack() {
 .uni-header {
   width: 100%;
   background: var(--uni-bg);
-  padding-top: calc(8px + var(--ion-safe-area-top, 0px));
+  padding-top: calc(8px + var(--ion-safe-area-top, env(safe-area-inset-top, 0px)));
   padding-bottom: 8px;
   padding-left: 16px;
   padding-right: 16px;
@@ -199,7 +199,7 @@ function handleBack() {
   .uni-header {
     padding-left: 12px;
     padding-right: 12px;
-    padding-top: calc(6px + var(--ion-safe-area-top, 0px));
+    padding-top: calc(6px + var(--ion-safe-area-top, env(safe-area-inset-top, 0px)));
     padding-bottom: 6px;
   }
 
