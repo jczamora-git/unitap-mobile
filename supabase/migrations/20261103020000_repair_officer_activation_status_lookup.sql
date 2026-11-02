@@ -87,9 +87,9 @@ BEGIN
     jsonb_build_object(
       'id', a.id,
       'action', a.action,
-      'performed_at', a.performed_at,
+      'performed_at', a.created_at,
       'notes', a.notes
-    ) ORDER BY a.performed_at DESC
+    ) ORDER BY a.created_at DESC
   ), '[]'::jsonb)
   INTO v_audit
   FROM public.activation_claims_audit a

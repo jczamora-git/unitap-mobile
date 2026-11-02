@@ -142,6 +142,32 @@ export class StudentActivationService {
                   console.warn('[StudentActivationService] Error reconciling local student ID:', reconcileErr);
                 }
               }
+            } else if (res2.error) {
+              console.warn('[StudentActivationService] officer_get_student_activation_status RPC failed with error:', res2.error);
+            }
+          }
+
+          // Attempt 3: Fail-safe verification via public validate_activation_code probe
+          if ((!remoteData || remoteData.status === 'NOT_FOUND') && targetSchoolId) {
+            try {
+              const { data: valData } = await supabase.rpc('validate_activation_code', {
+                p_school_id: targetSchoolId,
+                p_token_hash: 'probe_check_only',
+              });
+              if (
+                valData?.error &&
+                typeof valData.error === 'string' &&
+                valData.error.toLowerCase().includes('already been activated')
+              ) {
+                remoteData = {
+                  status: 'ACTIVATED',
+                  student_id: studentId,
+                  school_id: targetSchoolId,
+                  linked_username: targetSchoolId.toLowerCase(),
+                };
+              }
+            } catch {
+              // Ignore probe fallback errors
             }
           }
         }
