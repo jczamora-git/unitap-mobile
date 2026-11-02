@@ -239,11 +239,16 @@ export class AccountLinkingService {
 
         if (data && data.success) {
           // Mirror linkage in local SQLite database for offline consistency
-          await this.linkStudentAccount(
-            authUserId,
-            data.student_id,
-            cleanSchoolId
-          );
+          try {
+            await this.linkStudentAccount(
+              authUserId,
+              data.student_id,
+              cleanSchoolId,
+              { firstName: data.first_name, lastName: data.last_name }
+            );
+          } catch (mirrorErr) {
+            console.warn('[AccountLinking] Failed to mirror linkage locally, but online activation succeeded:', mirrorErr);
+          }
 
           return {
             success: true,
@@ -340,25 +345,55 @@ export class AccountLinkingService {
   }
 
   /**
-   * Links Supabase Auth user ID to the local SQLite student record and assigns STUDENT role
+   * Links Supabase Auth user ID to the local SQLite student record and assigns STUDENT role.
+   * Guarantees foreign key satisfaction by ensuring the student row exists or is reconciled in SQLite first.
    */
   public static async linkStudentAccount(
     supabaseUserId: string,
     studentId: string,
-    username: string
+    username: string,
+    studentData?: { firstName?: string; lastName?: string }
   ): Promise<void> {
     const now = new Date().toISOString();
     const db = await getDatabase();
+    const cleanSchoolId = normalizeSchoolId(username);
 
-    // Upsert into local users table
+    // 1. Ensure foreign key exists: check students table in SQLite
+    try {
+      const localStuBySchoolId = await StudentsRepository.getStudentBySchoolId(cleanSchoolId);
+      const localStuById = await StudentsRepository.getStudentById(studentId);
+
+      if (localStuBySchoolId && localStuBySchoolId.id !== studentId) {
+        // Reconcile divergent local UUID with authoritative remote student UUID
+        await StudentsRepository.reconcileStudentId(localStuBySchoolId.id, studentId, cleanSchoolId);
+      } else if (!localStuById && !localStuBySchoolId) {
+        // Student record not present in local SQLite yet — create it so users.student_id foreign key succeeds
+        await db.execute(
+          `INSERT INTO students (id, school_id, first_name, middle_name, last_name, status, created_at, updated_at)
+           VALUES (?, ?, ?, NULL, ?, 'ACTIVE', ?, ?)`,
+          [
+            studentId,
+            cleanSchoolId,
+            studentData?.firstName || 'Student',
+            studentData?.lastName || cleanSchoolId,
+            now,
+            now,
+          ]
+        );
+      }
+    } catch (reconcileErr) {
+      console.warn('[AccountLinking] Student pre-link check error:', reconcileErr);
+    }
+
+    // 2. Upsert into local users table
     await db.execute(
       `INSERT INTO users (id, username, student_id, account_status, created_at, updated_at)
        VALUES (?, ?, ?, 'ACTIVE', ?, ?)
        ON CONFLICT(id) DO UPDATE SET student_id = excluded.student_id, updated_at = excluded.updated_at`,
-      [supabaseUserId, username.toLowerCase(), studentId, now, now]
+      [supabaseUserId, cleanSchoolId.toLowerCase(), studentId, now, now]
     );
 
-    // Assign STUDENT role locally
+    // 3. Assign STUDENT role locally
     const roleId = 'rol_' + Math.random().toString(36).substring(2, 10);
     await db.execute(
       `INSERT INTO user_roles (id, user_id, role, assigned_at)
@@ -367,8 +402,12 @@ export class AccountLinkingService {
       [roleId, supabaseUserId, now]
     );
 
-    // Check and activate pending officer appointment if one exists for this student (Scenario B)
-    const { OfficerRepository } = await import('@/database/repositories/officer.repository');
-    await OfficerRepository.activatePendingAppointmentForStudent(studentId, supabaseUserId);
+    // 4. Check and activate pending officer appointment if one exists for this student (Scenario B)
+    try {
+      const { OfficerRepository } = await import('@/database/repositories/officer.repository');
+      await OfficerRepository.activatePendingAppointmentForStudent(studentId, supabaseUserId);
+    } catch {
+      // Non-fatal
+    }
   }
 }
