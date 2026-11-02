@@ -110,7 +110,10 @@ async function loadProfile() {
     studentPayments.value = await financeService.getPayments(id);
     attendanceHistory.value = await attendanceService.getStudentAttendanceHistory(id);
     if (!isStudent.value) {
-      activationDetails.value = await StudentActivationService.getStudentActivationStatus(id);
+      activationDetails.value = await StudentActivationService.getStudentActivationStatus(
+        id,
+        currentStudent.value?.studentNumber
+      );
     }
   }
 }

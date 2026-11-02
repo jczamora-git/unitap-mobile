@@ -93,38 +93,74 @@ export class StudentActivationService {
   }
 
   /**
-   * Evaluates student activation status and audit history
+   * Evaluates student activation status and audit history.
+   * Resilient to local vs remote UUID divergence by falling back to canonical School ID lookup.
    */
   public static async getStudentActivationStatus(
-    studentId: string
+    studentId: string,
+    schoolId?: string
   ): Promise<StudentActivationDetails> {
     const isTestEnv = isTestEnvironment();
 
     // 1. Online check if Supabase is connected
     if (!isTestEnv) {
-      const targetUuid = await this.resolveStudentUuid(studentId);
-      if (targetUuid) {
-        try {
-          const { data, error } = await supabase.rpc('officer_get_student_activation_status', {
-            p_student_id: targetUuid,
-          });
+      try {
+        let remoteData: any = null;
 
-          if (!error && data && data.status !== 'NOT_FOUND') {
-            return {
-              status: data.status as StudentActivationStatus,
-              studentId: data.student_id || targetUuid,
-              claimId: data.claim_id,
-              expiresAt: data.expires_at,
-              attemptCount: data.attempt_count,
-              maxAttempts: data.max_attempts,
-              linkedUserId: data.linked_user_id,
-              linkedUsername: data.linked_username,
-              auditHistory: data.audit_history || [],
-            };
+        // Attempt 1: Call RPC with studentId (UUID or text)
+        const res1 = await supabase.rpc('officer_get_student_activation_status', {
+          p_student_id: studentId,
+        });
+
+        if (!res1.error && res1.data && res1.data.status !== 'NOT_FOUND') {
+          remoteData = res1.data;
+        } else {
+          // Attempt 2: If not found or error, look up student's school_id
+          let targetSchoolId = schoolId;
+          if (!targetSchoolId) {
+            const localStu = await StudentsRepository.getStudentById(studentId);
+            targetSchoolId = localStu?.school_id;
           }
-        } catch {
-          // Fallback to local SQLite
+
+          if (targetSchoolId) {
+            const res2 = await supabase.rpc('officer_get_student_activation_status', {
+              p_student_id: targetSchoolId,
+            });
+
+            if (!res2.error && res2.data && res2.data.status !== 'NOT_FOUND') {
+              remoteData = res2.data;
+
+              // Reconcile local student UUID with remote authoritative UUID if divergent
+              if (remoteData.student_id && remoteData.student_id !== studentId) {
+                try {
+                  await StudentsRepository.reconcileStudentId(
+                    studentId,
+                    remoteData.student_id,
+                    targetSchoolId
+                  );
+                } catch (reconcileErr) {
+                  console.warn('[StudentActivationService] Error reconciling local student ID:', reconcileErr);
+                }
+              }
+            }
+          }
         }
+
+        if (remoteData && remoteData.status && remoteData.status !== 'NOT_FOUND') {
+          return {
+            status: remoteData.status as StudentActivationStatus,
+            studentId: remoteData.student_id || studentId,
+            claimId: remoteData.claim_id,
+            expiresAt: remoteData.expires_at,
+            attemptCount: remoteData.attempt_count,
+            maxAttempts: remoteData.max_attempts,
+            linkedUserId: remoteData.linked_user_id,
+            linkedUsername: remoteData.linked_username,
+            auditHistory: remoteData.audit_history || [],
+          };
+        }
+      } catch (rpcErr) {
+        console.warn('[StudentActivationService] Online status check failed, falling back to local SQLite:', rpcErr);
       }
     }
 
