@@ -51,24 +51,87 @@ export class SupabaseAuthService {
   }
 
   /**
-   * Initializes auth state from active Supabase session or cached offline ticket
+   * Initializes auth state from active Supabase session or cached offline ticket.
+   * Priority: Restores valid offline session immediately (0ms delay), then verifies
+   * online asynchronously without freezing route transitions or app cold start.
    */
   public static async initialize(): Promise<void> {
-    try {
-      const { data: { session }, error } = await supabase.auth.getSession();
-      if (!error && session && session.user) {
-        await this.handleOnlineSession(session.user.id, session.user.email || '');
-        this.isOfflineMode.value = false;
-        return;
+    // 1. Fast path: check valid cached offline session first
+    const cached = await AuthSessionService.getCachedOfflineSession();
+    if (cached && AuthSessionService.isOfflineSessionValid(cached)) {
+      await this.restoreOfflineSession(cached);
+
+      // Asynchronously revalidate in background if online (never blocks startup)
+      const isOnline = typeof navigator !== 'undefined' ? navigator.onLine : true;
+      if (isOnline) {
+        this.revalidateSessionOnline(cached.userId, cached.email).catch((e) => {
+          console.warn('[SupabaseAuth] Background session revalidation error:', e);
+        });
       }
-    } catch (err) {
-      console.warn('[SupabaseAuth] Could not connect to Supabase, checking offline session:', err);
+      return;
     }
 
-    // Check cached offline session
-    const cached = await AuthSessionService.getCachedOfflineSession();
+    // 2. Online verification path (First-time login or expired session)
+    const isOnline = typeof navigator !== 'undefined' ? navigator.onLine : true;
+    if (isOnline) {
+      try {
+        const { data: { session }, error } = await supabase.auth.getSession();
+        if (!error && session && session.user) {
+          await this.handleOnlineSession(session.user.id, session.user.email || '');
+          this.isOfflineMode.value = false;
+          return;
+        }
+      } catch (err) {
+        console.warn('[SupabaseAuth] Online session check failed:', err);
+      }
+    }
+
+    // 3. Fallback to expired or remaining cached offline session if any
     if (cached) {
       await this.restoreOfflineSession(cached);
+    }
+  }
+
+  /**
+   * Asynchronously verifies role validity with Supabase in the background.
+   * If an administrator revoked user's role on the cloud database, revokes local
+   * permissions and clears cached offline session.
+   */
+  public static async revalidateSessionOnline(userId: string, email: string): Promise<void> {
+    try {
+      const { data: remoteRoles, error } = await supabase
+        .from('user_roles')
+        .select('id, role, semester_id, assigned_at, revoked_at')
+        .eq('user_id', userId)
+        .is('revoked_at', null);
+
+      if (error) {
+        console.warn('[SupabaseAuth] Role revalidation error:', error.message);
+        return;
+      }
+
+      if (!remoteRoles || remoteRoles.length === 0) {
+        console.warn('[SupabaseAuth] Server indicates active roles were revoked for user:', userId);
+        const { getDatabase } = await import('@/database/database');
+        const db = await getDatabase();
+        const now = new Date().toISOString();
+        await db.execute('UPDATE user_roles SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL', [now, userId]);
+        await this.logout();
+        return;
+      }
+
+      // Refresh cached offline session expiry
+      if (this.currentUser.value && this.currentRole.value) {
+        const effectiveRoleRecord: UserRoleRecord = {
+          id: 'rol_' + userId.substring(0, 8),
+          user_id: userId,
+          role: this.currentRole.value,
+          assigned_at: new Date().toISOString(),
+        };
+        await AuthSessionService.saveOfflineSession(this.currentUser.value, effectiveRoleRecord, email);
+      }
+    } catch (err) {
+      console.warn('[SupabaseAuth] Offline or server unreachable during revalidation:', err);
     }
   }
 

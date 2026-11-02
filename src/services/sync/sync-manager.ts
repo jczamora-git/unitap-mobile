@@ -3,44 +3,93 @@ import { PullSyncService } from './pull-sync.service';
 import { RealtimeSyncService } from './realtime-sync.service';
 import { SyncStatusService } from './sync-status.service';
 import { SyncPreferenceService } from './sync-preference.service';
+import { NetworkService } from '../network.service';
+import { getDatabase } from '@/database/database';
 
 export class SyncManager {
   private static syncInterval: any = null;
   private static isRunning = false;
+  private static hasQueuedRun = false;
   private static debounceTimer: any = null;
-  private static onlineListener: (() => void) | null = null;
-  private static offlineListener: (() => void) | null = null;
+  private static retryTimer: any = null;
+  private static retryAttempt = 0;
+  private static unsubNetwork: (() => void) | null = null;
+  private static unsubResume: (() => void) | null = null;
 
   public static async start(userId: string = 'default'): Promise<void> {
     await SyncPreferenceService.init(userId);
+    await NetworkService.init();
 
-    // Register network online / offline listeners
-    if (typeof window !== 'undefined' && !this.onlineListener) {
-      this.onlineListener = () => {
-        console.log('[SyncManager] Network online detected.');
-        SyncStatusService.setState('ONLINE');
-        if (SyncPreferenceService.isAutomatic()) {
-          this.syncNow();
+    // Check existing outbox & conflict state immediately from SQLite
+    await this.refreshCountsFromDatabase();
+
+    // 1. Network status change listener (Reconnection trigger)
+    if (!this.unsubNetwork) {
+      this.unsubNetwork = NetworkService.onStatusChange((isOnline) => {
+        SyncStatusService.setOnline(isOnline);
+        if (isOnline) {
+          console.log('[SyncManager] Network reconnected; checking server reachability and syncing.');
+          this.retryAttempt = 0;
+          if (SyncPreferenceService.isAutomatic()) {
+            this.triggerDebouncedSync(1200);
+          }
+        } else {
+          console.log('[SyncManager] Network disconnected; offline mode active.');
+          SyncStatusService.setState('OFFLINE_READY');
         }
-      };
-      this.offlineListener = () => {
-        console.log('[SyncManager] Network offline detected.');
-        SyncStatusService.setState('OFFLINE');
-      };
-      window.addEventListener('online', this.onlineListener);
-      window.addEventListener('offline', this.offlineListener);
+      });
     }
 
-    // Start Realtime listener
-    RealtimeSyncService.subscribe();
+    // 2. App resume listener (Resume trigger)
+    if (!this.unsubResume) {
+      this.unsubResume = NetworkService.onAppResume(() => {
+        console.log('[SyncManager] App resumed to foreground.');
+        if (NetworkService.isOnline.value && SyncPreferenceService.isAutomatic()) {
+          this.triggerDebouncedSync(1000);
+        }
+      });
+    }
 
-    // Initial sync run if Automatic
+    // 3. Realtime Supabase notifications subscription
+    try {
+      RealtimeSyncService.subscribe();
+    } catch {
+      // Non-fatal if offline
+    }
+
+    // 4. Initial sync run if Automatic & Online
     if (SyncPreferenceService.isAutomatic()) {
-      this.syncNow();
+      if (NetworkService.isOnline.value) {
+        this.triggerDebouncedSync(800);
+      } else {
+        SyncStatusService.setState('OFFLINE_READY');
+      }
       this.restartPeriodicTimer();
     }
   }
 
+  /**
+   * Refreshes pending outbox and conflict counts directly from SQLite.
+   */
+  public static async refreshCountsFromDatabase(): Promise<void> {
+    try {
+      const db = await getDatabase();
+      const outboxRow = await db.queryOne<{ count: number }>(
+        'SELECT count(*) as count FROM sync_outbox'
+      );
+      const conflictRow = await db.queryOne<{ count: number }>(
+        "SELECT count(*) as count FROM sync_conflicts WHERE status = 'OPEN'"
+      );
+      SyncStatusService.setPendingCount(outboxRow?.count || 0);
+      SyncStatusService.setConflictCount(conflictRow?.count || 0);
+    } catch (err) {
+      console.warn('[SyncManager] Could not refresh counts from SQLite:', err);
+    }
+  }
+
+  /**
+   * Five-minute foreground periodic timer with jitter (300s + 0-15s jitter)
+   */
   public static restartPeriodicTimer(): void {
     if (this.syncInterval) {
       clearInterval(this.syncInterval);
@@ -48,10 +97,15 @@ export class SyncManager {
     }
 
     if (SyncPreferenceService.isAutomatic()) {
-      // 60-second background reconciliation
+      // 5 minutes (300,000 ms) plus jitter
+      const jitterMs = Math.floor(Math.random() * 15000);
+      const intervalMs = 300000 + jitterMs;
+
       this.syncInterval = setInterval(() => {
-        this.syncNow();
-      }, 60000);
+        if (NetworkService.isOnline.value && NetworkService.isAppActive.value) {
+          this.syncNow();
+        }
+      }, intervalMs);
     }
   }
 
@@ -66,24 +120,33 @@ export class SyncManager {
       this.debounceTimer = null;
     }
 
-    if (typeof window !== 'undefined') {
-      if (this.onlineListener) {
-        window.removeEventListener('online', this.onlineListener);
-        this.onlineListener = null;
-      }
-      if (this.offlineListener) {
-        window.removeEventListener('offline', this.offlineListener);
-        this.offlineListener = null;
-      }
+    if (this.retryTimer) {
+      clearTimeout(this.retryTimer);
+      this.retryTimer = null;
     }
 
-    RealtimeSyncService.unsubscribe();
+    if (this.unsubNetwork) {
+      this.unsubNetwork();
+      this.unsubNetwork = null;
+    }
+
+    if (this.unsubResume) {
+      this.unsubResume();
+      this.unsubResume = null;
+    }
+
+    try {
+      RealtimeSyncService.unsubscribe();
+    } catch {
+      // Ignored
+    }
   }
 
   /**
-   * Debounced sync trigger invoked by Realtime notifications
+   * Debounced sync trigger invoked by local outbox writes or Realtime events.
+   * Duplicate calls within delayMs are coalesced into a single execution.
    */
-  public static triggerRealtimeSync(delayMs: number = 3000): void {
+  public static triggerDebouncedSync(delayMs: number = 1000): void {
     if (!SyncPreferenceService.isAutomatic()) {
       return;
     }
@@ -93,21 +156,36 @@ export class SyncManager {
     }
 
     this.debounceTimer = setTimeout(() => {
+      this.debounceTimer = null;
       this.syncNow();
     }, delayMs);
   }
 
   /**
-   * Primary synchronization action (used by both automatic triggers and Manual "Sync Now" button)
+   * Debounced sync trigger invoked by Realtime notifications
+   */
+  public static triggerRealtimeSync(delayMs: number = 3000): void {
+    this.triggerDebouncedSync(delayMs);
+  }
+
+  /**
+   * Single-flight worker with duplicate-trigger coalescing and exponential backoff retry.
    */
   public static async syncNow(): Promise<{ pushedCount: number; errorCount: number; pulledCount: number }> {
+    // Single-flight lock: if already running, queue exactly one subsequent run
     if (this.isRunning) {
+      this.hasQueuedRun = true;
       return { pushedCount: 0, errorCount: 0, pulledCount: 0 };
     }
 
-    // Check offline status
-    if (typeof navigator !== 'undefined' && !navigator.onLine) {
-      SyncStatusService.setState('OFFLINE');
+    const nowIso = new Date().toISOString();
+    SyncStatusService.setLastAttempt(nowIso);
+
+    // Fast connectivity check
+    if (!NetworkService.isOnline.value) {
+      await this.refreshCountsFromDatabase();
+      SyncStatusService.setOnline(false);
+      SyncStatusService.setState('OFFLINE_READY');
       return { pushedCount: 0, errorCount: 0, pulledCount: 0 };
     }
 
@@ -128,19 +206,66 @@ export class SyncManager {
       const pullRes = await PullSyncService.pullRemoteChanges();
       pulledCount = pullRes.appliedCount;
 
+      // 3. Refresh SQLite counts
+      await this.refreshCountsFromDatabase();
+
       if (errorCount === 0) {
-        SyncStatusService.setState('SYNCED');
+        this.retryAttempt = 0;
+        SyncStatusService.setLastSync(new Date().toISOString());
+        SyncStatusService.setLastError(null);
+        SyncStatusService.setState('UP_TO_DATE');
       } else {
         SyncStatusService.setState('SYNC_ERROR');
+        this.scheduleExponentialBackoff();
       }
-    } catch (err) {
-      console.warn('[SyncManager] Sync cycle encountered an error:', err);
+    } catch (err: unknown) {
+      const errMsg = (err as Error).message || 'Sync cycle failed';
+      console.warn('[SyncManager] Sync cycle error:', errMsg);
+      SyncStatusService.setLastError(errMsg);
       SyncStatusService.setState('SYNC_ERROR');
       errorCount++;
+      await this.refreshCountsFromDatabase();
+      this.scheduleExponentialBackoff();
     } finally {
       this.isRunning = false;
+
+      // Execute queued run if another trigger arrived while syncing
+      if (this.hasQueuedRun) {
+        this.hasQueuedRun = false;
+        if (NetworkService.isOnline.value) {
+          setTimeout(() => this.syncNow(), 250);
+        }
+      }
     }
 
     return { pushedCount, errorCount, pulledCount };
+  }
+
+  /**
+   * Schedules an exponential backoff retry for transient network/server failures
+   * Base: 5s, 10s, 20s, up to max 60s with jitter.
+   */
+  private static scheduleExponentialBackoff(): void {
+    if (this.retryTimer) {
+      clearTimeout(this.retryTimer);
+      this.retryTimer = null;
+    }
+
+    if (!NetworkService.isOnline.value || !SyncPreferenceService.isAutomatic()) {
+      return;
+    }
+
+    this.retryAttempt = Math.min(this.retryAttempt + 1, 5);
+    const baseDelayMs = Math.min(5000 * Math.pow(2, this.retryAttempt - 1), 60000);
+    const jitterMs = Math.floor(Math.random() * 2000);
+    const delayMs = baseDelayMs + jitterMs;
+
+    console.log(`[SyncManager] Scheduling retry in ${Math.round(delayMs / 1000)}s (attempt ${this.retryAttempt})`);
+    this.retryTimer = setTimeout(() => {
+      this.retryTimer = null;
+      if (NetworkService.isOnline.value) {
+        this.syncNow();
+      }
+    }, delayMs);
   }
 }

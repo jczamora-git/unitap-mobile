@@ -34,6 +34,7 @@ import type { Event, EventOccurrence } from '@/types/event';
 import type { AttendanceStats, AttendanceScanLog } from '@/types/attendance';
 import { haptics } from '@/utilities/haptics';
 import { UniPageHeader, UniStatCard, UniButton } from '@/components/ui';
+import UniGlobalSyncPill from '@/components/shared/UniGlobalSyncPill.vue';
 
 const router = useRouter();
 
@@ -128,6 +129,7 @@ onIonViewWillEnter(loadDashboardData);
         variant="root"
       >
       <template #trailing>
+        <UniGlobalSyncPill style="margin-right: 6px;" />
         <button 
           class="uni-header-action-btn" 
           aria-label="Settings & Diagnostics" 

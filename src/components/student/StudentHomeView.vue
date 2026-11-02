@@ -26,6 +26,7 @@ import { formatPeso } from '@/utilities/finance-formatters';
 import { formatDate, formatTime } from '@/utilities/date-formatters';
 import { haptics } from '@/utilities/haptics';
 import { UniPageHeader, UniStatCard, UniButton } from '@/components/ui';
+import UniGlobalSyncPill from '@/components/shared/UniGlobalSyncPill.vue';
 
 const router = useRouter();
 const {
@@ -65,6 +66,7 @@ onIonViewWillEnter(() => {
       variant="root"
     >
       <template #trailing>
+        <UniGlobalSyncPill style="margin-right: 6px;" />
         <button
           class="uni-header-action-btn"
           aria-label="Settings"

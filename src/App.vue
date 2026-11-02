@@ -74,6 +74,18 @@ onMounted(async () => {
     await getDatabase();
     await LegacyMigrationService.runMigrationIfNeeded();
     await authService.initSession();
+
+    const { SupabaseAuthService } = await import('@/integrations/supabase/auth.service');
+    await SupabaseAuthService.initialize();
+
+    const { NetworkService } = await import('@/services/network.service');
+    await NetworkService.init();
+
+    const currentUser = authService.user.value || SupabaseAuthService.user.value;
+    if (currentUser) {
+      const { SyncManager } = await import('@/services/sync/sync-manager');
+      await SyncManager.start(currentUser.id);
+    }
   } catch (err) {
     console.error('Initialization error:', err);
   }

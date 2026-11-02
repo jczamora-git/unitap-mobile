@@ -26,7 +26,8 @@ import {
   cloudUploadOutline,
   optionsOutline,
   refreshOutline,
-  alertCircleOutline
+  alertCircleOutline,
+  chevronDownOutline
 } from 'ionicons/icons';
 import { useNfc } from '@/composables/useNfc';
 import { useOnboarding } from '@/composables/useOnboarding';
@@ -34,10 +35,13 @@ import { useTheme, type ThemePreference } from '@/composables/useTheme';
 import { useSyncPreferences } from '@/composables/useSyncPreferences';
 import { authService } from '@/services/auth.service';
 import { SupabaseAuthService } from '@/integrations/supabase/auth.service';
-import { clearLocalDatabase } from '@/database/database';
+import { clearLocalDatabase, getDatabase } from '@/database/database';
 import { AcademicRepository } from '@/database/repositories/academic.repository';
 import type { Semester, AcademicYear, SyncOutboxRecord } from '@/types/database';
 import { demoDataService } from '@/services/demo-data.service';
+import { NetworkService } from '@/services/network.service';
+import { SyncStatusService } from '@/services/sync/sync-status.service';
+import { EntityCheckpointService, type EntitySyncCheckpoint } from '@/services/sync/entity-checkpoint.service';
 import {
   formatUserRole,
   formatAcademicPeriod,
@@ -93,6 +97,29 @@ const showClearPendingDialog = ref(false);
 const pendingList = ref<SyncOutboxRecord[]>([]);
 const isLoadingPending = ref(false);
 const notificationsEnabled = ref(true);
+
+const isNetworkOnline = computed(() => NetworkService.isOnline.value);
+const networkConnType = computed(() => NetworkService.connectionType.value);
+const lastSyncAttemptTime = computed(() => SyncStatusService.lastAttempt.value);
+const unresolvedConflicts = computed(() => SyncStatusService.conflictCount.value);
+const checkpointsList = ref<EntitySyncCheckpoint[]>([]);
+const isDbReady = ref(true);
+const tableCount = ref(34);
+const showCheckpointsList = ref(false);
+
+async function loadSyncCenterData() {
+  try {
+    const db = await getDatabase();
+    checkpointsList.value = await EntityCheckpointService.getAllCheckpoints(db);
+    const tables = await db.query<{ name: string }>(
+      "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%';"
+    );
+    tableCount.value = tables.length;
+    isDbReady.value = tables.length > 0;
+  } catch (err) {
+    console.warn('Failed loading checkpoints for Sync Center:', err);
+  }
+}
 
 async function openPendingSheet() {
   haptics.light();
@@ -226,10 +253,13 @@ const syncModeOptions = [
 const syncStatusClass = computed(() => {
   switch (syncStatus.value) {
     case 'Up to Date': return 'synced';
+    case 'Syncing':
     case 'Updating': return 'syncing';
-    case 'Offline': return 'offline';
+    case 'Offline Mode': return 'offline';
+    case 'Pending Uploads':
     case 'Waiting to Sync': return 'pending';
     case 'Needs Attention': return 'attention';
+    case 'Sync Error':
     case 'Update Failed': return 'failed';
     default: return 'synced';
   }
@@ -325,6 +355,7 @@ async function checkStatus() {
   }
   await refreshStatus();
   await loadAcademicInfo();
+  await loadSyncCenterData();
   isDemoLoaded.value = await demoDataService.isDemoDataLoaded();
 }
 
@@ -510,10 +541,10 @@ function toggleNotifications() {
           </div>
         </section>
 
-        <!-- 4. OFFLINE & SYNC -->
+        <!-- 4. OFFLINE & SYNC CENTER -->
         <section class="settings-group">
           <div class="group-header">
-            <span>Offline &amp; Synchronization</span>
+            <span>Sync Center &amp; Offline Diagnostics</span>
           </div>
 
           <div class="grouped-list-card minimal-card">
@@ -523,12 +554,12 @@ function toggleNotifications() {
                 <span class="status-indicator-dot" :class="`dot-${syncStatusClass}`"></span>
                 <span class="status-indicator-text">{{ syncStatus }}</span>
               </div>
-              <span class="last-sync-caption">Last Updated: {{ formattedLastSync }}</span>
+              <span class="last-sync-caption">Last Sync: {{ formattedLastSync }}</span>
             </div>
 
             <!-- Sync Error Banner if lastError exists -->
             <div
-              v-if="lastError && syncStatus === 'Update Failed'"
+              v-if="lastError && (syncStatus === 'Update Failed' || syncStatus === 'Sync Error')"
               class="sync-error-banner tactile-press"
               @click="openPendingSheet"
             >
@@ -538,6 +569,42 @@ function toggleNotifications() {
                 <span class="error-banner-msg">{{ lastError }}</span>
               </div>
               <ion-icon :icon="chevronForwardOutline" class="error-banner-arrow" />
+            </div>
+
+            <div class="row-divider"></div>
+
+            <!-- Network Connectivity Status -->
+            <div class="list-action-row">
+              <div class="row-icon-box" :class="isNetworkOnline ? 'text-primary' : 'text-neutral'">
+                <ion-icon :icon="isNetworkOnline ? checkmarkCircle : alertCircleOutline" />
+              </div>
+              <div class="row-content">
+                <span class="row-title">Network Connectivity</span>
+                <span class="row-desc">
+                  {{ isNetworkOnline ? `Connected (${networkConnType.toUpperCase()})` : 'Disconnected • Offline Mode Active' }}
+                </span>
+              </div>
+              <span class="badge-pill font-mono" :class="isNetworkOnline ? 'badge-primary' : 'badge-neutral'">
+                {{ isNetworkOnline ? 'ONLINE' : 'OFFLINE' }}
+              </span>
+            </div>
+
+            <div class="row-divider"></div>
+
+            <!-- Local SQLite Database Readiness -->
+            <div class="list-action-row">
+              <div class="row-icon-box text-primary">
+                <ion-icon :icon="shieldCheckmarkOutline" />
+              </div>
+              <div class="row-content">
+                <span class="row-title">Local SQLite Engine</span>
+                <span class="row-desc">
+                  {{ isDbReady ? `Active & Persistent • ${tableCount} tables ready` : 'Initializing SQLite...' }}
+                </span>
+              </div>
+              <span class="badge-pill badge-primary font-mono">
+                READY
+              </span>
             </div>
 
             <div class="row-divider"></div>
@@ -562,7 +629,7 @@ function toggleNotifications() {
               </div>
               <div class="row-content">
                 <span class="row-title">Pending Changes</span>
-                <span class="row-desc">Tap to inspect outbox logs &amp; queue</span>
+                <span class="row-desc">Durable local outbox entries awaiting push</span>
               </div>
               <div class="pending-badge-row">
                 <span class="badge-pill font-mono" :class="pendingCount > 0 ? 'badge-warning' : 'badge-neutral'">
@@ -572,17 +639,58 @@ function toggleNotifications() {
               </div>
             </div>
 
+            <div class="row-divider"></div>
+
+            <!-- Conflicts Counter -->
+            <div class="list-action-row">
+              <div class="row-icon-box" :class="unresolvedConflicts > 0 ? 'text-danger' : 'text-primary'">
+                <ion-icon :icon="alertCircleOutline" />
+              </div>
+              <div class="row-content">
+                <span class="row-title">Sync Conflicts</span>
+                <span class="row-desc">
+                  {{ unresolvedConflicts === 0 ? 'Zero conflicts • All mutations reconciled' : `${unresolvedConflicts} unresolved conflict(s)` }}
+                </span>
+              </div>
+              <span class="badge-pill font-mono" :class="unresolvedConflicts > 0 ? 'badge-danger' : 'badge-neutral'">
+                {{ unresolvedConflicts }}
+              </span>
+            </div>
+
+            <div class="row-divider"></div>
+
+            <!-- Per-Entity Checkpoints Toggle -->
+            <div class="list-action-row tactile-press cursor-pointer" @click="showCheckpointsList = !showCheckpointsList">
+              <div class="row-icon-box text-primary">
+                <ion-icon :icon="optionsOutline" />
+              </div>
+              <div class="row-content">
+                <span class="row-title">Per-Entity Checkpoints</span>
+                <span class="row-desc">{{ checkpointsList.length }} tracked tables</span>
+              </div>
+              <ion-icon :icon="showCheckpointsList ? chevronDownOutline : chevronForwardOutline" class="row-arrow" />
+            </div>
+
+            <!-- Inline Checkpoints List -->
+            <div v-if="showCheckpointsList" class="checkpoints-table-wrap">
+              <div v-for="cp in checkpointsList" :key="cp.entity_name" class="checkpoint-row font-mono">
+                <span class="cp-name">{{ cp.entity_name }}</span>
+                <span class="cp-count">{{ cp.records_pulled }} rows</span>
+                <span class="cp-status" :class="`cp-status-${cp.last_sync_status.toLowerCase()}`">{{ cp.last_sync_status }}</span>
+              </div>
+            </div>
+
             <!-- Sync Now Button -->
             <div class="sync-btn-container">
               <UniButton
                 variant="primary"
                 size="md"
-                :disabled="isSyncing || syncStatus === 'Offline'"
+                :disabled="isSyncing || !isNetworkOnline"
                 :icon="syncOutline"
                 class="btn-full-width"
                 @click="onSyncNow"
               >
-                {{ isSyncing ? 'Updating...' : 'Sync Now' }}
+                {{ isSyncing ? 'Synchronizing...' : 'Sync Now' }}
               </UniButton>
             </div>
 
@@ -594,8 +702,8 @@ function toggleNotifications() {
                 <ion-icon :icon="optionsOutline" />
               </div>
               <div class="row-content">
-                <span class="row-title">Advanced Sync Options</span>
-                <span class="row-desc">Refresh local data &amp; system diagnostics</span>
+                <span class="row-title">Advanced Data Tools</span>
+                <span class="row-desc">Preflight preview &amp; cloud data refresh</span>
               </div>
               <ion-icon :icon="chevronForwardOutline" class="row-arrow" />
             </div>
@@ -1429,6 +1537,69 @@ function toggleNotifications() {
 
 .option-btn {
   align-self: flex-end;
+}
+
+/* Checkpoints Inline Viewer */
+.checkpoints-table-wrap {
+  margin: 0 16px 12px 16px;
+  padding: 8px 12px;
+  background: var(--uni-surface-subtle, rgba(255, 255, 255, 0.04));
+  border: 1px solid var(--uni-border-subtle, rgba(255, 255, 255, 0.08));
+  border-radius: var(--uni-radius-card, 12px);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 240px;
+  overflow-y: auto;
+}
+
+.checkpoint-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 11px;
+  padding: 4px 0;
+  border-bottom: 1px dashed var(--uni-border-subtle, rgba(255, 255, 255, 0.06));
+}
+
+.checkpoint-row:last-child {
+  border-bottom: none;
+}
+
+.cp-name {
+  color: var(--uni-text);
+  font-weight: 600;
+}
+
+.cp-count {
+  color: var(--uni-text-secondary);
+}
+
+.cp-status {
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 9.5px;
+  font-weight: 700;
+}
+
+.cp-status-success {
+  background: rgba(16, 185, 129, 0.15);
+  color: #10B981;
+}
+
+.cp-status-failed {
+  background: rgba(244, 63, 94, 0.15);
+  color: #F43F5E;
+}
+
+.cp-status-idle {
+  background: rgba(148, 163, 184, 0.15);
+  color: #94A3B8;
+}
+
+.cp-status-pending_outbox {
+  background: rgba(245, 158, 11, 0.15);
+  color: #F59E0B;
 }
 
 /* Sync Error Callout Banner */

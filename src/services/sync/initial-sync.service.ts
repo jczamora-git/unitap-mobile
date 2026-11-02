@@ -80,9 +80,24 @@ export class InitialSyncService {
         },
       });
 
-      // 3. Verification transition
+      // 3. Verification transition: ensure all required scoped checkpoints succeeded
       SyncStatusService.setHydration('VERIFYING');
       SyncStatusService.updateProgress('Integrity Verification', tables.length, tables.length, pullResult.appliedCount);
+
+      let allCompleted = pullResult.isComplete;
+      for (const table of tables) {
+        const cp = await EntityCheckpointService.getCheckpoint(db, table);
+        if (cp.last_sync_status !== 'SUCCESS') {
+          allCompleted = false;
+          console.warn(`[InitialSync] Entity ${table} checkpoint incomplete: ${cp.last_sync_status}`);
+        }
+      }
+
+      if (!allCompleted) {
+        SyncStatusService.setHydration('RESUMABLE');
+        SyncStatusService.setState('SYNC_ERROR');
+        return false;
+      }
 
       const now = pullResult.serverTime || new Date().toISOString();
       await this.persistHydrationState(db, userId, role, now);

@@ -5,6 +5,7 @@ import { IonPage, IonContent } from '@ionic/vue';
 import { useSyncStatus } from '@/composables/useSyncStatus';
 import { useAuth } from '@/composables/useAuth';
 import { SupabaseAuthService } from '@/integrations/supabase/auth.service';
+import { SyncStatusService } from '@/services/sync/sync-status.service';
 import { InitialSyncService } from '@/services/sync/initial-sync.service';
 import { onboardingService } from '@/services/onboarding.service';
 import { useOnboarding } from '@/composables/useOnboarding';
@@ -153,6 +154,13 @@ onMounted(async () => {
     const db = await getDatabase();
     const st = await db.queryOne<{ count: number }>('SELECT count(*) as count FROM students');
     hasCachedOfflineData.value = (st?.count || 0) > 0;
+
+    // If device is offline but already has cached data, enter offline mode immediately
+    if (typeof navigator !== 'undefined' && !navigator.onLine && hasCachedOfflineData.value) {
+      SyncStatusService.setState('OFFLINE_READY');
+      proceedToDestination();
+      return;
+    }
   } catch {
     hasCachedOfflineData.value = false;
   }

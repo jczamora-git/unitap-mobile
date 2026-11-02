@@ -77,9 +77,10 @@ export class WebDevSqliteAdapter implements DatabaseAdapter {
     try {
       const data = this.db.export();
       let binary = '';
-      const len = data.byteLength;
-      for (let i = 0; i < len; i++) {
-        binary += String.fromCharCode(data[i]);
+      const chunkSize = 8192;
+      for (let i = 0; i < data.length; i += chunkSize) {
+        const chunk = data.subarray(i, i + chunkSize);
+        binary += String.fromCharCode.apply(null, chunk as unknown as number[]);
       }
       const base64 = btoa(binary);
       await Preferences.set({ key: PERSISTENCE_KEY, value: base64 });

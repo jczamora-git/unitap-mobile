@@ -266,58 +266,19 @@ export class AttendanceService {
 
     const effectiveIdempotencyKey = idempotencyKey || `idem_scan_${occurrenceId}_${studentId}_${Date.now()}`;
 
-    // 1. Attempt Atomic Online Server RPC if available
-    if (!isTestEnvironment()) {
-      try {
-        const { data: scanRes, error: scanErr } = await supabase.rpc('record_attendance_scan', {
-          p_occurrence_id: occurrenceId,
-          p_student_id: studentId,
-          p_nfc_card_id: nfcCardId || null,
-          p_uid_normalized: uidNormalized || null,
-          p_status_override: status,
-          p_device_id: 'dev_default',
-          p_idempotency_key: effectiveIdempotencyKey,
-          p_client_scanned_at: now,
-          p_scan_method: scanMethod,
-        });
-
-        if (!scanErr && scanRes) {
-          if (scanRes.status === 'ALREADY_RECORDED') {
-            return { status: 'ALREADY_RECORDED', message: scanRes.message || 'Already recorded.' };
-          }
-          if (scanRes.status === 'REVOKED_REVIEW_REQUIRED') {
-            throw new Error(scanRes.message || 'Attendance was revoked. Explicit recheck required.');
-          }
-          if (scanRes.status === 'OCCURRENCE_CLOSED') {
-            throw new Error(scanRes.message || 'Event occurrence is closed.');
-          }
-          if (scanRes.status === 'FORBIDDEN_SCOPE' || scanRes.status === 'UNAUTHORIZED') {
-            throw new Error(scanRes.message || 'Officer authorization or scope error.');
-          }
-          if (scanRes.status === 'RECORDED') {
-            return {
-              status: 'RECORDED',
-              message: scanRes.message,
-              recordId: scanRes.attendance_record?.id,
-            };
-          }
-        }
-      } catch (err: unknown) {
-        // If it's a domain error thrown above, rethrow
-        if (
-          err instanceof Error &&
-          (err.message.includes('revoked') ||
-            err.message.includes('closed') ||
-            err.message.includes('authorization') ||
-            err.message.includes('scope'))
-        ) {
-          throw err;
-        }
-        console.warn('[AttendanceService] Online atomic scan failed or offline, falling back to local SQLite:', err);
+    // 1. Check existing attendance record in local SQLite first
+    const existing = await AttendanceRepository.getRecord(occurrenceId, studentId);
+    if (existing) {
+      if (existing.status === 'REVOKED' || existing.status === 'VOID') {
+        const reason = existing.revocation_reason || existing.void_reason || 'Administrative revocation';
+        throw new Error(`Attendance was previously revoked (${reason}). An explicit recheck with reason is required.`);
+      }
+      if (existing.status === 'PRESENT' || existing.status === 'LATE') {
+        return { status: 'ALREADY_RECORDED', message: 'Student is already recorded for this session.' };
       }
     }
 
-    // 2. Local SQLite Transaction & Outbox Enqueue
+    // 2. True Local-First Write: commit local record, audit log, and durable outbox atomically
     const attendanceId = 'att_' + Math.random().toString(36).substring(2, 10);
     await AttendanceRepository.recordAttendance(
       {
@@ -334,6 +295,14 @@ export class AttendanceService {
       },
       officerUserId
     );
+
+    // 3. Trigger asynchronous background sync if online (never blocks the scanning UI)
+    try {
+      const { SyncManager } = await import('@/services/sync/sync-manager');
+      SyncManager.triggerDebouncedSync(500);
+    } catch {
+      // Ignored
+    }
 
     // Also update legacy storage participant if present
     try {
