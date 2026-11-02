@@ -18,6 +18,7 @@
 import { onMounted } from 'vue';
 import { useRouter } from 'vue-router';
 import { IonApp, IonRouterOutlet, useBackButton } from '@ionic/vue';
+import { App as CapApp } from '@capacitor/app';
 import OnboardingModal from '@/components/onboarding/OnboardingModal.vue';
 import { UniToast } from '@/components/ui';
 import { useOnboarding } from '@/composables/useOnboarding';
@@ -34,38 +35,49 @@ const { toastState, showToast } = useToast();
 
 let lastBackPressTime = 0;
 
-useBackButton(10, (processNextHandler) => {
+// Hardware back button handler with priority 10 (above Ionic default exit, below page/modal handlers)
+useBackButton(10, async () => {
+  // 1. If onboarding tour is open, dismiss it
   if (isOnboardingOpen.value) {
     closeOnboardingTour();
     return;
   }
 
-  const currentPath = router.currentRoute.value.path;
-
-  // 1. If in a secondary tab, navigate back to /tabs/home
-  if (currentPath.startsWith('/tabs/') && currentPath !== '/tabs/home') {
-    router.replace('/tabs/home');
+  // 2. Check if an active modal or overlay is open in the DOM
+  const activeOverlay = document.querySelector('ion-modal.show-modal, ion-alert, ion-action-sheet');
+  if (activeOverlay) {
+    // Overlays have their own higher-priority handlers, so do not navigate
     return;
   }
 
-  // 2. If in a sub-route (e.g. /settings, /events/..., /students/..., etc.)
-  if (currentPath !== '/tabs/home' && currentPath !== '/login') {
-    if (window.history.length > 1) {
-      router.back();
+  const currentPath = router.currentRoute.value.path;
+  const isRootRoute = currentPath === '/tabs/home' || currentPath === '/login';
+
+  // 3. If currently on a root page (/tabs/home or /login), require double-tap back within 2s to exit
+  if (isRootRoute) {
+    const now = Date.now();
+    if (now - lastBackPressTime < 2000) {
+      try {
+        await CapApp.exitApp();
+      } catch {
+        // Fallback for web dev environment
+        window.history.back();
+      }
     } else {
-      router.replace('/tabs/home');
+      lastBackPressTime = now;
+      showToast('Press back again to exit', 'info', 2000);
     }
     return;
   }
 
-  // 3. If on root route (/tabs/home or /login), require double-press back to exit
-  const now = Date.now();
-  if (now - lastBackPressTime < 2000) {
-    processNextHandler();
-  } else {
-    lastBackPressTime = now;
-    showToast('Press back again to exit', 'info', 2000);
+  // 4. For all other pages, reverse the natural browser/router navigation history
+  if (window.history.state?.back) {
+    router.back();
+    return;
   }
+
+  // 5. If no remaining history in navigation stack, smoothly navigate to /tabs/home
+  router.replace('/tabs/home');
 });
 
 onMounted(async () => {
