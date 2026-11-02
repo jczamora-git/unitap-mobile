@@ -16,7 +16,8 @@
 
 <script setup lang="ts">
 import { onMounted } from 'vue';
-import { IonApp, IonRouterOutlet } from '@ionic/vue';
+import { useRouter } from 'vue-router';
+import { IonApp, IonRouterOutlet, useBackButton } from '@ionic/vue';
 import OnboardingModal from '@/components/onboarding/OnboardingModal.vue';
 import { UniToast } from '@/components/ui';
 import { useOnboarding } from '@/composables/useOnboarding';
@@ -27,8 +28,45 @@ import { authService } from '@/services/auth.service';
 import { themeService } from '@/services/theme.service';
 import { resetScrollPosition } from '@/utilities/scroll';
 
+const router = useRouter();
 const { isOnboardingOpen, checkOnboardingStatus, closeOnboardingTour } = useOnboarding();
-const { toastState } = useToast();
+const { toastState, showToast } = useToast();
+
+let lastBackPressTime = 0;
+
+useBackButton(10, (processNextHandler) => {
+  if (isOnboardingOpen.value) {
+    closeOnboardingTour();
+    return;
+  }
+
+  const currentPath = router.currentRoute.value.path;
+
+  // 1. If in a secondary tab, navigate back to /tabs/home
+  if (currentPath.startsWith('/tabs/') && currentPath !== '/tabs/home') {
+    router.replace('/tabs/home');
+    return;
+  }
+
+  // 2. If in a sub-route (e.g. /settings, /events/..., /students/..., etc.)
+  if (currentPath !== '/tabs/home' && currentPath !== '/login') {
+    if (window.history.length > 1) {
+      router.back();
+    } else {
+      router.replace('/tabs/home');
+    }
+    return;
+  }
+
+  // 3. If on root route (/tabs/home or /login), require double-press back to exit
+  const now = Date.now();
+  if (now - lastBackPressTime < 2000) {
+    processNextHandler();
+  } else {
+    lastBackPressTime = now;
+    showToast('Press back again to exit', 'info', 2000);
+  }
+});
 
 onMounted(async () => {
   try {

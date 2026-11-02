@@ -426,13 +426,7 @@ BEGIN
     RETURN jsonb_build_object('success', false, 'error', 'Invalid activation code.');
   END IF;
 
-  -- 6. Atomically consume claim
-  UPDATE public.activation_claims 
-  SET used_at = now(), 
-      claimed_by_user_id = v_target_user_id 
-  WHERE id = v_claim.id;
-
-  -- 7. Upsert public.users link
+  -- 6. Upsert public.users link FIRST so foreign key constraints on claimed_by_user_id are satisfied
   INSERT INTO public.users (id, username, student_id, account_status, created_at, updated_at)
   VALUES (v_target_user_id, lower(v_student.school_id), v_student.id, 'ACTIVE', now(), now())
   ON CONFLICT (id) DO UPDATE SET
@@ -440,6 +434,12 @@ BEGIN
     username = EXCLUDED.username,
     account_status = 'ACTIVE',
     updated_at = now();
+
+  -- 7. Atomically consume claim
+  UPDATE public.activation_claims 
+  SET used_at = now(), 
+      claimed_by_user_id = v_target_user_id 
+  WHERE id = v_claim.id;
 
   -- 8. Assign STUDENT role
   INSERT INTO public.user_roles (id, user_id, role, assigned_at)

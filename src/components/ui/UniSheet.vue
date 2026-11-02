@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, watch, onBeforeUnmount } from 'vue';
-import { IonIcon } from '@ionic/vue';
+import { IonIcon, useBackButton } from '@ionic/vue';
 import { closeOutline } from 'ionicons/icons';
 import { haptics } from '@/utilities/haptics';
 
@@ -87,6 +87,14 @@ watch(isEffectiveOpen, (open) => {
 onBeforeUnmount(() => {
   document.body.style.overflow = '';
   window.removeEventListener('keydown', handleKeydown);
+});
+
+useBackButton(100, (processNextHandler) => {
+  if (isEffectiveOpen.value) {
+    dismiss();
+  } else {
+    processNextHandler();
+  }
 });
 </script>
 

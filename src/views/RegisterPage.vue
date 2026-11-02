@@ -452,7 +452,7 @@
 <script setup lang="ts">
 import { ref } from 'vue';
 import { useRouter } from 'vue-router';
-import { IonPage, IonContent, IonIcon, IonSpinner, onIonViewDidEnter, onIonViewWillLeave } from '@ionic/vue';
+import { IonPage, IonContent, IonIcon, IonSpinner, onIonViewDidEnter, onIonViewWillLeave, useBackButton } from '@ionic/vue';
 import { StatusBar, Style } from '@capacitor/status-bar';
 import { Capacitor } from '@capacitor/core';
 import {
@@ -531,6 +531,10 @@ function handleBack() {
     router.push('/login');
   }
 }
+
+useBackButton(20, () => {
+  handleBack();
+});
 
 function nextStep() {
   errorMessage.value = '';
