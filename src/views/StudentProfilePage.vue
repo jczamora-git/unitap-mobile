@@ -43,12 +43,21 @@ import {
   UniButton,
   UniSheet,
 } from '@/components/ui';
+import { useOperationPolicy } from '@/composables/useOperationPolicy';
 import { haptics } from '@/utilities/haptics';
 
 const route = useRoute();
 const router = useRouter();
 const { getStudentById, deleteStudent, removeRfid, currentStudent, isLoading } = useStudents();
 const { showToast, copyToClipboard } = useToast();
+
+const { isPermitted, getDisabledReason } = useOperationPolicy();
+const canManageActivation = isPermitted('STUDENT_ACTIVATION_ACCOUNT_LINKING');
+const activationDisabledReason = getDisabledReason('STUDENT_ACTIVATION_ACCOUNT_LINKING');
+const canManageCard = isPermitted('NFC_CARD_ASSIGNMENT_REASSIGNMENT');
+const cardDisabledReason = getDisabledReason('NFC_CARD_ASSIGNMENT_REASSIGNMENT');
+const canEditStudent = isPermitted('STUDENTS_CREATE_UPDATE_DEACTIVATE');
+const editStudentDisabledReason = getDisabledReason('STUDENTS_CREATE_UPDATE_DEACTIVATE');
 
 const isStudent = computed(() => {
   const role = authService.role.value || SupabaseAuthService.role.value;
@@ -127,6 +136,10 @@ const currentOfficerUserId = computed(() => {
 
 async function handleIssueCode() {
   if (!currentStudent.value) return;
+  if (!canManageActivation.value) {
+    await showToast(activationDisabledReason.value || 'Activation actions require an active connection.', 'error');
+    return;
+  }
   haptics.medium();
   isIssuingCode.value = true;
 
@@ -154,6 +167,10 @@ async function handleIssueCode() {
 
 async function handleRevokeCode() {
   if (!currentStudent.value || !activationDetails.value?.claimId) return;
+  if (!canManageActivation.value) {
+    await showToast(activationDisabledReason.value || 'Activation actions require an active connection.', 'error');
+    return;
+  }
   haptics.warning();
 
   try {
@@ -320,9 +337,13 @@ async function handleDeleteStudent() {
 
               <!-- Actions Row (Officer only) -->
               <div class="card-actions-row" v-if="!isStudent">
+                <span v-if="!canManageCard" class="policy-hint-text">
+                  {{ cardDisabledReason }}
+                </span>
                 <button 
                   class="action-subtle-btn"
-                  @click="isReplaceModalOpen = true"
+                  :disabled="!canManageCard"
+                  @click="canManageCard && (isReplaceModalOpen = true)"
                 >
                   <ion-icon :icon="swapHorizontalOutline" />
                   {{ currentStudent.rfidUid ? 'Replace NFC Card' : 'Link NFC Card' }}
@@ -331,7 +352,8 @@ async function handleDeleteStudent() {
                 <button 
                   v-if="currentStudent.rfidUid" 
                   class="action-subtle-btn text-danger"
-                  @click="showRemoveRfidDialog = true"
+                  :disabled="!canManageCard"
+                  @click="canManageCard && (showRemoveRfidDialog = true)"
                 >
                   <ion-icon :icon="closeCircleOutline" />
                   Deactivate
@@ -356,7 +378,13 @@ async function handleDeleteStudent() {
             <div class="minimal-card overview-card">
               <div class="card-head-row">
                 <span class="card-title-text">Student Information</span>
-                <button v-if="!isStudent" class="edit-link-btn" @click="router.push(`/students/${currentStudent.id}/edit`)">
+                <button
+                  v-if="!isStudent"
+                  class="edit-link-btn"
+                  :disabled="!canEditStudent"
+                  :title="!canEditStudent ? editStudentDisabledReason : undefined"
+                  @click="canEditStudent && router.push(`/students/${currentStudent.id}/edit`)"
+                >
                   <ion-icon :icon="createOutline" /> Edit
                 </button>
               </div>
@@ -468,11 +496,14 @@ async function handleDeleteStudent() {
 
               <!-- Officer Actions -->
               <div class="activation-actions-row">
+                <span v-if="!canManageActivation" class="policy-hint-text">
+                  {{ activationDisabledReason }}
+                </span>
                 <UniButton
                   v-if="activationDetails?.status === 'NOT_ACTIVATED' || !activationDetails"
                   variant="primary"
                   size="sm"
-                  :disabled="isIssuingCode"
+                  :disabled="isIssuingCode || !canManageActivation"
                   @click="handleIssueCode"
                 >
                   <ion-icon :icon="keyOutline" slot="start" />
@@ -483,7 +514,7 @@ async function handleDeleteStudent() {
                   <UniButton
                     variant="outline"
                     size="sm"
-                    :disabled="isIssuingCode"
+                    :disabled="isIssuingCode || !canManageActivation"
                     @click="handleIssueCode"
                   >
                     <ion-icon :icon="refreshOutline" slot="start" />
@@ -492,6 +523,7 @@ async function handleDeleteStudent() {
                   <UniButton
                     variant="destructive"
                     size="sm"
+                    :disabled="!canManageActivation"
                     @click="handleRevokeCode"
                   >
                     <ion-icon :icon="closeCircleOutline" slot="start" />
@@ -503,7 +535,7 @@ async function handleDeleteStudent() {
                   v-else-if="activationDetails?.status === 'REQUIRES_ATTENTION'"
                   variant="primary"
                   size="sm"
-                  :disabled="isIssuingCode"
+                  :disabled="isIssuingCode || !canManageActivation"
                   @click="handleIssueCode"
                 >
                   <ion-icon :icon="refreshOutline" slot="start" />
@@ -1189,6 +1221,18 @@ async function handleDeleteStudent() {
   margin-top: 14px;
   padding-top: 12px;
   border-top: 1px dashed var(--uni-border, rgba(0, 0, 0, 0.08));
+}
+
+.policy-hint-text {
+  width: 100%;
+  font-size: 12px;
+  line-height: 1.4;
+  color: #ef4444;
+  background: rgba(239, 68, 68, 0.08);
+  border: 1px solid rgba(239, 68, 68, 0.2);
+  border-radius: 6px;
+  padding: 6px 10px;
+  margin-bottom: 4px;
 }
 
 .audit-history-box {

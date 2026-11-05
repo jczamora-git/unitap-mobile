@@ -4,24 +4,26 @@ import type {
   UpdateStudentDto, 
   StudentFilterOptions,
   DuplicateRfidCheckResult,
-  NfcCardRecord
+  NfcCardRecord,
+  YearLevel
 } from '@/types/student';
 import { localStudentRepository, type IStudentRepository } from './student-storage.service';
 import { formatFullName } from '@/utilities/student-formatters';
 import { normalizeSchoolId } from '@/utilities/school-id-normalizer';
+import { OperationPolicyService } from './operation-policy.service';
+import { supabase } from '@/integrations/supabase/client';
+import { AcademicRepository } from '@/database/repositories/academic.repository';
+import { getDatabase } from '@/database/database';
 
-function generateStudentId(): string {
-  if (typeof crypto !== 'undefined' && crypto.randomUUID) {
+function generateUUID(): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
     return crypto.randomUUID();
   }
-  return 'stu_' + Date.now() + '_' + Math.random().toString(36).substring(2, 9);
-}
-
-function generateCardId(): string {
-  if (typeof crypto !== 'undefined' && crypto.randomUUID) {
-    return crypto.randomUUID();
-  }
-  return 'crd_' + Date.now() + '_' + Math.random().toString(36).substring(2, 9);
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
+    const r = (Math.random() * 16) | 0;
+    const v = c === 'x' ? r : (r & 0x3) | 0x8;
+    return v.toString(16);
+  });
 }
 
 export interface CardLookupResult {
@@ -49,6 +51,10 @@ export class StudentService {
   clearCache(): void {
     this.repo.clearCache();
   }
+
+  // ============================================================================
+  // OFFLINE CACHED READS (Permitted offline via local SQLite / cache)
+  // ============================================================================
 
   async getStudents(): Promise<Student[]> {
     return this.repo.getAll();
@@ -172,233 +178,6 @@ export class StudentService {
     return true;
   }
 
-  async createStudent(dto: CreateStudentDto): Promise<Student> {
-    const firstName = dto.firstName?.trim();
-    const lastName = dto.lastName?.trim();
-    const studentNumber = dto.studentNumber?.trim() ? normalizeSchoolId(dto.studentNumber.trim()) : '';
-
-    if (!firstName) {
-      throw new Error('First Name is required.');
-    }
-    if (!lastName) {
-      throw new Error('Last Name is required.');
-    }
-    if (!dto.yearLevel || dto.yearLevel < 1 || dto.yearLevel > 8) {
-      throw new Error('Please select a valid Year Level.');
-    }
-    if (!dto.section || !dto.section.trim()) {
-      throw new Error('Section is required.');
-    }
-
-    // Check duplicate Student Number if provided
-    if (studentNumber) {
-      const isAvailable = await this.checkStudentNumberAvailability(studentNumber);
-      if (!isAvailable) {
-        throw new Error(`Student Number "${studentNumber}" is already in use by another student.`);
-      }
-    }
-
-    // Check duplicate RFID if provided
-    if (dto.rfidUid && dto.rfidUid.trim()) {
-      const duplicateCheck = await this.checkRfidAvailability(dto.rfidUid);
-      if (duplicateCheck.isDuplicate && duplicateCheck.existingStudent) {
-        const ownerName = formatFullName(
-          duplicateCheck.existingStudent.firstName,
-          duplicateCheck.existingStudent.middleName,
-          duplicateCheck.existingStudent.lastName
-        );
-        throw new Error(
-          `RFID card is already registered to ${ownerName} (${duplicateCheck.existingStudent.course} • ${duplicateCheck.existingStudent.section}).`
-        );
-      }
-    }
-
-    const now = new Date().toISOString();
-    const studentId = generateStudentId();
-    const rfidClean = dto.rfidUid?.trim() || null;
-    const rfidCompact = dto.rfidUidCompact?.trim() || (rfidClean ? rfidClean.replace(/[^0-9A-Fa-f]/g, '').toUpperCase() : null);
-
-    const initialCards: NfcCardRecord[] = [];
-    if (rfidClean && rfidCompact) {
-      initialCards.push({
-        id: generateCardId(),
-        studentId,
-        rfidUid: rfidClean,
-        rfidUidCompact: rfidCompact,
-        status: 'ACTIVE',
-        assignedAt: now
-      });
-    }
-
-    const newStudent: Student = {
-      id: studentId,
-      studentNumber: studentNumber || undefined,
-      firstName,
-      middleName: dto.middleName?.trim() || undefined,
-      lastName,
-      yearLevel: dto.yearLevel,
-      section: dto.section.trim(),
-      course: dto.course?.trim() || 'BSIT',
-      status: dto.status || 'ACTIVE',
-      rfidUid: rfidClean,
-      rfidUidCompact: rfidCompact,
-      cards: initialCards,
-      createdAt: now,
-      updatedAt: now
-    };
-
-    return this.repo.save(newStudent);
-  }
-
-  async updateStudent(id: string, dto: UpdateStudentDto): Promise<Student> {
-    const student = await this.repo.getById(id);
-    if (!student) {
-      throw new Error('Student record not found.');
-    }
-
-    if (dto.firstName !== undefined && !dto.firstName.trim()) {
-      throw new Error('First Name cannot be empty.');
-    }
-    if (dto.lastName !== undefined && !dto.lastName.trim()) {
-      throw new Error('Last Name cannot be empty.');
-    }
-
-    if (dto.studentNumber !== undefined && dto.studentNumber.trim()) {
-      const isAvailable = await this.checkStudentNumberAvailability(dto.studentNumber.trim(), id);
-      if (!isAvailable) {
-        throw new Error(`Student Number "${dto.studentNumber.trim()}" is already assigned to another student.`);
-      }
-    }
-
-    // If RFID is being modified/added directly, verify uniqueness
-    if (dto.rfidUid && dto.rfidUid.trim() && dto.rfidUid !== student.rfidUid) {
-      const duplicateCheck = await this.checkRfidAvailability(dto.rfidUid, id);
-      if (duplicateCheck.isDuplicate && duplicateCheck.existingStudent) {
-        const ownerName = formatFullName(
-          duplicateCheck.existingStudent.firstName,
-          duplicateCheck.existingStudent.middleName,
-          duplicateCheck.existingStudent.lastName
-        );
-        throw new Error(
-          `RFID card is already registered to ${ownerName} (${duplicateCheck.existingStudent.course} • ${duplicateCheck.existingStudent.section}).`
-        );
-      }
-    }
-
-    const updated: Student = {
-      ...student,
-      studentNumber: dto.studentNumber !== undefined ? (dto.studentNumber.trim() ? normalizeSchoolId(dto.studentNumber.trim()) : undefined) : student.studentNumber,
-      firstName: dto.firstName !== undefined ? dto.firstName.trim() : student.firstName,
-      middleName: dto.middleName !== undefined ? (dto.middleName.trim() || undefined) : student.middleName,
-      lastName: dto.lastName !== undefined ? dto.lastName.trim() : student.lastName,
-      yearLevel: dto.yearLevel !== undefined ? dto.yearLevel : student.yearLevel,
-      section: dto.section !== undefined ? dto.section.trim() : student.section,
-      course: dto.course !== undefined ? (dto.course.trim() || 'BSIT') : student.course,
-      status: dto.status !== undefined ? dto.status : (student.status || 'ACTIVE'),
-      rfidUid: dto.rfidUid !== undefined ? (dto.rfidUid ? dto.rfidUid.trim() : null) : student.rfidUid,
-      rfidUidCompact: dto.rfidUidCompact !== undefined 
-        ? (dto.rfidUidCompact ? dto.rfidUidCompact.trim() : null) 
-        : (dto.rfidUid !== undefined && dto.rfidUid ? dto.rfidUid.replace(/[^0-9A-Fa-f]/g, '').toUpperCase() : student.rfidUidCompact),
-      updatedAt: new Date().toISOString()
-    };
-
-    return this.repo.save(updated);
-  }
-
-  async replaceStudentRfid(id: string, newRfidUid: string, newRfidCompact?: string, note?: string): Promise<Student> {
-    const student = await this.repo.getById(id);
-    if (!student) {
-      throw new Error('Student record not found.');
-    }
-
-    const cleanUid = newRfidUid.trim();
-    const compactUid = newRfidCompact?.trim() || cleanUid.replace(/[^0-9A-Fa-f]/g, '').toUpperCase();
-
-    const duplicateCheck = await this.checkRfidAvailability(cleanUid, id);
-    if (duplicateCheck.isDuplicate && duplicateCheck.existingStudent) {
-      const ownerName = formatFullName(
-        duplicateCheck.existingStudent.firstName,
-        duplicateCheck.existingStudent.middleName,
-        duplicateCheck.existingStudent.lastName
-      );
-      throw new Error(
-        `This card is already assigned to ${ownerName} (${duplicateCheck.existingStudent.course} • ${duplicateCheck.existingStudent.section}).`
-      );
-    }
-
-    const now = new Date().toISOString();
-    const cards = [...(student.cards || [])];
-
-    // Mark previous active cards as REPLACED
-    cards.forEach(card => {
-      if (card.status === 'ACTIVE') {
-        card.status = 'REPLACED';
-        card.deactivatedAt = now;
-      }
-    });
-
-    // Add new active card
-    cards.push({
-      id: generateCardId(),
-      studentId: id,
-      rfidUid: cleanUid,
-      rfidUidCompact: compactUid,
-      status: 'ACTIVE',
-      assignedAt: now,
-      note: note?.trim() || undefined
-    });
-
-    const updated: Student = {
-      ...student,
-      rfidUid: cleanUid,
-      rfidUidCompact: compactUid,
-      cards,
-      updatedAt: now
-    };
-
-    return this.repo.save(updated);
-  }
-
-  async deactivateStudentRfid(id: string, reason?: string): Promise<Student> {
-    const student = await this.repo.getById(id);
-    if (!student) {
-      throw new Error('Student record not found.');
-    }
-
-    const now = new Date().toISOString();
-    const cards = [...(student.cards || [])];
-
-    cards.forEach(card => {
-      if (card.status === 'ACTIVE') {
-        card.status = 'DEACTIVATED';
-        card.deactivatedAt = now;
-        if (reason) card.note = reason;
-      }
-    });
-
-    const updated: Student = {
-      ...student,
-      rfidUid: null,
-      rfidUidCompact: null,
-      cards,
-      updatedAt: now
-    };
-
-    return this.repo.save(updated);
-  }
-
-  async removeStudentRfid(id: string): Promise<Student> {
-    return this.deactivateStudentRfid(id, 'Removed by operator');
-  }
-
-  async deleteStudent(id: string): Promise<void> {
-    const existing = await this.repo.getById(id);
-    if (!existing) {
-      throw new Error('Student record not found.');
-    }
-    return this.repo.delete(id);
-  }
-
   async searchStudents(query: string, filters?: StudentFilterOptions): Promise<Student[]> {
     const all = await this.repo.getAll();
     const cleanQuery = (query || '').trim().toLowerCase();
@@ -448,6 +227,674 @@ export class StudentService {
         (compactQuery.length > 0 && rfidCompact.includes(compactQuery))
       );
     });
+  }
+
+  // ============================================================================
+  // SERVER-CONFIRMED MUTATIONS (ONLINE_CONFIRMED: Requires live server acknowledgement)
+  // ============================================================================
+
+  async createStudent(dto: CreateStudentDto): Promise<Student> {
+    await OperationPolicyService.assertPermitted('STUDENTS_CREATE_UPDATE_DEACTIVATE');
+    const firstName = dto.firstName?.trim();
+    const lastName = dto.lastName?.trim();
+    const studentNumber = dto.studentNumber?.trim() ? normalizeSchoolId(dto.studentNumber.trim()) : '';
+
+    if (!firstName) {
+      throw new Error('First Name is required.');
+    }
+    if (!lastName) {
+      throw new Error('Last Name is required.');
+    }
+    if (!dto.yearLevel || dto.yearLevel < 1 || dto.yearLevel > 8) {
+      throw new Error('Please select a valid Year Level.');
+    }
+    if (!dto.section || !dto.section.trim()) {
+      throw new Error('Section is required.');
+    }
+
+    // Check duplicate Student Number if provided
+    if (studentNumber) {
+      const isAvailable = await this.checkStudentNumberAvailability(studentNumber);
+      if (!isAvailable) {
+        throw new Error(`Student Number "${studentNumber}" is already in use by another student.`);
+      }
+    }
+
+    // Check duplicate RFID if provided
+    if (dto.rfidUid && dto.rfidUid.trim()) {
+      const duplicateCheck = await this.checkRfidAvailability(dto.rfidUid);
+      if (duplicateCheck.isDuplicate && duplicateCheck.existingStudent) {
+        const ownerName = formatFullName(
+          duplicateCheck.existingStudent.firstName,
+          duplicateCheck.existingStudent.middleName,
+          duplicateCheck.existingStudent.lastName
+        );
+        throw new Error(
+          `RFID card is already registered to ${ownerName} (${duplicateCheck.existingStudent.course} • ${duplicateCheck.existingStudent.section}).`
+        );
+      }
+    }
+
+    const now = new Date().toISOString();
+    const studentId = generateUUID();
+    const rfidClean = dto.rfidUid?.trim() || null;
+    const rfidCompact = dto.rfidUidCompact?.trim() || (rfidClean ? rfidClean.replace(/[^0-9A-Fa-f]/g, '').toUpperCase() : null);
+
+    // 1. Authoritative Server-side Creation on Supabase
+    const { error: studentErr } = await supabase.from('students').insert({
+      id: studentId,
+      school_id: studentNumber || `STU-${studentId.substring(0, 8)}`,
+      first_name: firstName,
+      middle_name: dto.middleName?.trim() || null,
+      last_name: lastName,
+      status: dto.status || 'ACTIVE',
+      created_at: now,
+      updated_at: now
+    });
+
+    if (studentErr) {
+      throw new Error(`Server failed to create student: ${studentErr.message}`);
+    }
+
+    // 1b. Server-side Academic Enrollment
+    let activeSemId: string | null = null;
+    try {
+      const activeSem = await AcademicRepository.getActiveSemester();
+      activeSemId = activeSem?.id || null;
+    } catch {
+      // ignore
+    }
+    if (!activeSemId) {
+      try {
+        const { data: semData } = await supabase
+          .from('semesters')
+          .select('id')
+          .eq('status', 'ACTIVE')
+          .limit(1)
+          .maybeSingle();
+        if (semData?.id) activeSemId = semData.id;
+      } catch {
+        // ignore
+      }
+    }
+
+    if (activeSemId) {
+      let programId: string | null = null;
+      if (dto.course) {
+        try {
+          const { data: prog } = await supabase
+            .from('programs')
+            .select('id')
+            .ilike('code', dto.course.trim())
+            .limit(1)
+            .maybeSingle();
+          if (prog?.id) programId = prog.id;
+        } catch {
+          // ignore
+        }
+      }
+
+      const { error: enrollErr } = await supabase.from('student_enrollments').upsert({
+        id: generateUUID(),
+        student_id: studentId,
+        semester_id: activeSemId,
+        program_id: programId,
+        year_level: dto.yearLevel,
+        section: dto.section.trim(),
+        enrollment_status: 'ENROLLED',
+        first_name_snapshot: firstName,
+        middle_name_snapshot: dto.middleName?.trim() || null,
+        last_name_snapshot: lastName,
+        updated_at: now
+      });
+      if (enrollErr) {
+        console.warn('[StudentService] Remote enrollment upsert warning:', enrollErr);
+      }
+    }
+
+    // 1c. Server-side NFC Card Registration
+    const initialCards: NfcCardRecord[] = [];
+    if (rfidClean && rfidCompact) {
+      const cardId = generateUUID();
+      const { error: cardErr } = await supabase.from('nfc_cards').insert({
+        id: cardId,
+        student_id: studentId,
+        uid_normalized: rfidClean,
+        status: 'ACTIVE',
+        assigned_at: now
+      });
+      if (cardErr) {
+        console.warn('[StudentService] Remote NFC card assignment warning:', cardErr);
+      }
+      initialCards.push({
+        id: cardId,
+        studentId,
+        rfidUid: rfidClean,
+        rfidUidCompact: rfidCompact,
+        status: 'ACTIVE',
+        assignedAt: now
+      });
+    }
+
+    // 2. Commit to local SQLite repository (server confirmed, no outbox item needed)
+    const newStudent: Student = {
+      id: studentId,
+      studentNumber: studentNumber || undefined,
+      firstName,
+      middleName: dto.middleName?.trim() || undefined,
+      lastName,
+      yearLevel: dto.yearLevel,
+      section: dto.section.trim(),
+      course: dto.course?.trim() || 'BSIT',
+      status: dto.status || 'ACTIVE',
+      rfidUid: rfidClean,
+      rfidUidCompact: rfidCompact,
+      cards: initialCards,
+      createdAt: now,
+      updatedAt: now
+    };
+
+    return this.repo.save(newStudent);
+  }
+
+  async updateStudent(id: string, dto: UpdateStudentDto): Promise<Student> {
+    await OperationPolicyService.assertPermitted('STUDENTS_CREATE_UPDATE_DEACTIVATE');
+    const student = await this.repo.getById(id);
+    if (!student) {
+      throw new Error('Student record not found.');
+    }
+
+    if (dto.firstName !== undefined && !dto.firstName.trim()) {
+      throw new Error('First Name cannot be empty.');
+    }
+    if (dto.lastName !== undefined && !dto.lastName.trim()) {
+      throw new Error('Last Name cannot be empty.');
+    }
+
+    if (dto.studentNumber !== undefined && dto.studentNumber.trim()) {
+      const isAvailable = await this.checkStudentNumberAvailability(dto.studentNumber.trim(), id);
+      if (!isAvailable) {
+        throw new Error(`Student Number "${dto.studentNumber.trim()}" is already assigned to another student.`);
+      }
+    }
+
+    // If RFID is being modified/added directly, verify uniqueness
+    if (dto.rfidUid && dto.rfidUid.trim() && dto.rfidUid !== student.rfidUid) {
+      const duplicateCheck = await this.checkRfidAvailability(dto.rfidUid, id);
+      if (duplicateCheck.isDuplicate && duplicateCheck.existingStudent) {
+        const ownerName = formatFullName(
+          duplicateCheck.existingStudent.firstName,
+          duplicateCheck.existingStudent.middleName,
+          duplicateCheck.existingStudent.lastName
+        );
+        throw new Error(
+          `RFID card is already registered to ${ownerName} (${duplicateCheck.existingStudent.course} • ${duplicateCheck.existingStudent.section}).`
+        );
+      }
+    }
+
+    const now = new Date().toISOString();
+
+    // 1. Authoritative Server-side Update on Supabase
+    const updates: Record<string, unknown> = {
+      updated_at: now
+    };
+    if (dto.firstName !== undefined) updates.first_name = dto.firstName.trim();
+    if (dto.middleName !== undefined) updates.middle_name = dto.middleName.trim() || null;
+    if (dto.lastName !== undefined) updates.last_name = dto.lastName.trim();
+    if (dto.studentNumber !== undefined) updates.school_id = dto.studentNumber.trim() ? normalizeSchoolId(dto.studentNumber.trim()) : null;
+    if (dto.status !== undefined) updates.status = dto.status;
+
+    const { error: updErr } = await supabase
+      .from('students')
+      .update(updates)
+      .eq('id', id);
+    if (updErr) {
+      throw new Error(`Server failed to update student: ${updErr.message}`);
+    }
+
+    // 1b. Academic enrollment updates on Supabase if applicable
+    if (dto.yearLevel !== undefined || dto.section !== undefined || dto.course !== undefined) {
+      let activeSemId: string | null = null;
+      try {
+        const activeSem = await AcademicRepository.getActiveSemester();
+        activeSemId = activeSem?.id || null;
+      } catch {
+        // ignore
+      }
+      if (!activeSemId) {
+        try {
+          const { data: semData } = await supabase
+            .from('semesters')
+            .select('id')
+            .eq('status', 'ACTIVE')
+            .limit(1)
+            .maybeSingle();
+          if (semData?.id) activeSemId = semData.id;
+        } catch {
+          // ignore
+        }
+      }
+
+      if (activeSemId) {
+        const enrollUpdates: Record<string, unknown> = {
+          updated_at: now
+        };
+        if (dto.yearLevel !== undefined) enrollUpdates.year_level = dto.yearLevel;
+        if (dto.section !== undefined) enrollUpdates.section = dto.section.trim();
+        if (dto.firstName !== undefined) enrollUpdates.first_name_snapshot = dto.firstName.trim();
+        if (dto.middleName !== undefined) enrollUpdates.middle_name_snapshot = dto.middleName.trim() || null;
+        if (dto.lastName !== undefined) enrollUpdates.last_name_snapshot = dto.lastName.trim();
+
+        if (dto.course !== undefined) {
+          try {
+            const { data: prog } = await supabase
+              .from('programs')
+              .select('id')
+              .ilike('code', dto.course.trim())
+              .limit(1)
+              .maybeSingle();
+            if (prog?.id) enrollUpdates.program_id = prog.id;
+          } catch {
+            // ignore
+          }
+        }
+
+        const { error: enrErr } = await supabase
+          .from('student_enrollments')
+          .update(enrollUpdates)
+          .eq('student_id', id)
+          .eq('semester_id', activeSemId);
+        if (enrErr) {
+          console.warn('[StudentService] Remote enrollment update warning:', enrErr);
+        }
+      }
+    }
+
+    // 1c. Direct RFID update if provided via DTO
+    let newCards = student.cards ? [...student.cards] : [];
+    let rfidClean = student.rfidUid;
+    let rfidCompact = student.rfidUidCompact;
+
+    if (dto.rfidUid !== undefined) {
+      rfidClean = dto.rfidUid ? dto.rfidUid.trim() : null;
+      rfidCompact = dto.rfidUidCompact !== undefined
+        ? (dto.rfidUidCompact ? dto.rfidUidCompact.trim() : null)
+        : (rfidClean ? rfidClean.replace(/[^0-9A-Fa-f]/g, '').toUpperCase() : null);
+
+      if (rfidClean) {
+        // Deactivate previous active cards on Supabase
+        await supabase
+          .from('nfc_cards')
+          .update({ status: 'REPLACED', deactivated_at: now })
+          .eq('student_id', id)
+          .eq('status', 'ACTIVE');
+
+        const cardId = generateUUID();
+        const { error: cardErr } = await supabase.from('nfc_cards').insert({
+          id: cardId,
+          student_id: id,
+          uid_normalized: rfidClean,
+          status: 'ACTIVE',
+          assigned_at: now
+        });
+        if (cardErr) {
+          console.warn('[StudentService] Remote NFC card insert warning:', cardErr);
+        }
+
+        newCards = newCards.map(c => c.status === 'ACTIVE' ? { ...c, status: 'REPLACED' as const, deactivatedAt: now } : c);
+        newCards.push({
+          id: cardId,
+          studentId: id,
+          rfidUid: rfidClean,
+          rfidUidCompact: rfidCompact || '',
+          status: 'ACTIVE',
+          assignedAt: now
+        });
+      } else {
+        // Deactivate all active cards on Supabase
+        await supabase
+          .from('nfc_cards')
+          .update({ status: 'DEACTIVATED', deactivated_at: now })
+          .eq('student_id', id)
+          .eq('status', 'ACTIVE');
+
+        newCards = newCards.map(c => c.status === 'ACTIVE' ? { ...c, status: 'DEACTIVATED' as const, deactivatedAt: now } : c);
+      }
+    }
+
+    // 2. Commit locally to SQLite repository
+    const updated: Student = {
+      ...student,
+      studentNumber: dto.studentNumber !== undefined ? (dto.studentNumber.trim() ? normalizeSchoolId(dto.studentNumber.trim()) : undefined) : student.studentNumber,
+      firstName: dto.firstName !== undefined ? dto.firstName.trim() : student.firstName,
+      middleName: dto.middleName !== undefined ? (dto.middleName.trim() || undefined) : student.middleName,
+      lastName: dto.lastName !== undefined ? dto.lastName.trim() : student.lastName,
+      yearLevel: dto.yearLevel !== undefined ? dto.yearLevel : student.yearLevel,
+      section: dto.section !== undefined ? dto.section.trim() : student.section,
+      course: dto.course !== undefined ? (dto.course.trim() || 'BSIT') : student.course,
+      status: dto.status !== undefined ? dto.status : (student.status || 'ACTIVE'),
+      rfidUid: rfidClean,
+      rfidUidCompact: rfidCompact,
+      cards: newCards,
+      updatedAt: now
+    };
+
+    return this.repo.save(updated);
+  }
+
+  async deactivateStudent(id: string): Promise<Student> {
+    await OperationPolicyService.assertPermitted('STUDENTS_CREATE_UPDATE_DEACTIVATE');
+    const student = await this.repo.getById(id);
+    if (!student) {
+      throw new Error('Student record not found.');
+    }
+
+    const now = new Date().toISOString();
+
+    // 1. Authoritative Server-side Deactivation on Supabase
+    const { error: deactErr } = await supabase
+      .from('students')
+      .update({ status: 'INACTIVE', updated_at: now })
+      .eq('id', id);
+    if (deactErr) {
+      throw new Error(`Server failed to deactivate student: ${deactErr.message}`);
+    }
+
+    // Deactivate active cards on Supabase
+    await supabase
+      .from('nfc_cards')
+      .update({ status: 'DEACTIVATED', deactivated_at: now, note: 'Student deactivated' })
+      .eq('student_id', id)
+      .eq('status', 'ACTIVE');
+
+    // 2. Commit locally
+    const updated: Student = {
+      ...student,
+      status: 'INACTIVE',
+      updatedAt: now
+    };
+
+    return this.repo.save(updated);
+  }
+
+  async deleteStudent(id: string): Promise<void> {
+    await OperationPolicyService.assertPermitted('STUDENTS_CREATE_UPDATE_DEACTIVATE');
+    const existing = await this.repo.getById(id);
+    if (!existing) {
+      throw new Error('Student record not found.');
+    }
+
+    const now = new Date().toISOString();
+
+    // 1. Authoritative Server-side Soft-delete on Supabase
+    const { error: delErr } = await supabase
+      .from('students')
+      .update({ status: 'INACTIVE', updated_at: now })
+      .eq('id', id);
+    if (delErr) {
+      throw new Error(`Server failed to delete student: ${delErr.message}`);
+    }
+
+    // Deactivate active cards on Supabase
+    await supabase
+      .from('nfc_cards')
+      .update({ status: 'DEACTIVATED', deactivated_at: now, note: 'Student deleted' })
+      .eq('student_id', id)
+      .eq('status', 'ACTIVE');
+
+    // 2. Commit locally
+    return this.repo.delete(id);
+  }
+
+  async updateStudentEnrollment(
+    studentId: string,
+    enrollmentData: {
+      yearLevel: YearLevel;
+      section: string;
+      course?: string;
+      semesterId?: string;
+    }
+  ): Promise<void> {
+    await OperationPolicyService.assertPermitted('STUDENTS_CREATE_UPDATE_DEACTIVATE');
+    const student = await this.repo.getById(studentId);
+    if (!student) {
+      throw new Error('Student record not found.');
+    }
+
+    const now = new Date().toISOString();
+    let semesterId = enrollmentData.semesterId;
+    if (!semesterId) {
+      try {
+        const activeSem = await AcademicRepository.getActiveSemester();
+        semesterId = activeSem?.id;
+      } catch {
+        // ignore
+      }
+      if (!semesterId) {
+        try {
+          const { data: semData } = await supabase
+            .from('semesters')
+            .select('id')
+            .eq('status', 'ACTIVE')
+            .limit(1)
+            .maybeSingle();
+          semesterId = semData?.id;
+        } catch {
+          // ignore
+        }
+      }
+    }
+
+    if (!semesterId) {
+      throw new Error('Cannot update enrollment: active semester not found.');
+    }
+
+    let programId: string | null = null;
+    const course = enrollmentData.course || student.course;
+    if (course) {
+      try {
+        const { data: prog } = await supabase
+          .from('programs')
+          .select('id')
+          .ilike('code', course.trim())
+          .limit(1)
+          .maybeSingle();
+        programId = prog?.id || null;
+      } catch {
+        // ignore
+      }
+    }
+
+    // 1. Authoritative Server-side Upsert on Supabase
+    const { error: enrErr } = await supabase.from('student_enrollments').upsert({
+      id: generateUUID(),
+      student_id: studentId,
+      semester_id: semesterId,
+      program_id: programId,
+      year_level: enrollmentData.yearLevel,
+      section: enrollmentData.section.trim(),
+      enrollment_status: 'ENROLLED',
+      first_name_snapshot: student.firstName,
+      middle_name_snapshot: student.middleName || null,
+      last_name_snapshot: student.lastName,
+      updated_at: now
+    });
+    if (enrErr) {
+      throw new Error(`Server failed to update enrollment: ${enrErr.message}`);
+    }
+
+    // 2. Mirror locally to SQLite
+    try {
+      const db = await getDatabase();
+      const existingEnrollment = await AcademicRepository.getStudentEnrollmentInSemester(studentId, semesterId);
+      if (existingEnrollment) {
+        await db.execute(
+          `UPDATE student_enrollments SET year_level = ?, section = ?, updated_at = ? WHERE id = ?`,
+          [enrollmentData.yearLevel, enrollmentData.section.trim(), now, existingEnrollment.id]
+        );
+      } else {
+        const yl = await AcademicRepository.getYearLevelByNumber(enrollmentData.yearLevel);
+        const sec = yl ? await AcademicRepository.getSectionByName(enrollmentData.section.trim(), yl.id) : null;
+        await AcademicRepository.createEnrollment({
+          id: `enr_${studentId}_${semesterId}`,
+          student_id: studentId,
+          semester_id: semesterId,
+          program_id: course ? `prog_${course.toLowerCase()}` : 'prog_bsit',
+          year_level: enrollmentData.yearLevel,
+          section: enrollmentData.section.trim(),
+          year_level_id: yl?.id || null,
+          section_id: sec?.id || null,
+          enrollment_status: 'ENROLLED',
+          first_name_snapshot: student.firstName,
+          middle_name_snapshot: student.middleName || null,
+          last_name_snapshot: student.lastName,
+          updated_at: now,
+        });
+      }
+    } catch (localErr) {
+      console.warn('[StudentService] Failed updating local enrollment in SQLite:', localErr);
+    }
+
+    // Also update student record cache
+    await this.repo.save({
+      ...student,
+      yearLevel: enrollmentData.yearLevel,
+      section: enrollmentData.section.trim(),
+      course: course || student.course,
+      updatedAt: now
+    });
+  }
+
+  async replaceStudentRfid(id: string, newRfidUid: string, newRfidCompact?: string, note?: string): Promise<Student> {
+    await OperationPolicyService.assertPermitted('NFC_CARD_ASSIGNMENT_REASSIGNMENT');
+    const student = await this.repo.getById(id);
+    if (!student) {
+      throw new Error('Student record not found.');
+    }
+
+    const cleanUid = newRfidUid.trim();
+    const compactUid = newRfidCompact?.trim() || cleanUid.replace(/[^0-9A-Fa-f]/g, '').toUpperCase();
+
+    const duplicateCheck = await this.checkRfidAvailability(cleanUid, id);
+    if (duplicateCheck.isDuplicate && duplicateCheck.existingStudent) {
+      const ownerName = formatFullName(
+        duplicateCheck.existingStudent.firstName,
+        duplicateCheck.existingStudent.middleName,
+        duplicateCheck.existingStudent.lastName
+      );
+      throw new Error(
+        `This card is already assigned to ${ownerName} (${duplicateCheck.existingStudent.course} • ${duplicateCheck.existingStudent.section}).`
+      );
+    }
+
+    const now = new Date().toISOString();
+    const newCardId = generateUUID();
+
+    // 1. Remote Server Confirmation on Supabase
+    // Deactivate previous active card on Supabase
+    const { error: repErr } = await supabase
+      .from('nfc_cards')
+      .update({ status: 'REPLACED', deactivated_at: now })
+      .eq('student_id', id)
+      .eq('status', 'ACTIVE');
+    if (repErr) {
+      throw new Error(`Server failed to update existing card: ${repErr.message}`);
+    }
+
+    // Insert new active card on Supabase
+    const { error: insErr } = await supabase.from('nfc_cards').insert({
+      id: newCardId,
+      student_id: id,
+      uid_normalized: cleanUid,
+      status: 'ACTIVE',
+      assigned_at: now,
+      note: note?.trim() || null
+    });
+    if (insErr) {
+      throw new Error(`Server failed to assign new card: ${insErr.message}`);
+    }
+
+    // 2. Commit locally
+    const cards = [...(student.cards || [])];
+
+    // Mark previous active cards as REPLACED
+    cards.forEach(card => {
+      if (card.status === 'ACTIVE') {
+        card.status = 'REPLACED';
+        card.deactivatedAt = now;
+      }
+    });
+
+    // Add new active card
+    cards.push({
+      id: newCardId,
+      studentId: id,
+      rfidUid: cleanUid,
+      rfidUidCompact: compactUid,
+      status: 'ACTIVE',
+      assignedAt: now,
+      note: note?.trim() || undefined
+    });
+
+    const updated: Student = {
+      ...student,
+      rfidUid: cleanUid,
+      rfidUidCompact: compactUid,
+      cards,
+      updatedAt: now
+    };
+
+    return this.repo.save(updated);
+  }
+
+  async deactivateStudentRfid(id: string, reason?: string): Promise<Student> {
+    await OperationPolicyService.assertPermitted('NFC_CARD_ASSIGNMENT_REASSIGNMENT');
+    const student = await this.repo.getById(id);
+    if (!student) {
+      throw new Error('Student record not found.');
+    }
+
+    const now = new Date().toISOString();
+
+    // 1. Remote Server Confirmation on Supabase
+    const { error: deactErr } = await supabase
+      .from('nfc_cards')
+      .update({
+        status: 'DEACTIVATED',
+        deactivated_at: now,
+        note: reason?.trim() || null
+      })
+      .eq('student_id', id)
+      .eq('status', 'ACTIVE');
+    if (deactErr) {
+      throw new Error(`Server failed to deactivate card: ${deactErr.message}`);
+    }
+
+    // 2. Commit locally
+    const cards = [...(student.cards || [])];
+
+    cards.forEach(card => {
+      if (card.status === 'ACTIVE') {
+        card.status = 'DEACTIVATED';
+        card.deactivatedAt = now;
+        if (reason) card.note = reason;
+      }
+    });
+
+    const updated: Student = {
+      ...student,
+      rfidUid: null,
+      rfidUidCompact: null,
+      cards,
+      updatedAt: now
+    };
+
+    return this.repo.save(updated);
+  }
+
+  async removeStudentRfid(id: string): Promise<Student> {
+    return this.deactivateStudentRfid(id, 'Removed by operator');
   }
 }
 

@@ -19,6 +19,7 @@ import {
 import { useNfc } from '@/composables/useNfc';
 import { studentService } from '@/services/student.service';
 import { financeService } from '@/services/finance.service';
+import { authService } from '@/services/auth.service';
 import { CardsRepository } from '@/database/repositories/cards.repository';
 import type { Student } from '@/types/student';
 import type {
@@ -29,11 +30,15 @@ import type {
 import { formatPeso, centavosToPeso, pesoToCentavos } from '@/utilities/finance-formatters';
 import { formatFullName } from '@/utilities/student-formatters';
 import { UniPageHeader, UniButton, UniCard, UniSheet, UniSelect } from '@/components/ui';
+import { useOperationPolicy } from '@/composables/useOperationPolicy';
 
 import { haptics } from '@/utilities/haptics';
 
 const router = useRouter();
 const route = useRoute();
+const { isPermitted, getDisabledReason } = useOperationPolicy();
+const canRecordPayment = isPermitted('PAYMENT_POST_REVERSE_RECEIPT');
+const paymentDisabledReason = getDisabledReason('PAYMENT_POST_REVERSE_RECEIPT');
 
 const {
   deviceStatus,
@@ -115,7 +120,10 @@ async function onStudentSelected() {
   }
 }
 
-watch(selectedStudentId, onStudentSelected);
+watch(selectedStudentId, () => {
+  activeAttempt.value = null;
+  onStudentSelected();
+});
 
 // NFC Resolution
 watch(lastTag, async (tag) => {
@@ -138,8 +146,26 @@ watch(lastTag, async (tag) => {
   }
 });
 
+function generateClientUuid(): string {
+  if (typeof crypto !== 'undefined' && crypto.randomUUID) {
+    return crypto.randomUUID();
+  }
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
+    const r = (Math.random() * 16) | 0;
+    const v = c === 'x' ? r : (r & 0x3) | 0x8;
+    return v.toString(16);
+  });
+}
+
+const activeAttempt = ref<{
+  paymentId: string;
+  referenceNumber: string;
+  idempotencyKey: string;
+} | null>(null);
+
 function toggleObligation(ob: StudentObligationItem) {
   haptics.light();
+  activeAttempt.value = null;
   const idx = selectedObligationIds.value.indexOf(ob.id);
   if (idx >= 0) {
     selectedObligationIds.value.splice(idx, 1);
@@ -151,6 +177,7 @@ function toggleObligation(ob: StudentObligationItem) {
 }
 
 function setPaymentAmount(obId: string, pesos: number) {
+  activeAttempt.value = null;
   const cents = Math.round(pesoToCentavos(pesos));
   const ob = outstandingObligations.value.find((o) => o.id === obId);
   const max = ob ? ob.balanceCentavos : cents;
@@ -166,6 +193,10 @@ async function handleConfirmPayment() {
     errorMessage.value = 'Please select at least one obligation to pay.';
     return;
   }
+  if (!canRecordPayment.value) {
+    errorMessage.value = paymentDisabledReason.value || 'Payment recording requires an active internet connection.';
+    return;
+  }
 
   isProcessing.value = true;
   errorMessage.value = '';
@@ -179,6 +210,16 @@ async function handleConfirmPayment() {
     const firstOb = outstandingObligations.value.find((o) => o.id === selectedObligationIds.value[0]);
     const semesterId = firstOb?.semesterId || 'sem_default';
 
+    // Preserve attempt identifiers across retries to prevent duplicate collection/charges
+    if (!activeAttempt.value) {
+      const paymentId = generateClientUuid();
+      activeAttempt.value = {
+        paymentId,
+        referenceNumber: 'PAY-' + Date.now().toString(36).toUpperCase() + '-' + Math.random().toString(36).substring(2, 6).toUpperCase(),
+        idempotencyKey: 'idemp_' + paymentId,
+      };
+    }
+
     const result = await financeService.recordPayment({
       studentId: selectedStudentId.value,
       semesterId,
@@ -187,15 +228,21 @@ async function handleConfirmPayment() {
       channel: identifiedViaNfc.value ? 'NFC' : 'MANUAL',
       allocations,
       notes: paymentNotes.value.trim() || undefined,
-      actorUserId: 'officer_local',
+      actorUserId: authService.user.value?.id || 'officer_user',
+      paymentId: activeAttempt.value.paymentId,
+      referenceNumber: activeAttempt.value.referenceNumber,
+      idempotencyKey: activeAttempt.value.idempotencyKey,
     });
 
     haptics.success();
 
+    // Reset attempt upon confirmed completion
+    activeAttempt.value = null;
+
     // Generate receipt
     completedReceipt.value = await financeService.generatePaymentReceipt(
       result.paymentId,
-      'Authorized Officer'
+      authService.user.value?.username || 'Authorized Officer'
     );
     isReceiptModalOpen.value = true;
 
@@ -384,9 +431,17 @@ onIonViewDidLeave(() => {
             <span class="banner-figure font-mono font-bold">{{ formatPeso(totalSelectedToPay) }}</span>
           </div>
 
+          <div v-if="!canRecordPayment" class="offline-warning-box">
+            <ion-icon :icon="alertCircle" class="warn-icon" />
+            <div class="warn-text">
+              <strong>Offline Mode</strong>
+              <p>{{ paymentDisabledReason }}</p>
+            </div>
+          </div>
+
           <UniButton
             variant="primary"
-            :disabled="isProcessing || totalSelectedToPay <= 0"
+            :disabled="isProcessing || totalSelectedToPay <= 0 || !canRecordPayment"
             @click="handleConfirmPayment"
           >
             <ion-spinner v-if="isProcessing" name="crescent" slot="start" />
@@ -784,5 +839,36 @@ onIonViewDidLeave(() => {
   justify-content: flex-end;
   gap: 10px;
   margin-top: 8px;
+}
+
+.offline-warning-box {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  padding: 10px 14px;
+  background: rgba(239, 68, 68, 0.1);
+  border: 1px solid rgba(239, 68, 68, 0.3);
+  border-radius: 8px;
+  color: #ef4444;
+  margin-bottom: 12px;
+}
+
+.offline-warning-box .warn-icon {
+  font-size: 20px;
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+
+.offline-warning-box .warn-text strong {
+  display: block;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.offline-warning-box .warn-text p {
+  margin: 2px 0 0;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--uni-text-muted, #94a3b8);
 }
 </style>

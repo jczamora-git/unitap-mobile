@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { StudentService } from '@/services/student.service';
 import type { IStudentRepository } from '@/services/student-storage.service';
 import type { Student } from '@/types/student';
+import { supabase } from '@/integrations/supabase/client';
 
 class MockStudentRepo implements IStudentRepository {
   private store: Student[] = [];
@@ -45,6 +46,23 @@ describe('StudentService', () => {
   beforeEach(() => {
     repo = new MockStudentRepo();
     service = new StudentService(repo);
+
+    (supabase.from as any) = () => {
+      const builder: any = {
+        insert: async () => ({ data: null, error: null }),
+        update: () => builder,
+        upsert: async () => ({ data: null, error: null }),
+        delete: () => builder,
+        select: () => builder,
+        eq: () => builder,
+        ilike: () => builder,
+        limit: () => builder,
+        maybeSingle: async () => ({ data: null, error: null }),
+        single: async () => ({ data: null, error: null }),
+      };
+      builder.then = (resolve: any) => resolve({ data: null, error: null });
+      return builder;
+    };
   });
 
   it('creates a valid student and assigns active NFC card', async () => {

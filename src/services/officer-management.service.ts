@@ -2,6 +2,7 @@ import { OfficerRepository, type OfficerListRecord } from '@/database/repositori
 import { AuthRepository } from '@/database/repositories/auth.repository';
 import { StudentsRepository } from '@/database/repositories/students.repository';
 import { StudentActivationService } from './student-activation.service';
+import { OperationPolicyService } from './operation-policy.service';
 import type {
   OfficerAppointmentRecord,
   OfficerPermissionPreset,
@@ -136,6 +137,8 @@ export class OfficerManagementService {
     dto: CreateExistingStudentOfficerDto
   ): Promise<{ success: boolean; appointment: OfficerAppointmentRecord; error?: string }> {
     try {
+      await OperationPolicyService.assertPermitted('OFFICER_MANAGEMENT_AND_PERMISSIONS');
+
       const student = await StudentsRepository.getStudentById(dto.studentId);
       if (!student) {
         return { success: false, appointment: null as any, error: 'Student record not found.' };
@@ -215,6 +218,8 @@ export class OfficerManagementService {
     error?: string;
   }> {
     try {
+      await OperationPolicyService.assertPermitted('OFFICER_MANAGEMENT_AND_PERMISSIONS');
+
       const student = await StudentsRepository.getStudentById(dto.studentId);
       if (!student) {
         return { success: false, appointment: null as any, error: 'Student record not found.' };
@@ -288,6 +293,8 @@ export class OfficerManagementService {
     error?: string;
   }> {
     try {
+      await OperationPolicyService.assertPermitted('OFFICER_MANAGEMENT_AND_PERMISSIONS');
+
       const cleanEmail = dto.email.trim().toLowerCase();
       const existingUser = await AuthRepository.getUserByUsername(cleanEmail);
       if (existingUser) {
@@ -346,6 +353,8 @@ export class OfficerManagementService {
     password: string
   ): Promise<{ success: boolean; user?: any; error?: string }> {
     try {
+      await OperationPolicyService.assertPermitted('OFFICER_MANAGEMENT_AND_PERMISSIONS');
+
       if (password.length < 8) {
         return { success: false, error: 'Password must be at least 8 characters long.' };
       }
@@ -420,6 +429,7 @@ export class OfficerManagementService {
     appointmentId: string
   ): Promise<{ success: boolean; error?: string }> {
     try {
+      await OperationPolicyService.assertPermitted('OFFICER_MANAGEMENT_AND_PERMISSIONS');
       await OfficerRepository.suspendAppointment(appointmentId);
       return { success: true };
     } catch (err: unknown) {
@@ -434,6 +444,7 @@ export class OfficerManagementService {
     appointmentId: string
   ): Promise<{ success: boolean; error?: string }> {
     try {
+      await OperationPolicyService.assertPermitted('OFFICER_MANAGEMENT_AND_PERMISSIONS');
       await OfficerRepository.revokeAppointment(appointmentId);
       return { success: true };
     } catch (err: unknown) {
@@ -450,6 +461,7 @@ export class OfficerManagementService {
     customPermissions?: string[]
   ): Promise<{ success: boolean; error?: string }> {
     try {
+      await OperationPolicyService.assertPermitted('OFFICER_MANAGEMENT_AND_PERMISSIONS');
       const perms = preset === 'CUSTOM' ? (customPermissions || []) : PRESET_DEFINITIONS[preset];
       await OfficerRepository.updateAppointment(appointmentId, {
         permission_preset: preset,
@@ -476,6 +488,7 @@ export class OfficerManagementService {
     }
   ): Promise<{ success: boolean; error?: string }> {
     try {
+      await OperationPolicyService.assertPermitted('OFFICER_MANAGEMENT_AND_PERMISSIONS');
       await OfficerRepository.updateAppointment(appointmentId, {
         ...(updates.academicYearId !== undefined && { academic_year_id: updates.academicYearId }),
         ...(updates.semesterId !== undefined && { semester_id: updates.semesterId }),
@@ -498,6 +511,7 @@ export class OfficerManagementService {
     callerUserId?: string
   ): Promise<{ success: boolean; code?: string; error?: string }> {
     try {
+      await OperationPolicyService.assertPermitted('OFFICER_MANAGEMENT_AND_PERMISSIONS');
       const appt = await OfficerRepository.getAppointmentById(appointmentId);
       if (!appt) {
         return { success: false, error: 'Appointment record not found.' };

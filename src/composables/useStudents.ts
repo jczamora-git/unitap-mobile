@@ -1,7 +1,7 @@
 import { ref, computed } from 'vue';
 import type { Student, CreateStudentDto, UpdateStudentDto, YearLevel } from '@/types/student';
 import { studentService } from '@/services/student.service';
-import { PullSyncService } from '@/services/sync/pull-sync.service';
+import { SelectiveSyncService } from '@/services/sync/selective-sync.service';
 
 const students = ref<Student[]>([]);
 const currentStudent = ref<Student | null>(null);
@@ -53,23 +53,26 @@ export function useStudents() {
     isLoading.value = true;
     error.value = null;
     try {
+      // 1. Instant local-first read from SQLite (0ms latency, offline-ready)
       studentService.clearCache();
-      let data = await studentService.getStudents();
+      const data = await studentService.getStudents();
+      students.value = data;
 
-      // If no students in local storage and device is online, attempt a pull sync to hydrate
-      if ((data.length === 0 || forceRemote) && typeof navigator !== 'undefined' && navigator.onLine) {
-        try {
-          const pullRes = await PullSyncService.pullRemoteChanges();
-          if (pullRes.appliedCount > 0) {
-            studentService.clearCache();
-            data = await studentService.getStudents();
-          }
-        } catch (syncErr) {
-          console.warn('[useStudents] Pull remote changes error on empty roster:', syncErr);
-        }
+      // 2. Smart selective background refresh (if online, stale, or forced)
+      // Only refreshes students domain (students, enrollments, cards); avoids redundant 19-table sync
+      if (typeof navigator !== 'undefined' && navigator.onLine) {
+        SelectiveSyncService.refreshStudents(forceRemote)
+          .then(async (res) => {
+            if (res.refreshed && res.recordsPulled > 0) {
+              studentService.clearCache();
+              students.value = await studentService.getStudents();
+            }
+          })
+          .catch((refreshErr) => {
+            console.warn('[useStudents] Selective student refresh failed, cached data retained:', refreshErr);
+          });
       }
 
-      students.value = data;
       return data;
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -178,6 +181,46 @@ export function useStudents() {
     }
   }
 
+  async function deactivateStudent(id: string): Promise<Student> {
+    isLoading.value = true;
+    error.value = null;
+    try {
+      const updated = await studentService.deactivateStudent(id);
+      await loadStudents();
+      if (currentStudent.value && currentStudent.value.id === id) {
+        currentStudent.value = updated;
+      }
+      return updated;
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      error.value = msg;
+      throw err;
+    } finally {
+      isLoading.value = false;
+    }
+  }
+
+  async function updateStudentEnrollment(
+    studentId: string,
+    enrollmentData: { yearLevel: YearLevel; section: string; course?: string; semesterId?: string }
+  ): Promise<void> {
+    isLoading.value = true;
+    error.value = null;
+    try {
+      await studentService.updateStudentEnrollment(studentId, enrollmentData);
+      await loadStudents();
+      if (currentStudent.value && currentStudent.value.id === studentId) {
+        currentStudent.value = await studentService.getStudent(studentId);
+      }
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      error.value = msg;
+      throw err;
+    } finally {
+      isLoading.value = false;
+    }
+  }
+
   async function deleteStudent(id: string): Promise<void> {
     isLoading.value = true;
     error.value = null;
@@ -220,6 +263,8 @@ export function useStudents() {
     updateStudent,
     replaceRfid,
     removeRfid,
+    deactivateStudent,
+    updateStudentEnrollment,
     deleteStudent,
     resetFilters
   };

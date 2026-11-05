@@ -10,15 +10,19 @@ import {
   IonSelectOption,
   IonIcon
 } from '@ionic/vue';
-import { checkmarkOutline, closeCircleOutline } from 'ionicons/icons';
+import { checkmarkOutline, closeCircleOutline, alertCircleOutline } from 'ionicons/icons';
 import { eventService } from '@/services/event.service';
 import { AcademicRepository } from '@/database/repositories/academic.repository';
+import { useOperationPolicy } from '@/composables/useOperationPolicy';
 import type { EventType, AudienceType } from '@/types/event';
 import type { EventCategory, YearLevel, SectionRecord } from '@/types/database';
 import { UniPageHeader, UniButton } from '@/components/ui';
 
 const router = useRouter();
 const route = useRoute();
+const { isPermitted, getDisabledReason } = useOperationPolicy();
+const canMutateEvent = isPermitted('EVENTS_AND_OCCURRENCES_MUTATIONS');
+const mutateEventDisabledReason = getDisabledReason('EVENTS_AND_OCCURRENCES_MUTATIONS');
 const eventId = computed(() => String(route.params.id || ''));
 const isEditMode = computed(() => !!eventId.value);
 
@@ -128,6 +132,10 @@ function removeSection(sec: string) {
 
 async function handleSaveEvent() {
   errorMessage.value = '';
+  if (!canMutateEvent.value) {
+    errorMessage.value = mutateEventDisabledReason.value || 'Creating or editing events requires an active internet connection.';
+    return;
+  }
   if (!title.value.trim()) {
     errorMessage.value = 'Please enter an event title.';
     return;
@@ -414,10 +422,19 @@ async function handleSaveEvent() {
 
           <!-- Sticky / Bottom Submit Action -->
           <div class="form-submit-row">
+            <div v-if="!canMutateEvent" class="offline-warning-box">
+              <ion-icon :icon="alertCircleOutline" class="warn-icon" />
+              <div class="warn-text">
+                <strong>Offline Mode</strong>
+                <p>{{ mutateEventDisabledReason }}</p>
+              </div>
+            </div>
+
             <UniButton 
               type="submit" 
               variant="primary"
               block
+              :disabled="isSubmitting || !canMutateEvent"
               :loading="isSubmitting"
               :icon="checkmarkOutline"
             >
@@ -651,5 +668,36 @@ async function handleSaveEvent() {
 .btn-spinner {
   width: 18px;
   height: 18px;
+}
+
+.offline-warning-box {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  padding: 10px 14px;
+  background: rgba(239, 68, 68, 0.1);
+  border: 1px solid rgba(239, 68, 68, 0.3);
+  border-radius: 8px;
+  color: #ef4444;
+  margin-bottom: 12px;
+}
+
+.offline-warning-box .warn-icon {
+  font-size: 20px;
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+
+.offline-warning-box .warn-text strong {
+  display: block;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.offline-warning-box .warn-text p {
+  margin: 2px 0 0;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--uni-text-muted, #94a3b8);
 }
 </style>

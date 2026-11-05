@@ -9,6 +9,7 @@ import type {
 import type { AttendanceStats } from '@/types/attendance';
 import { localEventRepository, type IEventRepository } from '@/storage/event-storage.service';
 import { studentService } from '@/services/student.service';
+import { OperationPolicyService } from './operation-policy.service';
 
 function generateId(prefix: string): string {
   if (typeof crypto !== 'undefined' && crypto.randomUUID) {
@@ -29,6 +30,8 @@ export class EventService {
   }
 
   async createEvent(dto: CreateEventDto): Promise<Event> {
+    await OperationPolicyService.assertPermitted('EVENTS_AND_OCCURRENCES_MUTATIONS');
+
     if (!dto.title || !dto.title.trim()) {
       throw new Error('Event Title is required.');
     }
@@ -56,6 +59,8 @@ export class EventService {
   }
 
   async updateEvent(id: string, updates: Partial<Event>): Promise<Event> {
+    await OperationPolicyService.assertPermitted('EVENTS_AND_OCCURRENCES_MUTATIONS');
+
     const existing = await this.getEvent(id);
     if (!existing) {
       throw new Error('Event not found.');
@@ -72,6 +77,7 @@ export class EventService {
   }
 
   async deleteEvent(id: string): Promise<void> {
+    await OperationPolicyService.assertPermitted('EVENTS_AND_OCCURRENCES_MUTATIONS');
     return this.repo.deleteEvent(id);
   }
 
@@ -84,6 +90,8 @@ export class EventService {
   }
 
   async createOccurrence(dto: CreateOccurrenceDto): Promise<EventOccurrence> {
+    await OperationPolicyService.assertPermitted('EVENTS_AND_OCCURRENCES_MUTATIONS');
+
     const event = await this.getEvent(dto.eventId);
     if (!event) {
       throw new Error('Parent event does not exist.');

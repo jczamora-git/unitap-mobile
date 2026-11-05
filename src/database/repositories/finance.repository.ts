@@ -1176,6 +1176,134 @@ export class FinanceRepository {
     });
   }
 
+  /**
+   * Mirrors an already server-confirmed payment into local SQLite cache.
+   * DOES NOT enqueue to sync_outbox because the transaction has already been durably acknowledged by Supabase.
+   */
+  public static async recordServerConfirmedPayment(
+    payment: PaymentRecord,
+    allocations: { id: string; obligation_id: string; amount_centavos: number }[],
+    adapter?: DatabaseAdapter
+  ): Promise<void> {
+    if (payment.amount_centavos <= 0 || !Number.isInteger(payment.amount_centavos)) {
+      throw new Error('Payment amount must be a positive integer in centavos.');
+    }
+
+    const totalAllocated = allocations.reduce((acc, curr) => acc + curr.amount_centavos, 0);
+    if (totalAllocated !== payment.amount_centavos) {
+      throw new Error(`Total allocations (${totalAllocated}) must equal payment amount (${payment.amount_centavos}).`);
+    }
+
+    const db = await this.getDb(adapter);
+    await db.transaction(async (tx) => {
+      const { deviceId, validActorId } = await this.ensureDeviceAndActor(tx, payment.processed_by_user_id, payment.processed_at);
+
+      // Check idempotency in local SQLite
+      const existing = await tx.queryOne<PaymentRecord>(
+        'SELECT id FROM payments WHERE id = ? OR idempotency_key = ?',
+        [payment.id, payment.idempotency_key]
+      );
+      if (existing) {
+        return;
+      }
+
+      await tx.execute(
+        `INSERT INTO payments (
+          id, student_id, semester_id, reference_number, idempotency_key, amount_centavos,
+          source, channel, status, processed_by_user_id, device_id, notes, processed_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          payment.id,
+          payment.student_id,
+          payment.semester_id,
+          payment.reference_number,
+          payment.idempotency_key,
+          payment.amount_centavos,
+          payment.source,
+          payment.channel,
+          'POSTED',
+          validActorId,
+          deviceId,
+          payment.notes || null,
+          payment.processed_at,
+        ]
+      );
+
+      for (const alloc of allocations) {
+        await tx.execute(
+          `INSERT OR IGNORE INTO payment_allocations (id, payment_id, obligation_id, amount_centavos)
+           VALUES (?, ?, ?, ?)`,
+          [alloc.id, payment.id, alloc.obligation_id, alloc.amount_centavos]
+        );
+      }
+
+      const auditId = 'aud_pay_' + Math.random().toString(36).substring(2, 10);
+      await tx.execute(
+        `INSERT INTO audit_events (id, actor_user_id, device_id, entity_type, entity_id, action, details_json, occurred_at)
+         VALUES (?, ?, ?, 'PAYMENT', ?, 'RECORD', ?, ?)`,
+        [
+          auditId,
+          validActorId,
+          deviceId,
+          payment.id,
+          JSON.stringify({
+            amount: payment.amount_centavos,
+            source: payment.source,
+            reference: payment.reference_number,
+            allocations_count: allocations.length,
+            confirmed_by_server: true,
+          }),
+          payment.processed_at,
+        ]
+      );
+      // NOTE: Intentionally NO insert into sync_outbox
+    });
+  }
+
+  /**
+   * Mirrors an already server-confirmed reversal into local SQLite cache.
+   * DOES NOT enqueue to sync_outbox because the reversal has already been acknowledged by Supabase.
+   */
+  public static async recordServerConfirmedReversal(
+    paymentId: string,
+    reason: string,
+    reversedByUserId: string,
+    adapter?: DatabaseAdapter
+  ): Promise<void> {
+    if (!reason || reason.trim().length === 0) {
+      throw new Error('Reversal reason is mandatory.');
+    }
+
+    const db = await this.getDb(adapter);
+    await db.transaction(async (tx) => {
+      const payment = await tx.queryOne<PaymentRecord>('SELECT * FROM payments WHERE id = ?', [paymentId]);
+      if (!payment) {
+        return;
+      }
+      if (payment.status === 'REVERSED') {
+        return;
+      }
+
+      const now = new Date().toISOString();
+      const { deviceId, validActorId } = await this.ensureDeviceAndActor(tx, reversedByUserId, now);
+
+      await tx.execute(
+        `UPDATE payments
+         SET status = 'REVERSED', reversed_at = ?, reversed_by_user_id = ?, reversal_reason = ?
+         WHERE id = ?`,
+        [now, validActorId, reason.trim(), paymentId]
+      );
+
+      const auditId = 'aud_rev_' + Math.random().toString(36).substring(2, 10);
+      await tx.execute(
+        `INSERT INTO audit_events (id, actor_user_id, device_id, entity_type, entity_id, action, details_json, occurred_at)
+         VALUES (?, ?, ?, 'PAYMENT', ?, 'REVERSE', ?, ?)`,
+        [auditId, validActorId, deviceId, paymentId, JSON.stringify({ reason: reason.trim(), confirmed_by_server: true }), now]
+      );
+      // NOTE: Intentionally NO insert into sync_outbox
+    });
+  }
+
   public static async getPaymentsByStudent(
     studentId: string,
     semesterId?: string,

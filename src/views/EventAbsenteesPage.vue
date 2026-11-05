@@ -42,9 +42,13 @@ import {
   UniRecordList,
   UniExpandableRow,
 } from '@/components/ui';
+import { useOperationPolicy } from '@/composables/useOperationPolicy';
 import { haptics } from '@/utilities/haptics';
 
 const route = useRoute();
+const { isPermitted, getDisabledReason } = useOperationPolicy();
+const canAssessFines = isPermitted('FINANCE_ASSESSMENTS_AND_RULES');
+const assessFinesDisabledReason = getDisabledReason('FINANCE_ASSESSMENTS_AND_RULES');
 
 // Term & Event State
 const academicYears = ref<AcademicYear[]>([]);
@@ -378,6 +382,10 @@ function openBulkAssessmentModal() {
 
 async function confirmBulkAssessment() {
   if (selectedCandidates.value.length === 0) return;
+  if (!canAssessFines.value) {
+    assessmentError.value = assessFinesDisabledReason.value || 'Assessing fines requires an active internet connection.';
+    return;
+  }
   if (!isSessionClosed.value) {
     assessmentError.value = 'Cannot assess fines while session is open or scheduled.';
     return;
@@ -705,7 +713,7 @@ onIonViewWillEnter(initializeData);
 
         <UniButton
           variant="primary"
-          :disabled="selectedCandidates.length === 0 || !isSessionClosed"
+          :disabled="selectedCandidates.length === 0 || !isSessionClosed || !canAssessFines"
           @click="openBulkAssessmentModal"
         >
           <ion-icon :icon="cashOutline" slot="start" />
@@ -793,6 +801,14 @@ onIonViewWillEnter(initializeData);
             </div>
           </div>
 
+          <div v-if="!canAssessFines" class="offline-warning-box">
+            <ion-icon :icon="alertCircleOutline" class="warn-icon" />
+            <div class="warn-text">
+              <strong>Offline Mode</strong>
+              <p>{{ assessFinesDisabledReason }}</p>
+            </div>
+          </div>
+
           <div class="sheet-actions">
             <UniButton
               variant="outline"
@@ -802,7 +818,7 @@ onIonViewWillEnter(initializeData);
             </UniButton>
             <UniButton
               variant="primary"
-              :disabled="isAssessing || selectedCandidates.length === 0"
+              :disabled="isAssessing || selectedCandidates.length === 0 || !canAssessFines"
               @click="confirmBulkAssessment"
             >
               <ion-spinner v-if="isAssessing" name="crescent" slot="start" />
@@ -1221,5 +1237,36 @@ onIonViewWillEnter(initializeData);
   justify-content: flex-end;
   gap: 10px;
   margin-top: 8px;
+}
+
+.offline-warning-box {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  padding: 10px 14px;
+  background: rgba(239, 68, 68, 0.1);
+  border: 1px solid rgba(239, 68, 68, 0.3);
+  border-radius: 8px;
+  color: #ef4444;
+  margin-bottom: 12px;
+}
+
+.offline-warning-box .warn-icon {
+  font-size: 20px;
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+
+.offline-warning-box .warn-text strong {
+  display: block;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.offline-warning-box .warn-text p {
+  margin: 2px 0 0;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--uni-text-muted, #94a3b8);
 }
 </style>

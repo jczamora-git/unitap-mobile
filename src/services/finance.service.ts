@@ -6,6 +6,8 @@ import {
 import { AcademicRepository } from '@/database/repositories/academic.repository';
 import { StudentsRepository } from '@/database/repositories/students.repository';
 import { generateReferenceNumber, formatCentavosToPesos } from '@/utilities/finance-formatters';
+import { OperationPolicyService } from './operation-policy.service';
+import { supabase } from '@/integrations/supabase/client';
 import type {
   ObligationRuleItem,
   StudentObligationItem,
@@ -34,6 +36,17 @@ function generateId(prefix: string): string {
     return `${prefix}_${crypto.randomUUID()}`;
   }
   return `${prefix}_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
+}
+
+function generateUuid(): string {
+  if (typeof crypto !== 'undefined' && crypto.randomUUID) {
+    return crypto.randomUUID();
+  }
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
+    const r = (Math.random() * 16) | 0;
+    const v = c === 'x' ? r : (r & 0x3) | 0x8;
+    return v.toString(16);
+  });
 }
 
 export class FinanceService {
@@ -65,6 +78,8 @@ export class FinanceService {
     dueOn?: string | null;
     actorUserId?: string;
   }): Promise<ObligationRuleItem> {
+    await OperationPolicyService.assertPermitted('FINANCE_ASSESSMENTS_AND_RULES');
+
     if (!params.name || !params.name.trim()) {
       throw new Error('Rule name is required.');
     }
@@ -117,6 +132,7 @@ export class FinanceService {
   }
 
   async assessBulkFines(params: BulkFineAssessmentParams): Promise<BulkFineAssessmentResult> {
+    await OperationPolicyService.assertPermitted('FINANCE_ASSESSMENTS_AND_RULES');
     return FinanceRepository.assessBulkFines(params);
   }
 
@@ -129,11 +145,12 @@ export class FinanceService {
     ruleId?: string;
     actorUserId?: string;
   }): Promise<StudentObligationItem> {
+    await OperationPolicyService.assertPermitted('FINANCE_ASSESSMENTS_AND_RULES');
     if (!params.studentId) throw new Error('Student is required.');
     if (!params.title || !params.title.trim()) throw new Error('Fine title is required.');
     if (params.amountCentavos <= 0) throw new Error('Fine amount must be greater than zero.');
 
-    const id = generateId('ob');
+    const id = generateUuid();
     const now = new Date().toISOString();
 
     await FinanceRepository.assessObligation({
@@ -174,6 +191,7 @@ export class FinanceService {
   // ==========================================================================
 
   async assessBulkContributions(params: BulkContributionParams): Promise<BulkContributionResult> {
+    await OperationPolicyService.assertPermitted('FINANCE_ASSESSMENTS_AND_RULES');
     return FinanceRepository.assessBulkContributions(params);
   }
 
@@ -202,6 +220,7 @@ export class FinanceService {
     reason: string,
     actorUserId: string
   ): Promise<void> {
+    await OperationPolicyService.assertPermitted('FINANCE_ASSESSMENTS_AND_RULES');
     return FinanceRepository.voidObligation(obligationId, reason, actorUserId);
   }
 
@@ -218,7 +237,12 @@ export class FinanceService {
     allocations: { obligationId: string; amountCentavos: number }[];
     notes?: string;
     actorUserId: string;
+    paymentId?: string;
+    referenceNumber?: string;
+    idempotencyKey?: string;
   }): Promise<{ paymentId: string; referenceNumber: string }> {
+    await OperationPolicyService.assertPermitted('PAYMENT_POST_REVERSE_RECEIPT');
+
     if (params.amountCentavos <= 0) {
       throw new Error('Payment amount must be greater than zero.');
     }
@@ -231,35 +255,72 @@ export class FinanceService {
       throw new Error(`Total allocations (${totalAlloc}) must match payment amount (${params.amountCentavos}).`);
     }
 
-    const paymentId = generateId('pay');
-    const referenceNumber = generateReferenceNumber('PAY');
-    const idempotencyKey = 'idemp_' + paymentId;
-    const now = new Date().toISOString();
-    const source = (params.source === 'CASH' ? 'CASH_RECORDED' : params.source) as 'CASH_RECORDED' | 'MANUAL_TRANSFER_RECORD' | 'SIMULATED_WALLET';
+    // Source normalization & strict validation (reject unsupported/retired sources)
+    const normalizedSource = params.source === 'CASH' ? 'CASH_RECORDED' : params.source;
+    if (normalizedSource !== 'CASH_RECORDED' && normalizedSource !== 'MANUAL_TRANSFER_RECORD') {
+      throw new Error(`Unsupported payment source: ${params.source}`);
+    }
 
-    await FinanceRepository.recordPayment(
+    // Reuse client-supplied attempt identifiers if provided (for safe retry), otherwise generate fresh RFC 4122 UUID
+    const paymentId = params.paymentId || generateUuid();
+    const referenceNumber = params.referenceNumber || generateReferenceNumber('PAY');
+    const idempotencyKey = params.idempotencyKey || ('idemp_' + paymentId);
+    const now = new Date().toISOString();
+
+    const allocPayload = params.allocations.map((a) => ({
+      id: generateUuid(),
+      obligation_id: a.obligationId,
+      amount_centavos: a.amountCentavos,
+    }));
+
+    // 1. Authoritative Server RPC Confirmation
+    const { data: rpcRes, error: rpcErr } = await supabase.rpc('record_student_payment', {
+      p_payment_id: paymentId,
+      p_student_id: params.studentId,
+      p_semester_id: params.semesterId,
+      p_reference_number: referenceNumber,
+      p_idempotency_key: idempotencyKey,
+      p_amount_centavos: params.amountCentavos,
+      p_source: normalizedSource,
+      p_channel: params.channel || 'MANUAL',
+      p_allocations: allocPayload,
+      p_notes: params.notes || null,
+    });
+
+    if (rpcErr) {
+      if (rpcErr.code === 'PGRST202' || rpcErr.message?.includes('Could not find the function') || rpcErr.message?.includes('schema cache')) {
+        throw new Error('Payment system server update in progress. Please contact system administrator.');
+      }
+      throw new Error(`Server payment recording failed: ${rpcErr.message}`);
+    }
+
+    if (rpcRes?.status !== 'CONFIRMED' && rpcRes?.status !== 'ALREADY_RECORDED') {
+      throw new Error(`Payment rejected by server: ${rpcRes?.error || rpcRes?.message || 'Server did not confirm transaction.'}`);
+    }
+
+    const confirmedPaymentId = rpcRes.payment_id || paymentId;
+    const confirmedReferenceNumber = rpcRes.reference_number || referenceNumber;
+
+    // 2. Mirror server-confirmed payment into local SQLite (NO outbox item created)
+    await FinanceRepository.recordServerConfirmedPayment(
       {
-        id: paymentId,
+        id: confirmedPaymentId,
         student_id: params.studentId,
         semester_id: params.semesterId,
-        reference_number: referenceNumber,
+        reference_number: confirmedReferenceNumber,
         idempotency_key: idempotencyKey,
         amount_centavos: params.amountCentavos,
-        source,
+        source: normalizedSource,
         channel: params.channel || 'MANUAL',
         status: 'POSTED',
         processed_by_user_id: params.actorUserId,
         notes: params.notes || null,
-        processed_at: now,
+        processed_at: rpcRes.processed_at || now,
       },
-      params.allocations.map((a) => ({
-        id: generateId('pa'),
-        obligation_id: a.obligationId,
-        amount_centavos: a.amountCentavos,
-      }))
+      allocPayload
     );
 
-    return { paymentId, referenceNumber };
+    return { paymentId: confirmedPaymentId, referenceNumber: confirmedReferenceNumber };
   }
 
   async reversePayment(
@@ -267,7 +328,32 @@ export class FinanceService {
     reason: string,
     actorUserId: string
   ): Promise<void> {
-    return FinanceRepository.reversePayment(paymentId, reason, actorUserId);
+    await OperationPolicyService.assertPermitted('PAYMENT_POST_REVERSE_RECEIPT');
+
+    if (!reason || reason.trim().length === 0) {
+      throw new Error('Reversal reason is mandatory.');
+    }
+
+    const idempotencyKey = 'idemp_rev_' + paymentId;
+    const { data: revRes, error: revErr } = await supabase.rpc('reverse_student_payment', {
+      p_payment_id: paymentId,
+      p_reversal_reason: reason.trim(),
+      p_idempotency_key: idempotencyKey,
+    });
+
+    if (revErr) {
+      if (revErr.code === 'PGRST202' || revErr.message?.includes('Could not find the function') || revErr.message?.includes('schema cache')) {
+        throw new Error('Payment system server update in progress. Please contact system administrator.');
+      }
+      throw new Error(`Server payment reversal failed: ${revErr.message}`);
+    }
+
+    if (!revRes?.success && revRes?.status !== 'ALREADY_REVERSED' && revRes?.status !== 'REVERSED') {
+      throw new Error(`Payment reversal rejected by server: ${revRes?.error || revRes?.message || 'Server did not confirm reversal.'}`);
+    }
+
+    // Mirror server-confirmed reversal into local SQLite (NO outbox item created)
+    await FinanceRepository.recordServerConfirmedReversal(paymentId, reason.trim(), actorUserId);
   }
 
   async getAllPayments(semesterId?: string): Promise<PaymentItem[]> {

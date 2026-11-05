@@ -9,9 +9,10 @@ import {
   IonSelect,
   IonSelectOption
 } from '@ionic/vue';
-import { checkmarkOutline } from 'ionicons/icons';
+import { checkmarkOutline, alertCircleOutline } from 'ionicons/icons';
 import { studentService } from '@/services/student.service';
 import { financeService } from '@/services/finance.service';
+import { useOperationPolicy } from '@/composables/useOperationPolicy';
 import type { Student } from '@/types/student';
 import type { ChargeType, ChargeTemplate } from '@/types/finance';
 import { centavosToPeso, pesoToCentavos } from '@/utilities/finance-formatters';
@@ -20,6 +21,9 @@ import { UniPageHeader, UniButton } from '@/components/ui';
 
 const route = useRoute();
 const router = useRouter();
+const { isPermitted, getDisabledReason } = useOperationPolicy();
+const canCreateCharge = isPermitted('FINANCE_ASSESSMENTS_AND_RULES');
+const createChargeDisabledReason = getDisabledReason('FINANCE_ASSESSMENTS_AND_RULES');
 
 const students = ref<Student[]>([]);
 const templates = ref<ChargeTemplate[]>([]);
@@ -52,6 +56,10 @@ function onTemplateChange() {
 
 async function handleSaveCharge() {
   errorMessage.value = '';
+  if (!canCreateCharge.value) {
+    errorMessage.value = createChargeDisabledReason.value || 'Creating financial charge rules requires an active internet connection.';
+    return;
+  }
   if (!selectedStudentId.value) {
     errorMessage.value = 'Please select a student.';
     return;
@@ -194,10 +202,19 @@ async function handleSaveCharge() {
 
           <!-- Submit Button -->
           <div class="form-submit-row">
+            <div v-if="!canCreateCharge" class="offline-warning-box">
+              <ion-icon :icon="alertCircleOutline" class="warn-icon" />
+              <div class="warn-text">
+                <strong>Offline Mode</strong>
+                <p>{{ createChargeDisabledReason }}</p>
+              </div>
+            </div>
+
             <UniButton 
               type="submit" 
               variant="primary"
               block
+              :disabled="isSubmitting || !canCreateCharge"
               :loading="isSubmitting"
               :icon="checkmarkOutline"
             >
@@ -315,5 +332,36 @@ async function handleSaveCharge() {
 .btn-spinner {
   width: 18px;
   height: 18px;
+}
+
+.offline-warning-box {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  padding: 10px 14px;
+  background: rgba(239, 68, 68, 0.1);
+  border: 1px solid rgba(239, 68, 68, 0.3);
+  border-radius: 8px;
+  color: #ef4444;
+  margin-bottom: 12px;
+}
+
+.offline-warning-box .warn-icon {
+  font-size: 20px;
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+
+.offline-warning-box .warn-text strong {
+  display: block;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.offline-warning-box .warn-text p {
+  margin: 2px 0 0;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--uni-text-muted, #94a3b8);
 }
 </style>

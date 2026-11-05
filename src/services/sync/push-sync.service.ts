@@ -164,33 +164,94 @@ export class PushSyncService {
             }
           }
         } else if (op.entity_type === 'PAYMENT') {
+          const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
           if (op.operation === 'CREATE') {
             const payRow = payload.payment || payload;
             const allocations = Array.isArray(payload.allocations) ? payload.allocations : [];
-            const { error: payErr } = await supabase.from('payments').upsert(payRow);
-            if (!payErr) {
-              success = true;
-              if (allocations.length > 0) {
-                const { error: allocErr } = await supabase.from('payment_allocations').upsert(allocations);
-                if (allocErr) {
-                  console.warn('[PushSync] Warning: Payment allocations insert error:', allocErr.message);
+
+            // Detect legacy non-UUID identifiers that cannot be accepted by PostgreSQL UUID columns
+            if (!payRow.id || !UUID_REGEX.test(payRow.id) || !payRow.student_id || !UUID_REGEX.test(payRow.student_id)) {
+              console.warn(`[PushSync] Legacy malformed non-UUID payment payload detected in outbox: ${op.id}`);
+              await ConflictService.recordConflict({
+                id: 'conf_' + Math.random().toString(36).substring(2, 10),
+                entityType: op.entity_type,
+                entityId: op.entity_id,
+                conflictType: 'LEGACY_UNSUPPORTED_PAYMENT_PAYLOAD',
+                clientPayload: payload,
+                serverPayload: { error: 'Payment or student identifier is not a valid RFC 4122 UUID' },
+                resolution: 'SERVER_WINS',
+              });
+              success = true; // Preserved in sync_conflicts for administrator review
+            } else {
+              // Call authoritative atomic RPC instead of buggy sequential REST upserts
+              const { data: rpcRes, error: rpcErr } = await supabase.rpc('record_student_payment', {
+                p_payment_id: payRow.id,
+                p_student_id: payRow.student_id,
+                p_semester_id: payRow.semester_id,
+                p_reference_number: payRow.reference_number,
+                p_idempotency_key: payRow.idempotency_key || ('idemp_' + payRow.id),
+                p_amount_centavos: payRow.amount_centavos,
+                p_source: payRow.source,
+                p_channel: payRow.channel || 'MANUAL',
+                p_allocations: allocations.map((a: any) => ({
+                  id: a.id,
+                  obligation_id: a.obligation_id,
+                  amount_centavos: a.amount_centavos,
+                })),
+                p_notes: payRow.notes || null,
+              });
+
+              if (!rpcErr && (rpcRes?.status === 'CONFIRMED' || rpcRes?.status === 'ALREADY_RECORDED')) {
+                success = true;
+              } else {
+                const errMsg = rpcErr?.message || rpcRes?.error || 'Atomic payment sync failed';
+                console.warn(`[PushSync] Error syncing payment ${op.id}:`, errMsg);
+                // If rejected permanently due to over-allocation, balance exhaustion, or unresolvable conflict
+                if (
+                  errMsg.includes('exceeds remaining') ||
+                  errMsg.includes('not active') ||
+                  errMsg.includes('different student') ||
+                  errMsg.includes('Idempotency conflict') ||
+                  errMsg.includes('Unsupported payment source')
+                ) {
+                  await ConflictService.recordConflict({
+                    id: 'conf_' + Math.random().toString(36).substring(2, 10),
+                    entityType: op.entity_type,
+                    entityId: op.entity_id,
+                    conflictType: 'PAYMENT_CONCURRENCY_CONFLICT',
+                    clientPayload: payload,
+                    serverPayload: rpcRes || { error: errMsg },
+                    resolution: 'SERVER_WINS',
+                  });
+                  success = true; // Remove from outbox because conflict is safely preserved in sync_conflicts
                 }
               }
-            } else {
-              console.warn('[PushSync] Error syncing payment:', payErr.message);
             }
           } else if (op.operation === 'UPDATE' || payload.status === 'REVERSED') {
-            const { error: revErr } = await supabase
-              .from('payments')
-              .update({
-                status: 'REVERSED',
-                reversed_at: payload.reversed_at || new Date().toISOString(),
-                reversed_by_user_id: payload.reversed_by_user_id,
-                reversal_reason: payload.reversal_reason || 'Reversed by officer',
-              })
-              .eq('id', op.entity_id);
-            if (!revErr) success = true;
-            else console.warn('[PushSync] Error updating payment reversal:', revErr.message);
+            if (!op.entity_id || !UUID_REGEX.test(op.entity_id)) {
+              console.warn(`[PushSync] Legacy non-UUID payment reversal detected in outbox: ${op.id}`);
+              await ConflictService.recordConflict({
+                id: 'conf_' + Math.random().toString(36).substring(2, 10),
+                entityType: op.entity_type,
+                entityId: op.entity_id,
+                conflictType: 'LEGACY_UNSUPPORTED_PAYMENT_PAYLOAD',
+                clientPayload: payload,
+                serverPayload: { error: 'Reversal payment identifier is not a valid UUID' },
+                resolution: 'SERVER_WINS',
+              });
+              success = true;
+            } else {
+              const { data: revRes, error: revErr } = await supabase.rpc('reverse_student_payment', {
+                p_payment_id: op.entity_id,
+                p_reversal_reason: payload.reversal_reason || 'Reversed by officer',
+                p_idempotency_key: 'idemp_rev_' + op.entity_id,
+              });
+              if (!revErr && (revRes?.status === 'REVERSED' || revRes?.status === 'ALREADY_REVERSED')) {
+                success = true;
+              } else {
+                console.warn('[PushSync] Error updating payment reversal:', revErr?.message || revRes?.error);
+              }
+            }
           }
         } else if (op.entity_type === 'OBLIGATION' && op.operation === 'VOID') {
           const { error } = await supabase

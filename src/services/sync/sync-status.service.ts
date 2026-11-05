@@ -33,6 +33,7 @@ export type UserFacingSyncStatus =
   | 'Syncing'
   | 'Updating'
   | 'Offline Mode'
+  | 'Offline'
   | 'Pending Uploads'
   | 'Waiting to Sync'
   | 'Needs Attention'
@@ -160,6 +161,17 @@ export class SyncStatusService {
 
   public static setHydration(newState: HydrationState): void {
     this.currentHydration.value = newState;
+    if (newState === 'NOT_INITIALIZED') {
+      this.lastErrorMessage.value = null;
+      this.currentState.value = 'NOT_INITIALIZED';
+      return;
+    }
+    if (newState === 'READY') {
+      this.lastErrorMessage.value = null;
+      if (this.currentState.value === 'NOT_INITIALIZED' || this.currentState.value === 'FIRST_SYNC_REQUIRED') {
+        this.currentState.value = 'UP_TO_DATE';
+      }
+    }
     this.recomputeState();
   }
 
@@ -173,6 +185,7 @@ export class SyncStatusService {
         this.currentState.value = 'SYNCING';
         return;
       case 'OFFLINE':
+        this.isSyncingActive.value = false;
         this.onlineStatus.value = false;
         break;
       case 'ONLINE':
@@ -182,6 +195,8 @@ export class SyncStatusService {
       case 'UP_TO_DATE':
         this.isSyncingActive.value = false;
         this.lastErrorMessage.value = null;
+        this.unresolvedConflictCount.value = 0;
+        this.currentHydration.value = 'READY';
         break;
       case 'SYNC_ERROR':
         this.isSyncingActive.value = false;
@@ -213,47 +228,43 @@ export class SyncStatusService {
    * - UP_TO_DATE: Online, server reachable, all entity pages synced, 0 pending outbox
    */
   public static recomputeState(): void {
-    // 1. Initial hydration check
-    if (this.currentHydration.value === 'NOT_INITIALIZED') {
-      this.currentState.value = 'NOT_INITIALIZED';
-      return;
-    }
-    if (this.currentHydration.value === 'DOWNLOADING' || this.currentHydration.value === 'VERIFYING') {
-      this.currentState.value = 'SYNCING';
-      return;
-    }
-    if (this.currentHydration.value === 'FAILED') {
-      this.currentState.value = 'FIRST_SYNC_REQUIRED';
-      return;
-    }
-
-    // 2. Active sync in progress
-    if (this.isSyncingActive.value) {
+    // 1. Active sync in progress or downloading/verifying
+    if (this.isSyncingActive.value || this.currentHydration.value === 'DOWNLOADING' || this.currentHydration.value === 'VERIFYING') {
       this.currentState.value = 'SYNCING';
       return;
     }
 
-    // 3. Unresolved conflicts require attention
+    // 2. Unresolved conflicts require attention
     if (this.unresolvedConflictCount.value > 0) {
       this.currentState.value = 'CONFLICT_REVIEW_REQUIRED';
       return;
     }
 
-    // 4. Critical error check
-    if (this.lastErrorMessage.value) {
+    // 3. Critical error check
+    if (this.lastErrorMessage.value || this.currentState.value === 'SYNC_ERROR') {
       this.currentState.value = 'SYNC_ERROR';
       return;
     }
 
-    // 5. Outbox pending uploads
+    // 4. Outbox pending uploads
     if (this.pendingOutboxCount.value > 0) {
       this.currentState.value = 'PENDING_UPLOAD';
       return;
     }
 
-    // 6. Connectivity distinction
+    // 5. Connectivity distinction
     if (!this.onlineStatus.value || !this.serverReachable.value) {
       this.currentState.value = 'OFFLINE_READY';
+      return;
+    }
+
+    // 6. Initial hydration checks
+    if (this.currentHydration.value === 'FAILED') {
+      this.currentState.value = 'FIRST_SYNC_REQUIRED';
+      return;
+    }
+    if (this.currentHydration.value === 'NOT_INITIALIZED') {
+      this.currentState.value = 'NOT_INITIALIZED';
       return;
     }
 
@@ -268,18 +279,18 @@ export class SyncStatusService {
     return computed<UserFacingSyncStatus>(() => {
       switch (this.currentState.value) {
         case 'SYNCING':
-          return 'Syncing';
+          return 'Updating';
         case 'NOT_INITIALIZED':
         case 'FIRST_SYNC_REQUIRED':
           return 'First Sync Required';
         case 'CONFLICT_REVIEW_REQUIRED':
           return 'Needs Attention';
         case 'SYNC_ERROR':
-          return 'Sync Error';
+          return 'Update Failed';
         case 'PENDING_UPLOAD':
           return this.onlineStatus.value ? 'Waiting to Sync' : 'Pending Uploads';
         case 'OFFLINE_READY':
-          return 'Offline Mode';
+          return 'Offline';
         case 'UP_TO_DATE':
         default:
           return 'Up to Date';

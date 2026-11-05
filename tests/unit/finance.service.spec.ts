@@ -3,6 +3,7 @@ import { resetDatabaseForTests, getDatabase } from '@/database/database';
 import { FinanceService } from '@/services/finance.service';
 import { StudentsRepository } from '@/database/repositories/students.repository';
 import { AcademicRepository } from '@/database/repositories/academic.repository';
+import { supabase } from '@/integrations/supabase/client';
 
 describe('FinanceService', () => {
   let service: FinanceService;
@@ -12,6 +13,35 @@ describe('FinanceService', () => {
   beforeEach(async () => {
     await resetDatabaseForTests();
     service = new FinanceService();
+
+    // Mock authoritative server RPC responses for unit testing
+    (supabase.rpc as any) = async (rpcName: string, params: any) => {
+      if (rpcName === 'record_student_payment') {
+        return {
+          data: {
+            success: true,
+            status: 'CONFIRMED',
+            payment_id: params.p_payment_id,
+            reference_number: params.p_reference_number,
+            amount_centavos: params.p_amount_centavos,
+            processed_at: new Date().toISOString(),
+          },
+          error: null,
+        };
+      }
+      if (rpcName === 'reverse_student_payment') {
+        return {
+          data: {
+            success: true,
+            status: 'REVERSED',
+            payment_id: params.p_payment_id,
+            reversed_at: new Date().toISOString(),
+          },
+          error: null,
+        };
+      }
+      return { data: null, error: null };
+    };
 
     const db = await getDatabase();
     await db.execute(

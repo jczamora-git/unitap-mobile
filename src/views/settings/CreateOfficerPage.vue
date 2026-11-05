@@ -22,6 +22,7 @@ import {
   cashOutline,
   flashOutline,
   optionsOutline,
+  alertCircleOutline,
 } from 'ionicons/icons';
 import {
   UniPageHeader,
@@ -39,9 +40,13 @@ import { authService } from '@/services/auth.service';
 import { SupabaseAuthService } from '@/integrations/supabase/auth.service';
 import { haptics } from '@/utilities/haptics';
 import { useToast } from '@/composables/useToast';
+import { useOperationPolicy } from '@/composables/useOperationPolicy';
 
 const router = useRouter();
 const { showToast } = useToast();
+const { isPermitted, getDisabledReason } = useOperationPolicy();
+const canCreateOfficer = isPermitted('OFFICER_MANAGEMENT_AND_PERMISSIONS');
+const createOfficerDisabledReason = getDisabledReason('OFFICER_MANAGEMENT_AND_PERMISSIONS');
 
 type CandidateType = 'STUDENT' | 'EXTERNAL';
 const candidateType = ref<CandidateType>('STUDENT');
@@ -194,6 +199,10 @@ const submitButtonLabel = computed(() => {
 
 async function handleSubmit() {
   if (!isFormValid.value || isSubmitting.value) return;
+  if (!canCreateOfficer.value) {
+    await showToast(createOfficerDisabledReason.value || 'Officer administration requires an active internet connection.', 'error');
+    return;
+  }
 
   isSubmitting.value = true;
   const devAdminUserId = SupabaseAuthService.user.value?.id || authService.user.value?.id || 'devadmin_local';
@@ -577,6 +586,14 @@ function handleDone() {
           </div>
         </div>
 
+        <div v-if="!canCreateOfficer" class="offline-warning-box">
+          <ion-icon :icon="alertCircleOutline" class="warn-icon" />
+          <div class="warn-text">
+            <strong>Offline Mode</strong>
+            <p>{{ createOfficerDisabledReason }}</p>
+          </div>
+        </div>
+
         <!-- Form Actions Bar -->
         <div class="form-actions-bar">
           <UniButton
@@ -588,7 +605,7 @@ function handleDone() {
 
           <UniButton
             variant="primary"
-            :disabled="!isFormValid || isSubmitting"
+            :disabled="!isFormValid || isSubmitting || !canCreateOfficer"
             @click="handleSubmit"
           >
             <ion-spinner v-if="isSubmitting" name="crescent" slot="start" />
@@ -1160,5 +1177,36 @@ function handleDone() {
   color: var(--uni-text-secondary, #94a3b8);
   text-align: center;
   line-height: 1.3;
+}
+
+.offline-warning-box {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  padding: 10px 14px;
+  background: rgba(239, 68, 68, 0.1);
+  border: 1px solid rgba(239, 68, 68, 0.3);
+  border-radius: 8px;
+  color: #ef4444;
+  margin-bottom: 12px;
+}
+
+.offline-warning-box .warn-icon {
+  font-size: 20px;
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+
+.offline-warning-box .warn-text strong {
+  display: block;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.offline-warning-box .warn-text p {
+  margin: 2px 0 0;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--uni-text-muted, #94a3b8);
 }
 </style>

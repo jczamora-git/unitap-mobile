@@ -348,6 +348,13 @@ export class SupabaseAuthService {
 
     const { authService } = await import('@/services/auth.service');
     await authService.logout();
+
+    try {
+      const { SelectiveSyncService } = await import('@/services/sync/selective-sync.service');
+      SelectiveSyncService.handleSessionChange(null);
+    } catch {
+      // Ignored
+    }
   }
 
   private static async handleOnlineSession(userId: string, email: string): Promise<'DEVADMIN' | 'OFFICER' | 'STUDENT'> {

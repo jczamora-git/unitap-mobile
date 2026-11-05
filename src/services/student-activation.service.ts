@@ -2,6 +2,7 @@ import { sha256 } from 'hash-wasm';
 import { supabase } from '@/integrations/supabase/client';
 import { AuthRepository } from '@/database/repositories/auth.repository';
 import { StudentsRepository } from '@/database/repositories/students.repository';
+import { OperationPolicyService } from './operation-policy.service';
 import { normalizeSchoolId, getSchoolIdVariants } from '@/utilities/school-id-normalizer';
 import type {
   ActivationClaim,
@@ -256,6 +257,18 @@ export class StudentActivationService {
 
     const isTestEnv = isTestEnvironment();
 
+    // Enforce selective offline-first policy: ONLINE_CONFIRMED required
+    if (!isTestEnv) {
+      try {
+        await OperationPolicyService.assertPermitted('STUDENT_ACTIVATION_ACCOUNT_LINKING');
+      } catch (policyErr: any) {
+        return {
+          success: false,
+          error: policyErr.message || 'Issuing activation code requires an active internet connection.',
+        };
+      }
+    }
+
     // 1. Online check if Supabase is connected
     if (!isTestEnv) {
       const targetIdentifier = (await this.resolveStudentUuid(studentId)) || studentId;
@@ -363,17 +376,32 @@ export class StudentActivationService {
 
     if (!isTestEnv) {
       try {
+        await OperationPolicyService.assertPermitted('STUDENT_ACTIVATION_ACCOUNT_LINKING');
         const { data, error } = await supabase.rpc('officer_revoke_activation_code', {
           p_claim_id: claimId,
           p_reason: reason,
         });
 
-        if (!error && data && data.success) {
+        if (error) {
+          return { success: false, error: error.message || 'Server error while revoking activation code.' };
+        }
+
+        if (data && data.success) {
           await AuthRepository.revokeActivationClaim(claimId);
+          await AuthRepository.recordActivationAudit({
+            id: 'aud_' + Math.random().toString(36).substring(2, 12),
+            claim_id: claimId,
+            student_id: studentId,
+            action: 'REVOKED',
+            performed_by_user_id: revokedByUserId,
+            notes: reason,
+            created_at: new Date().toISOString(),
+          });
           return { success: true };
         }
-      } catch {
-        // Fallback to local
+        return { success: false, error: data?.error || 'Failed to revoke activation code on server.' };
+      } catch (err: any) {
+        return { success: false, error: err?.message || 'Network error while revoking code. Please check connection.' };
       }
     }
 

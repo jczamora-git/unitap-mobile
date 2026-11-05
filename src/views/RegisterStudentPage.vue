@@ -8,7 +8,8 @@ import {
 import { 
   personAddOutline, 
   idCardOutline, 
-  schoolOutline 
+  schoolOutline,
+  alertCircle
 } from 'ionicons/icons';
 import { 
   UniPageHeader, 
@@ -20,6 +21,7 @@ import YearLevelPicker from '@/components/YearLevelPicker.vue';
 import RfidScanBox from '@/components/RfidScanBox.vue';
 import { useStudents } from '@/composables/useStudents';
 import { useToast } from '@/composables/useToast';
+import { useOperationPolicy } from '@/composables/useOperationPolicy';
 import { nfcService } from '@/services/nfc.service';
 import type { CreateStudentDto, YearLevel, Student } from '@/types/student';
 
@@ -27,6 +29,9 @@ const router = useRouter();
 const route = useRoute();
 const { addStudent } = useStudents();
 const { showToast } = useToast();
+const { isPermitted, getDisabledReason } = useOperationPolicy();
+const canCreateStudent = isPermitted('STUDENTS_CREATE_UPDATE_DEACTIVATE');
+const createStudentDisabledReason = getDisabledReason('STUDENTS_CREATE_UPDATE_DEACTIVATE');
 
 const studentNumber = ref('');
 const firstName = ref('');
@@ -62,6 +67,10 @@ const isFormValid = computed(() => {
 
 async function handleRegister() {
   if (!isFormValid.value || isSubmitting.value) return;
+  if (!canCreateStudent.value) {
+    errorMessage.value = createStudentDisabledReason.value || 'Student registration requires an active internet connection.';
+    return;
+  }
 
   isSubmitting.value = true;
   errorMessage.value = null;
@@ -212,12 +221,20 @@ function handleViewDuplicateStudent(dup: Student) {
 
           <!-- Sticky / Prominent Save Action -->
           <div class="form-submit-row">
+            <div v-if="!canCreateStudent" class="offline-warning-box">
+              <ion-icon :icon="alertCircle" class="warn-icon" />
+              <div class="warn-text">
+                <strong>Offline Mode</strong>
+                <p>{{ createStudentDisabledReason }}</p>
+              </div>
+            </div>
+
             <UniButton
               type="submit"
               variant="primary"
               size="lg"
               :block="true"
-              :disabled="!isFormValid || isSubmitting"
+              :disabled="!isFormValid || isSubmitting || !canCreateStudent"
               :loading="isSubmitting"
               :icon="personAddOutline"
             >
@@ -294,5 +311,36 @@ function handleViewDuplicateStudent(dup: Student) {
   border-radius: 12px;
   font-size: 12px;
   line-height: 1.4;
+}
+
+.offline-warning-box {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  padding: 10px 14px;
+  background: rgba(239, 68, 68, 0.1);
+  border: 1px solid rgba(239, 68, 68, 0.3);
+  border-radius: 8px;
+  color: #ef4444;
+  margin-bottom: 12px;
+}
+
+.offline-warning-box .warn-icon {
+  font-size: 20px;
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+
+.offline-warning-box .warn-text strong {
+  display: block;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.offline-warning-box .warn-text p {
+  margin: 2px 0 0;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--uni-text-muted, #94a3b8);
 }
 </style>

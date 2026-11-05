@@ -32,9 +32,11 @@ import { formatTime, formatDate } from '@/utilities/date-formatters';
 import { formatFullName, formatStudentAcademicSummary } from '@/utilities/student-formatters';
 import { haptics } from '@/utilities/haptics';
 import { UniPageHeader, UniButton } from '@/components/ui';
+import { useOperationPolicy } from '@/composables/useOperationPolicy';
 
 const route = useRoute();
 const router = useRouter();
+const { isOnline } = useOperationPolicy();
 
 const {
   deviceStatus,
@@ -346,6 +348,10 @@ function handleRegisterCard() {
             <p class="scanner-instructions">
               {{ isScanning ? 'Hold student university card against the back of your phone' : 'Press start to activate the native NFC receiver' }}
             </p>
+            <div class="scanner-sync-pill" :class="isOnline ? 'pill-online' : 'pill-offline'">
+              <span class="sync-dot"></span>
+              <span>{{ isOnline ? 'Live Cloud Sync Active' : 'Offline Attendance Enabled • Scans Queued for Outbox Sync' }}</span>
+            </div>
           </div>
 
           <div class="scanner-action-row">
@@ -740,6 +746,37 @@ function handleRegisterCard() {
   max-width: 280px;
   margin: 0;
   line-height: 1.4;
+}
+
+.scanner-sync-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 4px 10px;
+  border-radius: 9999px;
+  margin: 6px auto 0;
+  width: fit-content;
+}
+
+.scanner-sync-pill.pill-online {
+  background: rgba(16, 185, 129, 0.1);
+  color: #10b981;
+  border: 1px solid rgba(16, 185, 129, 0.25);
+}
+
+.scanner-sync-pill.pill-offline {
+  background: rgba(245, 158, 11, 0.1);
+  color: #f59e0b;
+  border: 1px solid rgba(245, 158, 11, 0.25);
+}
+
+.scanner-sync-pill .sync-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
 }
 
 .scanner-action-row {

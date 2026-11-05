@@ -3,6 +3,7 @@ import { authService } from './auth.service';
 import { SupabaseAuthService } from '@/integrations/supabase/auth.service';
 import { supabase } from '@/integrations/supabase/client';
 import { getDatabase } from '@/database/database';
+import { OperationPolicyService } from './operation-policy.service';
 import type {
   EventCategory,
   YearLevel,
@@ -24,9 +25,10 @@ function generateUuid(): string {
 
 export class SystemSetupService {
   /**
-   * Enforces that current session has DEVADMIN authorization.
+   * Enforces that current session has DEVADMIN authorization and online policy is satisfied.
    */
-  public static verifyDevAdmin(): void {
+  public static async verifyDevAdmin(): Promise<void> {
+    await OperationPolicyService.assertPermitted('ACADEMIC_SYSTEM_SETUP_MUTATIONS');
     const localRole = authService.role.value;
     const remoteRole = SupabaseAuthService.role.value;
     if (localRole !== 'DEVADMIN' && remoteRole !== 'DEVADMIN') {
@@ -76,7 +78,7 @@ export class SystemSetupService {
     code?: string;
     sortOrder?: number;
   }): Promise<EventCategory> {
-    this.verifyDevAdmin();
+    await this.verifyDevAdmin();
     const cleanName = dto.name.trim();
     if (!cleanName) {
       throw new Error('Event category name is required.');
@@ -140,7 +142,7 @@ export class SystemSetupService {
       sortOrder?: number;
     }
   ): Promise<EventCategory> {
-    this.verifyDevAdmin();
+    await this.verifyDevAdmin();
     const existing = await AcademicRepository.getEventCategoryById(id);
     if (!existing) {
       throw new Error('Event category not found.');
@@ -179,7 +181,7 @@ export class SystemSetupService {
   }
 
   public static async toggleCategoryStatus(id: string): Promise<EventCategory> {
-    this.verifyDevAdmin();
+    await this.verifyDevAdmin();
     const existing = await AcademicRepository.getEventCategoryById(id);
     if (!existing) {
       throw new Error('Event category not found.');
@@ -193,7 +195,7 @@ export class SystemSetupService {
   }
 
   public static async deleteCategory(id: string): Promise<void> {
-    this.verifyDevAdmin();
+    await this.verifyDevAdmin();
     const usage = await this.getCategoryUsageCount(id);
     if (usage > 0) {
       throw new Error(`Cannot delete category because it is referenced by ${usage} event(s). Please deactivate it instead.`);
@@ -224,7 +226,7 @@ export class SystemSetupService {
     displayName: string;
     sortOrder?: number;
   }): Promise<YearLevel> {
-    this.verifyDevAdmin();
+    await this.verifyDevAdmin();
     if (!dto.levelNumber || dto.levelNumber < 1) {
       throw new Error('A valid positive year level number is required.');
     }
@@ -271,7 +273,7 @@ export class SystemSetupService {
       sortOrder?: number;
     }
   ): Promise<YearLevel> {
-    this.verifyDevAdmin();
+    await this.verifyDevAdmin();
     const existing = await AcademicRepository.getYearLevelById(id);
     if (!existing) {
       throw new Error('Year level not found.');
@@ -301,7 +303,7 @@ export class SystemSetupService {
   }
 
   public static async toggleYearLevelStatus(id: string): Promise<YearLevel> {
-    this.verifyDevAdmin();
+    await this.verifyDevAdmin();
     const existing = await AcademicRepository.getYearLevelById(id);
     if (!existing) throw new Error('Year level not found.');
     return this.updateYearLevel(id, { status: existing.status === 'ACTIVE' ? 'INACTIVE' : 'ACTIVE' });
@@ -330,7 +332,7 @@ export class SystemSetupService {
     programId?: string | null;
     academicYearId?: string | null;
   }): Promise<SectionRecord> {
-    this.verifyDevAdmin();
+    await this.verifyDevAdmin();
     const cleanName = dto.sectionName.trim().toUpperCase();
     if (!cleanName) {
       throw new Error('Section name is required (e.g. "4F4").');
@@ -392,7 +394,7 @@ export class SystemSetupService {
       status?: 'ACTIVE' | 'INACTIVE';
     }
   ): Promise<SectionRecord> {
-    this.verifyDevAdmin();
+    await this.verifyDevAdmin();
     const existing = await AcademicRepository.getSectionById(id);
     if (!existing) {
       throw new Error('Section not found.');
@@ -441,7 +443,7 @@ export class SystemSetupService {
   }
 
   public static async toggleSectionStatus(id: string): Promise<SectionRecord> {
-    this.verifyDevAdmin();
+    await this.verifyDevAdmin();
     const existing = await AcademicRepository.getSectionById(id);
     if (!existing) throw new Error('Section not found.');
     return this.updateSection(id, { status: existing.status === 'ACTIVE' ? 'INACTIVE' : 'ACTIVE' });
@@ -452,7 +454,7 @@ export class SystemSetupService {
   }
 
   public static async deleteSection(id: string): Promise<void> {
-    this.verifyDevAdmin();
+    await this.verifyDevAdmin();
     const count = await this.getSectionEnrollmentCount(id);
     if (count > 0) {
       throw new Error(`Cannot delete section because it has ${count} student enrollment record(s). Deactivate it instead.`);
@@ -484,7 +486,7 @@ export class SystemSetupService {
     endsOn: string;
     status?: AcademicYear['status'];
   }): Promise<AcademicYear> {
-    this.verifyDevAdmin();
+    await this.verifyDevAdmin();
     const cleanLabel = dto.label.trim();
     if (!cleanLabel) {
       throw new Error('Academic year label is required (e.g. "2026-2027").');
@@ -532,7 +534,7 @@ export class SystemSetupService {
       status?: AcademicYear['status'];
     }
   ): Promise<AcademicYear> {
-    this.verifyDevAdmin();
+    await this.verifyDevAdmin();
     const existing = await AcademicRepository.getYearById(id);
     if (!existing) throw new Error('Academic year not found.');
 
@@ -572,7 +574,7 @@ export class SystemSetupService {
   }
 
   public static async setAcademicYearStatus(id: string, status: AcademicYear['status']): Promise<void> {
-    this.verifyDevAdmin();
+    await this.verifyDevAdmin();
     await AcademicRepository.setYearStatus(id, status);
     try {
       await supabase.from('academic_years').update({ status }).eq('id', id);
@@ -607,7 +609,7 @@ export class SystemSetupService {
     endsOn: string;
     status?: Semester['status'];
   }): Promise<Semester> {
-    this.verifyDevAdmin();
+    await this.verifyDevAdmin();
     if (!dto.academicYearId) {
       throw new Error('Academic year assignment is required.');
     }
@@ -663,7 +665,7 @@ export class SystemSetupService {
       status?: Semester['status'];
     }
   ): Promise<Semester> {
-    this.verifyDevAdmin();
+    await this.verifyDevAdmin();
     const existing = await AcademicRepository.getSemesterById(id);
     if (!existing) throw new Error('Semester not found.');
 
@@ -696,7 +698,7 @@ export class SystemSetupService {
   }
 
   public static async activateSemester(semesterId: string): Promise<void> {
-    this.verifyDevAdmin();
+    await this.verifyDevAdmin();
     const sem = await AcademicRepository.getSemesterById(semesterId);
     if (!sem) throw new Error('Semester not found.');
 
