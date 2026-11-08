@@ -16,10 +16,12 @@ import { AcademicRepository } from '@/database/repositories/academic.repository'
 import { useOperationPolicy } from '@/composables/useOperationPolicy';
 import type { EventType, AudienceType } from '@/types/event';
 import type { EventCategory, YearLevel, SectionRecord } from '@/types/database';
-import { UniPageHeader, UniButton } from '@/components/ui';
+import { UniPageHeader, UniButton, UniSelect } from '@/components/ui';
+import { useToast } from '@/composables/useToast';
 
 const router = useRouter();
 const route = useRoute();
+const { showToast } = useToast();
 const { isPermitted, getDisabledReason } = useOperationPolicy();
 const canMutateEvent = isPermitted('EVENTS_AND_OCCURRENCES_MUTATIONS');
 const mutateEventDisabledReason = getDisabledReason('EVENTS_AND_OCCURRENCES_MUTATIONS');
@@ -38,6 +40,31 @@ const availableSections = ref<SectionRecord[]>([]);
 
 const selectedYears = ref<number[]>([1, 2, 3, 4]);
 const selectedSections = ref<string[]>(['1F1', '2F1', '3F1', '4F1']);
+
+const categoryOptions = computed(() => {
+  if (categories.value.length > 0) {
+    return categories.value.map((c) => ({
+      value: c.name,
+      label: c.name,
+      badge: c.status === 'ACTIVE' ? undefined : c.status,
+    }));
+  }
+  return [
+    { value: 'General Assembly', label: 'General Assembly' },
+    { value: 'Cleanup Drive', label: 'Cleanup Drive' },
+    { value: 'Sportsfest', label: 'Sportsfest' },
+    { value: 'IT Day', label: 'IT Day' },
+    { value: 'Orientation', label: 'Orientation' },
+    { value: 'Seminar', label: 'Seminar' },
+    { value: 'Other', label: 'Other' },
+  ];
+});
+
+const audienceOptions = [
+  { value: 'ALL_BSIT', label: 'All Enrolled Students' },
+  { value: 'YEAR_LEVEL', label: 'Specific Year Level(s)' },
+  { value: 'SECTION', label: 'Specific Section(s)' },
+];
 const customSectionInput = ref('');
 
 // Session occurrence
@@ -166,6 +193,7 @@ async function handleSaveEvent() {
           sections: audienceType.value === 'SECTION' ? selectedSections.value : undefined
         }
       });
+      await showToast('Event updated successfully', 'success');
       router.replace(`/events/${eventId.value}`);
       return;
     }
@@ -192,6 +220,7 @@ async function handleSaveEvent() {
       gracePeriodMinutes: Number(gracePeriodMinutes.value) || 15
     });
 
+    await showToast('Event created successfully', 'success');
     router.replace(`/events/${event.id}`);
   } catch (err: unknown) {
     console.error('Failed to create event:', err);
@@ -234,32 +263,13 @@ async function handleSaveEvent() {
 
             <div class="field-item">
               <label class="field-label">Event Category <span class="req">*</span></label>
-              <ion-select 
-                v-model="eventType" 
-                interface="action-sheet" 
-                :interface-options="{ header: 'Event Category' }"
-                class="clean-select"
-                @ionChange="handleCategoryChange($event.detail.value)"
-              >
-                <template v-if="categories.length > 0">
-                  <ion-select-option
-                    v-for="cat in categories"
-                    :key="cat.id"
-                    :value="cat.name"
-                  >
-                    {{ cat.name }}
-                  </ion-select-option>
-                </template>
-                <template v-else>
-                  <ion-select-option value="General Assembly">General Assembly</ion-select-option>
-                  <ion-select-option value="Cleanup Drive">Cleanup Drive</ion-select-option>
-                  <ion-select-option value="Sportsfest">Sportsfest</ion-select-option>
-                  <ion-select-option value="IT Day">IT Day</ion-select-option>
-                  <ion-select-option value="Orientation">Orientation</ion-select-option>
-                  <ion-select-option value="Seminar">Seminar</ion-select-option>
-                  <ion-select-option value="Other">Other</ion-select-option>
-                </template>
-              </ion-select>
+              <UniSelect
+                v-model="eventType"
+                :options="categoryOptions"
+                placeholder="Select Event Category"
+                header="Event Category"
+                @change="handleCategoryChange($event as string)"
+              />
             </div>
 
             <div class="field-item">
@@ -279,16 +289,12 @@ async function handleSaveEvent() {
 
             <div class="field-item">
               <label class="field-label">Audience Scope <span class="req">*</span></label>
-              <ion-select 
-                v-model="audienceType" 
-                interface="action-sheet" 
-                :interface-options="{ header: 'Audience Scope' }"
-                class="clean-select"
-              >
-                <ion-select-option value="ALL_BSIT">All Enrolled Students</ion-select-option>
-                <ion-select-option value="YEAR_LEVEL">Specific Year Level(s)</ion-select-option>
-                <ion-select-option value="SECTION">Specific Section(s)</ion-select-option>
-              </ion-select>
+              <UniSelect
+                v-model="audienceType"
+                :options="audienceOptions"
+                placeholder="Select Audience Scope"
+                header="Audience Scope"
+              />
             </div>
 
             <!-- Year Level Selection -->

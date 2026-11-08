@@ -577,6 +577,13 @@ onIonViewDidLeave(async () => {
   z-index: 2;
 }
 
+:root.dark .nfc-halo-core,
+:root.ion-palette-dark .nfc-halo-core,
+body.dark .nfc-halo-core,
+body.ion-palette-dark .nfc-halo-core {
+  color: var(--uni-mint);
+}
+
 @media (prefers-color-scheme: dark) {
   .nfc-halo-core {
     color: var(--uni-mint);
@@ -691,6 +698,13 @@ onIonViewDidLeave(async () => {
   color: #0E8560;
 }
 
+:root.dark .icon-mint,
+:root.ion-palette-dark .icon-mint,
+body.dark .icon-mint,
+body.ion-palette-dark .icon-mint {
+  color: var(--uni-mint);
+}
+
 @media (prefers-color-scheme: dark) {
   .icon-mint { color: var(--uni-mint); }
 }
@@ -752,6 +766,13 @@ onIonViewDidLeave(async () => {
   justify-content: center;
   font-size: 22px;
   flex-shrink: 0;
+}
+
+:root.dark .student-avatar-box,
+:root.ion-palette-dark .student-avatar-box,
+body.dark .student-avatar-box,
+body.ion-palette-dark .student-avatar-box {
+  color: var(--uni-mint);
 }
 
 @media (prefers-color-scheme: dark) {

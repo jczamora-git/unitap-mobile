@@ -56,6 +56,12 @@ describe('UniTap 2.0 Offline-First Synchronization & Preferences Suite', () => {
       expect(SyncStatusService.userFacingStatus.value).toBe('Offline');
     });
 
+    it('reports "Sign-in Required" when online but cloud session is missing', () => {
+      SyncStatusService.setOnline(true);
+      SyncStatusService.setState('AUTH_REQUIRED');
+      expect(SyncStatusService.userFacingStatus.value).toBe('Sign-in Required');
+    });
+
     it('reports "Waiting to Sync" when outbox has pending records', () => {
       SyncStatusService.setState('SYNCED');
       SyncStatusService.setPendingCount(3);

@@ -4,12 +4,14 @@ import { SupabaseAuthService } from '@/integrations/supabase/auth.service';
 import { supabase } from '@/integrations/supabase/client';
 import { getDatabase } from '@/database/database';
 import { OperationPolicyService } from './operation-policy.service';
+import { DataModeService } from './data-mode.service';
 import type {
   EventCategory,
   YearLevel,
   SectionRecord,
   AcademicYear,
   Semester,
+  Program,
 } from '@/types/database';
 
 function generateUuid(): string {
@@ -29,6 +31,16 @@ export class SystemSetupService {
    */
   public static async verifyDevAdmin(): Promise<void> {
     await OperationPolicyService.assertPermitted('ACADEMIC_SYSTEM_SETUP_MUTATIONS');
+
+    if (DataModeService.isDirectSupabase()) {
+      const hasCloudSession = await SupabaseAuthService.hasValidCloudSession();
+      const remoteRole = SupabaseAuthService.role.value;
+      if (!hasCloudSession || remoteRole !== 'DEVADMIN') {
+        throw new Error('Unauthorized: Direct Supabase Mode requires an authenticated Supabase Auth DevAdmin session. Please sign in with your cloud administrator credentials.');
+      }
+      return;
+    }
+
     const localRole = authService.role.value;
     const remoteRole = SupabaseAuthService.role.value;
     if (localRole !== 'DEVADMIN' && remoteRole !== 'DEVADMIN') {
@@ -45,10 +57,18 @@ export class SystemSetupService {
     operation: 'CREATE' | 'UPDATE' | 'DELETE',
     payload: Record<string, unknown>
   ): Promise<void> {
+    if (DataModeService.isDirectSupabase()) {
+      return;
+    }
     try {
       const db = await getDatabase();
       const outboxId = 'out_' + Math.random().toString(36).substring(2, 10);
       const now = new Date().toISOString();
+      await db.execute(
+        `INSERT OR IGNORE INTO devices (id, device_name, device_code, status, provisioned_at)
+         VALUES ('dev_default', 'UniTap Mobile Terminal', 'DEV-TERMINAL-01', 'ACTIVE', ?)`,
+        [now]
+      );
       const op = operation === 'DELETE' ? 'VOID' : operation;
       await db.execute(
         `INSERT INTO sync_outbox (id, device_id, entity_type, entity_id, operation, payload_json, schema_version, created_at)
@@ -644,13 +664,15 @@ export class SystemSetupService {
 
     await AcademicRepository.createSemester(newSemester);
 
-    try {
-      const { error } = await supabase.from('semesters').insert(newSemester);
-      if (error) {
+    if (!DataModeService.isDirectSupabase()) {
+      try {
+        const { error } = await supabase.from('semesters').insert(newSemester);
+        if (error) {
+          await this.enqueueOutbox('SEMESTER', newSemester.id, 'CREATE', newSemester as unknown as Record<string, unknown>);
+        }
+      } catch {
         await this.enqueueOutbox('SEMESTER', newSemester.id, 'CREATE', newSemester as unknown as Record<string, unknown>);
       }
-    } catch {
-      await this.enqueueOutbox('SEMESTER', newSemester.id, 'CREATE', newSemester as unknown as Record<string, unknown>);
     }
 
     return newSemester;
@@ -685,13 +707,15 @@ export class SystemSetupService {
 
     await AcademicRepository.updateSemester(updates);
 
-    try {
-      const { error } = await supabase.from('semesters').update(updates).eq('id', id);
-      if (error) {
+    if (!DataModeService.isDirectSupabase()) {
+      try {
+        const { error } = await supabase.from('semesters').update(updates).eq('id', id);
+        if (error) {
+          await this.enqueueOutbox('SEMESTER', id, 'UPDATE', updates as unknown as Record<string, unknown>);
+        }
+      } catch {
         await this.enqueueOutbox('SEMESTER', id, 'UPDATE', updates as unknown as Record<string, unknown>);
       }
-    } catch {
-      await this.enqueueOutbox('SEMESTER', id, 'UPDATE', updates as unknown as Record<string, unknown>);
     }
 
     return (await AcademicRepository.getSemesterById(id))!;
@@ -702,23 +726,197 @@ export class SystemSetupService {
     const sem = await AcademicRepository.getSemesterById(semesterId);
     if (!sem) throw new Error('Semester not found.');
 
-    // 1. Transactionally activate target and close previous active in SQLite
+    // 1. Transactionally activate target and close previous active
     await AcademicRepository.setActiveSemester(semesterId);
 
     // 2. Also ensure parent academic year is ACTIVE
     await AcademicRepository.setYearStatus(sem.academic_year_id, 'ACTIVE');
 
-    // 3. Mirror in Supabase if online
-    try {
-      await supabase.from('semesters').update({ status: 'CLOSED' }).eq('status', 'ACTIVE');
-      await supabase.from('semesters').update({ status: 'ACTIVE' }).eq('id', semesterId);
-      await supabase.from('academic_years').update({ status: 'ACTIVE' }).eq('id', sem.academic_year_id);
-    } catch {
-      await this.enqueueOutbox('SEMESTER', semesterId, 'UPDATE', { id: semesterId, status: 'ACTIVE' });
+    // 3. Mirror in Supabase & outbox if not direct Supabase mode
+    if (!DataModeService.isDirectSupabase()) {
+      try {
+        await supabase.from('semesters').update({ status: 'CLOSED' }).eq('status', 'ACTIVE');
+        await supabase.from('semesters').update({ status: 'ACTIVE' }).eq('id', semesterId);
+        await supabase.from('academic_years').update({ status: 'ACTIVE' }).eq('id', sem.academic_year_id);
+      } catch {
+        await this.enqueueOutbox('SEMESTER', semesterId, 'UPDATE', { id: semesterId, status: 'ACTIVE' });
+      }
     }
   }
 
   public static async getSemesterStats(id: string): Promise<{ enrolledCount: number; eventCount: number }> {
     return AcademicRepository.getSemesterStats(id);
+  }
+
+  // ============================================================================
+  // 6. PROGRAMS
+  // ============================================================================
+
+  public static async getPrograms(includeInactive = false): Promise<Program[]> {
+    return AcademicRepository.getPrograms(includeInactive);
+  }
+
+  public static async getProgramById(id: string): Promise<Program | null> {
+    return AcademicRepository.getProgramById(id);
+  }
+
+  public static async getProgramByCode(code: string): Promise<Program | null> {
+    return AcademicRepository.getProgramByCode(code);
+  }
+
+  public static async getProgramSectionCount(id: string): Promise<number> {
+    return AcademicRepository.getProgramSectionCount(id);
+  }
+
+  public static async getProgramEnrollmentCount(id: string): Promise<number> {
+    return AcademicRepository.getProgramEnrollmentCount(id);
+  }
+
+  public static async createProgram(dto: {
+    code: string;
+    name: string;
+    status?: 'ACTIVE' | 'INACTIVE';
+  }): Promise<Program> {
+    await this.verifyDevAdmin();
+    const cleanCode = dto.code.trim().toUpperCase();
+    const cleanName = dto.name.trim();
+
+    if (!cleanCode) {
+      throw new Error('Program code is required (e.g. "BSIT", "BSCS").');
+    }
+    if (!cleanName) {
+      throw new Error('Program name is required.');
+    }
+
+    const existing = await AcademicRepository.getProgramByCode(cleanCode);
+    if (existing) {
+      throw new Error(`A program with code "${cleanCode}" already exists.`);
+    }
+
+    const now = new Date().toISOString();
+    const status = dto.status || 'ACTIVE';
+    const newProgram: Program = {
+      id: generateUuid(),
+      code: cleanCode,
+      name: cleanName,
+      status,
+      is_active: status === 'ACTIVE' ? 1 : 0,
+      created_at: now,
+      updated_at: now,
+    };
+
+    await AcademicRepository.createProgram(newProgram);
+
+    if (!DataModeService.isDirectSupabase()) {
+      try {
+        const { error } = await supabase.from('programs').insert({
+          id: newProgram.id,
+          code: newProgram.code,
+          name: newProgram.name,
+          status: newProgram.status,
+          created_at: newProgram.created_at,
+          updated_at: newProgram.updated_at,
+        });
+        if (error) {
+          await this.enqueueOutbox('PROGRAM', newProgram.id, 'CREATE', newProgram as unknown as Record<string, unknown>);
+        }
+      } catch {
+        await this.enqueueOutbox('PROGRAM', newProgram.id, 'CREATE', newProgram as unknown as Record<string, unknown>);
+      }
+    }
+
+    return newProgram;
+  }
+
+  public static async updateProgram(
+    id: string,
+    dto: {
+      code?: string;
+      name?: string;
+      status?: 'ACTIVE' | 'INACTIVE';
+    }
+  ): Promise<Program> {
+    await this.verifyDevAdmin();
+    const existing = await AcademicRepository.getProgramById(id);
+    if (!existing) {
+      throw new Error('Program not found.');
+    }
+
+    const cleanCode = dto.code !== undefined ? dto.code.trim().toUpperCase() : existing.code;
+    const cleanName = dto.name !== undefined ? dto.name.trim() : existing.name;
+
+    if (!cleanCode) {
+      throw new Error('Program code cannot be empty.');
+    }
+    if (!cleanName) {
+      throw new Error('Program name cannot be empty.');
+    }
+
+    if (cleanCode !== existing.code) {
+      const conflict = await AcademicRepository.getProgramByCode(cleanCode);
+      if (conflict && conflict.id !== id) {
+        throw new Error(`A program with code "${cleanCode}" already exists.`);
+      }
+    }
+
+    const now = new Date().toISOString();
+    const status = dto.status !== undefined ? dto.status : (existing.status || (existing.is_active === 1 ? 'ACTIVE' : 'INACTIVE'));
+
+    const updates: Partial<Program> & { id: string } = {
+      id,
+      code: cleanCode,
+      name: cleanName,
+      status,
+      is_active: status === 'ACTIVE' ? 1 : 0,
+      updated_at: now,
+    };
+
+    await AcademicRepository.updateProgram(id, updates);
+
+    if (!DataModeService.isDirectSupabase()) {
+      try {
+        const { error } = await supabase.from('programs').update(updates).eq('id', id);
+        if (error) {
+          await this.enqueueOutbox('PROGRAM', id, 'UPDATE', updates as unknown as Record<string, unknown>);
+        }
+      } catch {
+        await this.enqueueOutbox('PROGRAM', id, 'UPDATE', updates as unknown as Record<string, unknown>);
+      }
+    }
+
+    return (await AcademicRepository.getProgramById(id))!;
+  }
+
+  public static async toggleProgramStatus(id: string): Promise<Program> {
+    await this.verifyDevAdmin();
+    const existing = await AcademicRepository.getProgramById(id);
+    if (!existing) {
+      throw new Error('Program not found.');
+    }
+    const currentStatus = existing.status || (existing.is_active === 1 ? 'ACTIVE' : 'INACTIVE');
+    const newStatus = currentStatus === 'ACTIVE' ? 'INACTIVE' : 'ACTIVE';
+    return this.updateProgram(id, { status: newStatus });
+  }
+
+  public static async deleteProgram(id: string): Promise<void> {
+    await this.verifyDevAdmin();
+    const sectionCount = await this.getProgramSectionCount(id);
+    if (sectionCount > 0) {
+      throw new Error(`Cannot delete program because it is assigned to ${sectionCount} section(s). Please reassign or remove those sections first.`);
+    }
+    const enrollmentCount = await this.getProgramEnrollmentCount(id);
+    if (enrollmentCount > 0) {
+      throw new Error(`Cannot delete program because it has ${enrollmentCount} student enrollment record(s). Deactivate it instead.`);
+    }
+
+    await AcademicRepository.deleteProgram(id);
+
+    if (!DataModeService.isDirectSupabase()) {
+      try {
+        await supabase.from('programs').delete().eq('id', id);
+      } catch {
+        await this.enqueueOutbox('PROGRAM', id, 'DELETE', { id });
+      }
+    }
   }
 }

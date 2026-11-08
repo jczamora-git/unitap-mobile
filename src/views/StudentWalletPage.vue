@@ -22,8 +22,10 @@ import { formatPeso, pesoToCentavos } from '@/utilities/finance-formatters';
 import { formatFullName, formatStudentAcademicSummary } from '@/utilities/student-formatters';
 import { formatDateTime } from '@/utilities/date-formatters';
 import { UniPageHeader, UniSheet, UniFormField, UniInput, UniButton } from '@/components/ui';
+import { useToast } from '@/composables/useToast';
 
 const route = useRoute();
+const { showToast } = useToast();
 const studentId = route.params.studentId as string;
 
 const student = ref<Student | null>(null);
@@ -57,9 +59,10 @@ async function executeTopUp() {
     );
     showTopUpModal.value = false;
     topUpNote.value = '';
+    await showToast('Wallet topped up successfully', 'success');
     await loadData();
   } catch (err: unknown) {
-    alert(err instanceof Error ? err.message : 'Error topping up');
+    await showToast(err instanceof Error ? err.message : 'Error topping up', 'error');
   } finally {
     isSubmitting.value = false;
   }

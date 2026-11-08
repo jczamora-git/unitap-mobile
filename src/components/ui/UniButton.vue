@@ -219,21 +219,13 @@ body.ion-palette-dark .uni-btn-primary,
 }
 
 .uni-btn-destructive {
-  background: rgba(220, 75, 75, 0.12);
-  color: #DC2626;
-  border-color: rgba(220, 75, 75, 0.25);
+  background: var(--uni-danger-bg);
+  color: var(--uni-danger-text);
+  border-color: var(--uni-danger-border);
 }
 
 .uni-btn-destructive:hover:not(:disabled) {
-  background: rgba(220, 75, 75, 0.2);
-}
-
-@media (prefers-color-scheme: dark) {
-  .uni-btn-destructive {
-    color: #EF4444;
-    border-color: rgba(239, 68, 68, 0.32);
-    background: rgba(220, 75, 75, 0.16);
-  }
+  opacity: 0.9;
 }
 
 /* Icons and Spinners */

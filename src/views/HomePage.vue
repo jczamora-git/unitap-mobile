@@ -35,6 +35,8 @@ import type { AttendanceStats, AttendanceScanLog } from '@/types/attendance';
 import { haptics } from '@/utilities/haptics';
 import { UniPageHeader, UniStatCard, UniButton } from '@/components/ui';
 import UniGlobalSyncPill from '@/components/shared/UniGlobalSyncPill.vue';
+import { logDataSource } from '@/utilities/data-source-logger';
+import { DataModeService } from '@/services/data-mode.service';
 
 const router = useRouter();
 
@@ -75,21 +77,34 @@ async function loadDashboardData() {
     return;
   }
   isLoading.value = true;
+  const isDirect = DataModeService.isDirectSupabase();
+  const source = isDirect ? 'Supabase' : 'SQLite';
+
+  // 1. Students KPI
   try {
-    // 1. Students
     const students = await studentService.getStudents();
     totalStudents.value = students.length;
+    logDataSource({
+      page: 'HomePage',
+      source,
+      operation: 'KPI: totalStudents',
+      result: students.length,
+    });
+  } catch (stuErr) {
+    console.error('Error loading students KPI:', stuErr);
+  }
 
-    // 2. Events & Active Occurrence
+  // 2. Events & Active Occurrence KPI
+  try {
     const events = await eventService.getEvents();
-    activeEventsCount.value = events.filter(e => e.status === 'ACTIVE').length;
+    activeEventsCount.value = events.filter((e) => e.status === 'ACTIVE').length;
 
     const occurrences = await eventService.getOccurrences();
-    const openOcc = occurrences.find(o => o.status === 'OPEN') || occurrences[0] || null;
+    const openOcc = occurrences.find((o) => o.status === 'OPEN') || occurrences[0] || null;
     activeOccurrence.value = openOcc;
 
     if (openOcc) {
-      activeEvent.value = events.find(e => e.id === openOcc.eventId) || null;
+      activeEvent.value = events.find((e) => e.id === openOcc.eventId) || null;
       occurrenceStats.value = await attendanceService.getStats(openOcc.id);
       recentActivity.value = (await attendanceService.getScanLogs(openOcc.id)).slice(0, 5);
     } else {
@@ -97,16 +112,44 @@ async function loadDashboardData() {
       occurrenceStats.value = null;
       recentActivity.value = (await attendanceService.getScanLogs()).slice(0, 5);
     }
+    logDataSource({
+      page: 'HomePage',
+      source,
+      operation: 'KPI: events & occurrences',
+      result: events.length,
+    });
+  } catch (evtErr) {
+    console.error('Error loading events KPI:', evtErr);
+  }
 
-    // 3. Finance
+  // 3. Finance KPI
+  try {
     const finSummary = await financeService.getFinanceSummary();
     totalOutstandingCentavos.value = finSummary.totalOutstandingCentavos;
+    logDataSource({
+      page: 'HomePage',
+      source,
+      operation: 'KPI: financeSummary',
+      result: finSummary.totalOutstandingCentavos,
+    });
+  } catch (finErr) {
+    console.error('Error loading finance KPI:', finErr);
+  }
 
-    // 4. Checkins
+  // 4. Checkins KPI
+  try {
     const allParticipants = await eventService.getParticipants();
-    totalCheckIns.value = allParticipants.filter(p => p.attendanceStatus === 'PRESENT' || p.attendanceStatus === 'LATE').length;
-  } catch (err) {
-    console.error('Error loading dashboard data:', err);
+    totalCheckIns.value = allParticipants.filter(
+      (p) => p.attendanceStatus === 'PRESENT' || p.attendanceStatus === 'LATE'
+    ).length;
+    logDataSource({
+      page: 'HomePage',
+      source,
+      operation: 'KPI: checkIns',
+      result: totalCheckIns.value,
+    });
+  } catch (checkErr) {
+    console.error('Error loading checkins KPI:', checkErr);
   } finally {
     isLoading.value = false;
   }

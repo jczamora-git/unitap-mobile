@@ -47,13 +47,14 @@ withDefaults(defineProps<Props>(), {
 <style scoped>
 .uni-toast-wrapper {
   position: fixed;
-  bottom: calc(78px + var(--ion-safe-area-bottom, 0px));
-  left: 20px;
-  right: 20px;
+  top: calc(16px + var(--ion-safe-area-top, 0px));
+  right: calc(16px + var(--ion-safe-area-right, 0px));
+  left: auto;
   display: flex;
-  justify-content: center;
+  justify-content: flex-end;
   z-index: 999999;
   pointer-events: none;
+  max-width: calc(100vw - 32px);
 }
 
 .uni-toast-card {
@@ -113,7 +114,7 @@ withDefaults(defineProps<Props>(), {
 }
 
 .uni-toast-slide-enter-active {
-  transition: transform 0.22s cubic-bezier(0.16, 1, 0.3, 1), opacity 0.22s ease;
+  transition: transform 0.24s cubic-bezier(0.16, 1, 0.3, 1), opacity 0.24s ease;
 }
 
 .uni-toast-slide-leave-active {
@@ -122,7 +123,7 @@ withDefaults(defineProps<Props>(), {
 
 .uni-toast-slide-enter-from,
 .uni-toast-slide-leave-to {
-  transform: translateY(16px);
+  transform: translateY(-16px) scale(0.96);
   opacity: 0;
 }
 </style>

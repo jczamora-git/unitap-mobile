@@ -7,6 +7,12 @@ import { defineConfig } from 'vite'
 
 // https://vitejs.dev/config/
 export default defineConfig({
+  server: {
+    host: '0.0.0.0', // Explicit IPv4 to prevent IPv6 tunneling conflicts
+    port: 5173,
+    strictPort: true,
+    allowedHosts: true, // Allows tunnel hosts (localtunnel, ngrok, cloudflared, etc.)
+  },
   plugins: [
     vue(),
     legacy()

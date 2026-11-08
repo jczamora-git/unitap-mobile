@@ -23,9 +23,14 @@ import {
 } from '@/components/ui';
 
 import { SystemSetupService } from '@/services/system-setup.service';
+import { DataModeService } from '@/services/data-mode.service';
+import { SupabaseAuthService } from '@/integrations/supabase/auth.service';
 import type { Semester, AcademicYear } from '@/types/database';
 import { formatSemesterName, formatAcademicYear } from '@/utilities/presentation-formatters';
 import { haptics } from '@/utilities/haptics';
+import { useToast } from '@/composables/useToast';
+
+const { showToast } = useToast();
 
 const semesters = ref<Semester[]>([]);
 const academicYears = ref<AcademicYear[]>([]);
@@ -74,6 +79,15 @@ const semesterStatusOptions = [
 async function loadData() {
   isLoading.value = true;
   try {
+    if (DataModeService.isDirectSupabase()) {
+      const valid = await SupabaseAuthService.hasValidCloudSession();
+      if (!valid || SupabaseAuthService.role.value !== 'DEVADMIN') {
+        isLoading.value = false;
+        await showToast('Direct Supabase Mode requires an authenticated cloud DevAdmin session. Please sign in.', 'error');
+        return;
+      }
+    }
+
     const [sems, ays, active] = await Promise.all([
       SystemSetupService.getSemesters(),
       SystemSetupService.getAcademicYears(),
@@ -164,6 +178,7 @@ async function handleSave(isEdit: boolean) {
       showAddModal.value = false;
     }
     haptics.success();
+    await showToast(isEdit ? 'Semester updated successfully' : 'Semester configured successfully', 'success');
     await loadData();
   } catch (err: unknown) {
     errorMessage.value = err instanceof Error ? err.message : 'Failed to save semester.';
@@ -186,10 +201,11 @@ async function confirmActivation() {
     showActivateConfirm.value = false;
     targetSemesterForActivation.value = null;
     haptics.success();
+    await showToast('Semester activated successfully', 'success');
     await loadData();
   } catch (err: unknown) {
     showActivateConfirm.value = false;
-    alert(err instanceof Error ? err.message : 'Failed to activate semester.');
+    await showToast(err instanceof Error ? err.message : 'Failed to activate semester.', 'error');
     haptics.error();
   }
 }

@@ -1,4 +1,5 @@
 import { ref, computed } from 'vue';
+import { DataModeService } from '../data-mode.service';
 
 export type CanonicalSyncState =
   | 'NOT_INITIALIZED'
@@ -8,7 +9,9 @@ export type CanonicalSyncState =
   | 'UP_TO_DATE'
   | 'PENDING_UPLOAD'
   | 'SYNC_ERROR'
-  | 'CONFLICT_REVIEW_REQUIRED';
+  | 'CONFLICT_REVIEW_REQUIRED'
+  | 'AUTH_REQUIRED'
+  | 'DIRECT_MODE';
 
 // Maintain backward compatibility with existing code
 export type SyncState =
@@ -18,7 +21,8 @@ export type SyncState =
   | 'SYNCED'
   | 'PENDING_CHANGES'
   | 'CONFLICT'
-  | 'AUTH_REQUIRED';
+  | 'AUTH_REQUIRED'
+  | 'DIRECT_MODE';
 
 export type HydrationState =
   | 'NOT_INITIALIZED'
@@ -39,7 +43,9 @@ export type UserFacingSyncStatus =
   | 'Needs Attention'
   | 'Sync Error'
   | 'Update Failed'
-  | 'First Sync Required';
+  | 'First Sync Required'
+  | 'Sign-in Required'
+  | 'Direct Supabase Mode';
 
 export interface SyncProgress {
   currentTable: string;
@@ -50,6 +56,43 @@ export interface SyncProgress {
   error?: string;
 }
 
+export interface PushSyncProgress {
+  isActive: boolean;
+  totalEligible: number;
+  attempted: number;
+  confirmed: number;
+  failed: number;
+  blocked: number;
+  conflicts: number;
+  remaining: number;
+  currentEntity: string;
+  currentBatch: number;
+  totalBatches: number;
+  lastAck: string | null;
+  percent: number;
+}
+
+export interface PullSyncProgress {
+  isActive: boolean;
+  currentEntity: string;
+  entitiesCompleted: number;
+  totalEntities: number;
+  recordsPulled: number;
+  percent: number;
+}
+
+export interface SyncSummaryReport {
+  timestamp: string;
+  totalAttempted: number;
+  confirmed: number;
+  failed: number;
+  stillPending: number;
+  conflicts: number;
+  blocked: number;
+  pulledCount: number;
+  status: 'SUCCESS' | 'PARTIAL' | 'FAILED' | 'NOTHING_TO_SYNC';
+}
+
 export class SyncStatusService {
   private static currentState = ref<CanonicalSyncState>('NOT_INITIALIZED');
   private static currentHydration = ref<HydrationState>('NOT_INITIALIZED');
@@ -57,6 +100,11 @@ export class SyncStatusService {
   private static onlineStatus = ref<boolean>(typeof navigator !== 'undefined' ? navigator.onLine : true);
   private static serverReachable = ref<boolean>(true);
   private static pendingOutboxCount = ref<number>(0);
+  private static confirmedUploads = ref<number>(0);
+  private static failedOperations = ref<number>(0);
+  private static blockedOperations = ref<number>(0);
+  private static pendingPullEntities = ref<number>(0);
+  private static totalLocalRecords = ref<number | null>(null);
   private static unresolvedConflictCount = ref<number>(0);
   private static lastSyncTimestamp = ref<string | null>(null);
   private static lastAttemptTimestamp = ref<string | null>(null);
@@ -69,12 +117,44 @@ export class SyncStatusService {
     percent: 0,
   });
 
+  private static currentPushProgress = ref<PushSyncProgress>({
+    isActive: false,
+    totalEligible: 0,
+    attempted: 0,
+    confirmed: 0,
+    failed: 0,
+    blocked: 0,
+    conflicts: 0,
+    remaining: 0,
+    currentEntity: '',
+    currentBatch: 0,
+    totalBatches: 0,
+    lastAck: null,
+    percent: 0,
+  });
+
+  private static currentPullProgress = ref<PullSyncProgress>({
+    isActive: false,
+    currentEntity: '',
+    entitiesCompleted: 0,
+    totalEntities: 0,
+    recordsPulled: 0,
+    percent: 0,
+  });
+
+  private static lastSummaryReport = ref<SyncSummaryReport | null>(null);
+
   public static get state() {
     return computed(() => this.currentState.value);
   }
 
   public static get canonicalState() {
-    return computed(() => this.currentState.value);
+    return computed<CanonicalSyncState>(() => {
+      if (DataModeService.isDirectSupabase()) {
+        return 'DIRECT_MODE';
+      }
+      return this.currentState.value;
+    });
   }
 
   public static get hydration() {
@@ -109,6 +189,38 @@ export class SyncStatusService {
     return computed(() => this.progress.value);
   }
 
+  public static get pushProgress() {
+    return computed(() => this.currentPushProgress.value);
+  }
+
+  public static get pullProgress() {
+    return computed(() => this.currentPullProgress.value);
+  }
+
+  public static get syncSummary() {
+    return computed(() => this.lastSummaryReport.value);
+  }
+
+  public static get confirmedUploadsCount() {
+    return computed(() => this.confirmedUploads.value);
+  }
+
+  public static get failedOpsCount() {
+    return computed(() => this.failedOperations.value);
+  }
+
+  public static get blockedOpsCount() {
+    return computed(() => this.blockedOperations.value);
+  }
+
+  public static get pendingPullCount() {
+    return computed(() => this.pendingPullEntities.value);
+  }
+
+  public static get totalLocalRecordsCount() {
+    return computed(() => this.totalLocalRecords.value);
+  }
+
   public static get lastError() {
     return computed(() => this.lastErrorMessage.value);
   }
@@ -125,6 +237,9 @@ export class SyncStatusService {
 
   public static setLastError(error: string | null): void {
     this.lastErrorMessage.value = error;
+    if (this.currentState.value === 'AUTH_REQUIRED') {
+      return;
+    }
     if (error) {
       this.currentState.value = 'SYNC_ERROR';
     } else {
@@ -197,6 +312,7 @@ export class SyncStatusService {
         this.lastErrorMessage.value = null;
         this.unresolvedConflictCount.value = 0;
         this.currentHydration.value = 'READY';
+        this.currentState.value = 'UP_TO_DATE';
         break;
       case 'SYNC_ERROR':
         this.isSyncingActive.value = false;
@@ -208,6 +324,10 @@ export class SyncStatusService {
       case 'PENDING_CHANGES':
         this.pendingOutboxCount.value = Math.max(this.pendingOutboxCount.value, 1);
         break;
+      case 'AUTH_REQUIRED':
+        this.isSyncingActive.value = false;
+        this.currentState.value = 'AUTH_REQUIRED';
+        return;
       default:
         this.isSyncingActive.value = false;
         this.currentState.value = newState as CanonicalSyncState;
@@ -228,6 +348,12 @@ export class SyncStatusService {
    * - UP_TO_DATE: Online, server reachable, all entity pages synced, 0 pending outbox
    */
   public static recomputeState(): void {
+    // 0. Whole-App Direct Supabase Development Mode Check
+    if (DataModeService.isDirectSupabase()) {
+      this.currentState.value = 'DIRECT_MODE';
+      return;
+    }
+
     // 1. Active sync in progress or downloading/verifying
     if (this.isSyncingActive.value || this.currentHydration.value === 'DOWNLOADING' || this.currentHydration.value === 'VERIFYING') {
       this.currentState.value = 'SYNCING';
@@ -237,6 +363,11 @@ export class SyncStatusService {
     // 2. Unresolved conflicts require attention
     if (this.unresolvedConflictCount.value > 0) {
       this.currentState.value = 'CONFLICT_REVIEW_REQUIRED';
+      return;
+    }
+
+    // 2b. Cloud session authorization check
+    if (this.currentState.value === 'AUTH_REQUIRED') {
       return;
     }
 
@@ -277,6 +408,9 @@ export class SyncStatusService {
    */
   public static get userFacingStatus() {
     return computed<UserFacingSyncStatus>(() => {
+      if (DataModeService.isDirectSupabase()) {
+        return 'Direct Supabase Mode';
+      }
       switch (this.currentState.value) {
         case 'SYNCING':
           return 'Updating';
@@ -289,6 +423,10 @@ export class SyncStatusService {
           return 'Update Failed';
         case 'PENDING_UPLOAD':
           return this.onlineStatus.value ? 'Waiting to Sync' : 'Pending Uploads';
+        case 'AUTH_REQUIRED':
+          return 'Sign-in Required';
+        case 'DIRECT_MODE':
+          return 'Direct Supabase Mode';
         case 'OFFLINE_READY':
           return 'Offline';
         case 'UP_TO_DATE':
@@ -337,5 +475,72 @@ export class SyncStatusService {
       percent,
       error,
     };
+  }
+
+  public static updatePushProgress(update: Partial<PushSyncProgress>): void {
+    this.currentPushProgress.value = {
+      ...this.currentPushProgress.value,
+      ...update,
+    };
+  }
+
+  public static resetPushProgress(): void {
+    this.currentPushProgress.value = {
+      isActive: false,
+      totalEligible: 0,
+      attempted: 0,
+      confirmed: 0,
+      failed: 0,
+      blocked: 0,
+      conflicts: 0,
+      remaining: 0,
+      currentEntity: '',
+      currentBatch: 0,
+      totalBatches: 0,
+      lastAck: null,
+      percent: 0,
+    };
+  }
+
+  public static updatePullProgress(update: Partial<PullSyncProgress>): void {
+    this.currentPullProgress.value = {
+      ...this.currentPullProgress.value,
+      ...update,
+    };
+  }
+
+  public static resetPullProgress(): void {
+    this.currentPullProgress.value = {
+      isActive: false,
+      currentEntity: '',
+      entitiesCompleted: 0,
+      totalEntities: 0,
+      recordsPulled: 0,
+      percent: 0,
+    };
+  }
+
+  public static setSyncSummary(summary: SyncSummaryReport | null): void {
+    this.lastSummaryReport.value = summary;
+  }
+
+  public static setConfirmedUploadsCount(count: number): void {
+    this.confirmedUploads.value = count;
+  }
+
+  public static setFailedOpsCount(count: number): void {
+    this.failedOperations.value = count;
+  }
+
+  public static setBlockedOpsCount(count: number): void {
+    this.blockedOperations.value = count;
+  }
+
+  public static setPendingPullCount(count: number): void {
+    this.pendingPullEntities.value = count;
+  }
+
+  public static setTotalLocalRecordsCount(count: number | null): void {
+    this.totalLocalRecords.value = count;
   }
 }

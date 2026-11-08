@@ -63,6 +63,13 @@ export class LegacyMigrationService {
       const rawEvents = (await Preferences.get({ key: 'unitap_events_v1' })).value;
       const rawFinance = (await Preferences.get({ key: 'unitap_finance_v1' })).value;
 
+      // If no legacy stores exist in Preferences, nothing to migrate; mark completed
+      if (!rawStudents && !rawEvents && !rawFinance) {
+        await Preferences.set({ key: this.MIGRATION_FLAG_KEY, value: 'true' });
+        summary.success = true;
+        return summary;
+      }
+
       await Preferences.set({ key: 'unitap_backup_students_' + Date.now(), value: rawStudents || '[]' });
       await Preferences.set({ key: 'unitap_backup_events_' + Date.now(), value: rawEvents || '{}' });
       await Preferences.set({ key: 'unitap_backup_finance_' + Date.now(), value: rawFinance || '{}' });

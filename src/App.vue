@@ -84,11 +84,12 @@ onMounted(async () => {
   try {
     await themeService.init();
     await getDatabase();
-    await LegacyMigrationService.runMigrationIfNeeded();
-    await authService.initSession();
 
     const { SupabaseAuthService } = await import('@/integrations/supabase/auth.service');
     await SupabaseAuthService.initialize();
+
+    await LegacyMigrationService.runMigrationIfNeeded();
+    await authService.initSession();
 
     const { NetworkService } = await import('@/services/network.service');
     await NetworkService.init();

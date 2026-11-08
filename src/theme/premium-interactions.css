@@ -97,6 +97,36 @@ ion-toast.nfc-toast-info {
 }
 
 /* ========================================================
+   BLOCKING PROCESS MODAL (Centered Alert / Progress Dialog)
+   ======================================================== */
+ion-modal.blocking-process-modal {
+  --background: transparent;
+  --box-shadow: none;
+  --width: calc(100% - 32px);
+  --max-width: 380px;
+  --height: auto;
+  --border-radius: 20px;
+  align-items: center;
+  justify-content: center;
+}
+
+ion-modal.blocking-process-modal::part(backdrop) {
+  background: rgba(0, 0, 0, 0.75);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+}
+
+ion-modal.blocking-process-modal::part(content) {
+  background: transparent;
+  box-shadow: none;
+  border-radius: 20px;
+  width: calc(100% - 32px);
+  max-width: 380px;
+  margin: auto;
+  overflow: visible;
+}
+
+/* ========================================================
    PREMIUM MODAL & DIALOG CARD
    ======================================================== */
 .premium-dialog-card {
@@ -231,6 +261,7 @@ ion-action-sheet {
   --color: var(--uni-text, #0F172A);
   --backdrop-opacity: 0.45;
   font-family: var(--uni-font-family, inherit);
+  z-index: 25000 !important;
 }
 
 /* Backdrop with subtle blur */

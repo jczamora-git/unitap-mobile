@@ -15,9 +15,14 @@ import {
 import { UniPageHeader, UniDialog, UniButton, UniSelect, UniSheet } from '@/components/ui';
 
 import { SystemSetupService } from '@/services/system-setup.service';
+import { DataModeService } from '@/services/data-mode.service';
+import { SupabaseAuthService } from '@/integrations/supabase/auth.service';
 import type { AcademicYear, Semester } from '@/types/database';
 import { formatAcademicYear } from '@/utilities/presentation-formatters';
 import { haptics } from '@/utilities/haptics';
+import { useToast } from '@/composables/useToast';
+
+const { showToast } = useToast();
 
 const academicYears = ref<AcademicYear[]>([]);
 const semestersByYear = ref<Record<string, Semester[]>>({});
@@ -53,6 +58,15 @@ const statusOptions = [
 async function loadData() {
   isLoading.value = true;
   try {
+    if (DataModeService.isDirectSupabase()) {
+      const valid = await SupabaseAuthService.hasValidCloudSession();
+      if (!valid || SupabaseAuthService.role.value !== 'DEVADMIN') {
+        isLoading.value = false;
+        await showToast('Direct Supabase Mode requires an authenticated cloud DevAdmin session. Please sign in.', 'error');
+        return;
+      }
+    }
+
     const list = await SystemSetupService.getAcademicYears();
     academicYears.value = list;
 
@@ -131,6 +145,7 @@ async function handleSave(isEdit: boolean) {
       showAddModal.value = false;
     }
     haptics.success();
+    await showToast(isEdit ? 'Academic year updated successfully' : 'Academic year configured successfully', 'success');
     await loadData();
   } catch (err: unknown) {
     errorMessage.value = err instanceof Error ? err.message : 'Failed to save academic year.';
@@ -154,10 +169,11 @@ async function confirmStatusChange() {
     showStatusConfirm.value = false;
     targetYear.value = null;
     haptics.success();
+    await showToast(`Academic year status updated to ${pendingStatus.value.toLowerCase()}`, 'success');
     await loadData();
   } catch (err: unknown) {
     showStatusConfirm.value = false;
-    alert(err instanceof Error ? err.message : 'Failed to transition academic year status.');
+    await showToast(err instanceof Error ? err.message : 'Failed to transition academic year status.', 'error');
     haptics.error();
   }
 }

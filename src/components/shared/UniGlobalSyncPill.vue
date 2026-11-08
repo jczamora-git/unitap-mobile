@@ -25,6 +25,7 @@ const pillClass = computed(() => {
     case 'SYNCING':
       return 'pill-syncing';
     case 'PENDING_UPLOAD':
+    case 'AUTH_REQUIRED':
       return 'pill-pending';
     case 'OFFLINE_READY':
       return 'pill-offline';
@@ -43,6 +44,8 @@ const pillIcon = computed(() => {
       return syncOutline;
     case 'PENDING_UPLOAD':
       return cloudUploadOutline;
+    case 'AUTH_REQUIRED':
+      return alertCircleOutline;
     case 'OFFLINE_READY':
       return cloudOfflineOutline;
     case 'SYNC_ERROR':
@@ -59,6 +62,7 @@ const pillLabel = computed(() => {
   if (state.value === 'PENDING_UPLOAD') {
     return isOnline.value ? `Pending (${pendingCount.value})` : `Offline (${pendingCount.value})`;
   }
+  if (state.value === 'AUTH_REQUIRED') return 'Sign-in';
   if (!isOnline.value || state.value === 'OFFLINE_READY') return 'Offline';
   if (state.value === 'SYNC_ERROR') return 'Sync Error';
   if (state.value === 'CONFLICT_REVIEW_REQUIRED') return 'Review Needed';

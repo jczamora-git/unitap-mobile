@@ -43,7 +43,7 @@ ion-content.register-content::part(scroll) {
   flex-direction: column !important;
   height: 100% !important;
   min-height: 100% !important;
-  background: #FFFFFF !important;
+  background: var(--uni-background) !important;
 }
 
 /* Safe area & container spacing */
@@ -319,20 +319,19 @@ ion-button.button-small {
 
 :root.dark .uni-header-action-btn.action-btn-danger,
 :root.dark .uni-header-action-btn.delete-icon-btn,
-:root.dark .delete-icon-btn {
-  color: #EF4444;
-  background: rgba(220, 75, 75, 0.14);
-  border-color: rgba(239, 68, 68, 0.3);
-}
-
-@media (prefers-color-scheme: dark) {
-  .uni-header-action-btn.action-btn-danger,
-  .uni-header-action-btn.delete-icon-btn,
-  .delete-icon-btn {
-    color: #EF4444;
-    background: rgba(220, 75, 75, 0.14);
-    border-color: rgba(239, 68, 68, 0.3);
-  }
+:root.dark .delete-icon-btn,
+:root.ion-palette-dark .uni-header-action-btn.action-btn-danger,
+:root.ion-palette-dark .uni-header-action-btn.delete-icon-btn,
+:root.ion-palette-dark .delete-icon-btn,
+body.dark .uni-header-action-btn.action-btn-danger,
+body.dark .uni-header-action-btn.delete-icon-btn,
+body.dark .delete-icon-btn,
+body.ion-palette-dark .uni-header-action-btn.action-btn-danger,
+body.ion-palette-dark .uni-header-action-btn.delete-icon-btn,
+body.ion-palette-dark .delete-icon-btn {
+  color: var(--uni-danger-text);
+  background: var(--uni-danger-bg);
+  border-color: var(--uni-danger-border);
 }
 
 /* Circular Icon Action Button */
@@ -396,7 +395,7 @@ ion-button.button-small {
 .icon-size-lg { font-size: 22px; width: 22px; height: 22px; }
 .icon-size-xl { font-size: 24px; width: 24px; height: 24px; }
 
-/* Status Badges */
+/* Status Badges & Standard Mini Badges */
 .status-badge {
   display: inline-flex;
   align-items: center;
@@ -406,31 +405,67 @@ ion-button.button-small {
   font-size: 11px;
   font-weight: 600;
   letter-spacing: 0.02em;
+  border: 1px solid transparent;
 }
 
-.status-badge.badge-success {
-  background: rgba(21, 154, 116, 0.1);
-  color: var(--ion-color-success);
+.badge-mini {
+  display: inline-flex;
+  align-items: center;
+  font-size: 10px;
+  font-weight: 700;
+  padding: 2px 6px;
+  border-radius: 4px;
+  border: 1px solid transparent;
+  line-height: 1.3;
 }
 
-.status-badge.badge-warning {
-  background: rgba(217, 149, 34, 0.12);
-  color: var(--ion-color-warning);
+.status-badge.badge-success,
+.badge-mini.badge-success,
+.badge-success {
+  background: var(--uni-success-bg);
+  color: var(--uni-success-text);
+  border-color: var(--uni-success-border);
 }
 
-.status-badge.badge-danger {
-  background: rgba(220, 75, 75, 0.1);
-  color: var(--ion-color-danger);
+.status-badge.badge-warning,
+.badge-mini.badge-warning,
+.badge-warning {
+  background: var(--uni-warning-bg);
+  color: var(--uni-warning-text);
+  border-color: var(--uni-warning-border);
 }
 
-.status-badge.badge-neutral {
-  background: var(--app-surface-subtle);
-  color: var(--app-text-secondary);
+.status-badge.badge-danger,
+.badge-mini.badge-danger,
+.badge-danger {
+  background: var(--uni-danger-bg);
+  color: var(--uni-danger-text);
+  border-color: var(--uni-danger-border);
 }
 
+.status-badge.badge-neutral,
+.badge-mini.badge-neutral,
+.badge-neutral {
+  background: var(--uni-neutral-bg);
+  color: var(--uni-neutral-text);
+  border-color: var(--uni-neutral-border);
+}
+
+.status-badge.badge-primary,
+.badge-mini.badge-primary,
+.badge-primary,
 .status-badge.badge-accent {
-  background: var(--app-accent-soft);
-  color: var(--ion-color-primary);
+  background: var(--uni-primary-bg);
+  color: var(--uni-primary-text, var(--uni-primary));
+  border-color: var(--uni-primary-light);
+}
+
+.status-badge.badge-info,
+.badge-mini.badge-info,
+.badge-info {
+  background: var(--uni-info-bg);
+  color: var(--uni-info-text);
+  border-color: var(--uni-info-border);
 }
 
 /* Clean Empty State */
@@ -468,6 +503,71 @@ ion-button.button-small {
 }
 
 /* Form inputs */
+input, select, textarea {
+  color-scheme: light;
+}
+
+:root.dark input,
+:root.dark select,
+:root.dark textarea,
+:root.ion-palette-dark input,
+:root.ion-palette-dark select,
+:root.ion-palette-dark textarea,
+body.dark input,
+body.dark select,
+body.dark textarea,
+body.ion-palette-dark input,
+body.ion-palette-dark select,
+body.ion-palette-dark textarea {
+  color-scheme: dark;
+}
+
+input[type="checkbox"],
+input[type="radio"] {
+  accent-color: var(--uni-primary);
+}
+
+.uni-checkbox {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 18px;
+  height: 18px;
+  border: 1.5px solid var(--uni-border);
+  border-radius: 5px;
+  background: var(--uni-surface-secondary);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+  transition: all 0.15s ease;
+  vertical-align: middle;
+  flex-shrink: 0;
+  margin: 0;
+  padding: 0;
+}
+
+.uni-checkbox:hover {
+  border-color: var(--uni-primary);
+}
+
+.uni-checkbox:checked {
+  background: var(--uni-primary);
+  border-color: var(--uni-primary);
+}
+
+.uni-checkbox:checked::after {
+  content: '';
+  width: 4px;
+  height: 8px;
+  border: solid var(--uni-primary-contrast, #ffffff);
+  border-width: 0 2px 2px 0;
+  transform: rotate(45deg);
+  position: absolute;
+  top: 2px;
+  left: 5px;
+}
+
 ion-input, ion-textarea, ion-select {
   --background: var(--app-surface-subtle);
   --color: var(--app-text-primary);

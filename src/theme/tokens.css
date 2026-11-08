@@ -4,6 +4,7 @@
    1. GLOBAL ROOT (LIGHT MODE PALETTE - DEFAULT)
    ========================================================================== */
 :root {
+  color-scheme: light;
   /* UniTap 2.0 Core Color Palette (Light Mode) */
   --uni-primary: #0F766E;
   --uni-primary-hover: #115E59;
@@ -23,6 +24,35 @@
   --uni-success: #059669;
   --uni-warning: #D97706;
   --uni-danger: #DC2626;
+
+  /* Accent States & Variants */
+  --uni-primary-bg: rgba(15, 118, 110, 0.08);
+  --uni-primary-light: rgba(15, 118, 110, 0.2);
+  --uni-primary-dark: #0F766E;
+  --uni-primary-text: #0F766E;
+  --uni-border-focus: #0F766E;
+  --uni-surface-muted: #F8FAFC;
+
+  /* Semantic Alert & Badge Tokens (Light Mode) */
+  --uni-success-bg: rgba(5, 150, 105, 0.1);
+  --uni-success-border: rgba(5, 150, 105, 0.25);
+  --uni-success-text: #065F46;
+
+  --uni-warning-bg: rgba(217, 119, 6, 0.1);
+  --uni-warning-border: rgba(217, 119, 6, 0.25);
+  --uni-warning-text: #92400E;
+
+  --uni-danger-bg: rgba(220, 38, 38, 0.1);
+  --uni-danger-border: rgba(220, 38, 38, 0.25);
+  --uni-danger-text: #991B1B;
+
+  --uni-info-bg: rgba(2, 132, 199, 0.1);
+  --uni-info-border: rgba(2, 132, 199, 0.25);
+  --uni-info-text: #0369A1;
+
+  --uni-neutral-bg: var(--uni-surface-secondary);
+  --uni-neutral-border: var(--uni-border);
+  --uni-neutral-text: var(--uni-text-secondary);
 
   /* Shadows (Light Mode) */
   --uni-shadow-card: 0 1px 3px 0 rgba(0, 0, 0, 0.05), 0 1px 2px -1px rgba(0, 0, 0, 0.05);
@@ -71,6 +101,8 @@
 
   /* Aliases and Bridge Variables */
   --uni-bg: var(--uni-background);
+  --uni-card-bg: var(--uni-surface);
+  --uni-input-bg: var(--uni-surface-secondary);
   --uni-surface-elevated: var(--uni-surface-secondary);
   --uni-surface-input: var(--uni-surface-secondary);
   --uni-text-primary: var(--uni-text);
@@ -115,7 +147,9 @@
 :root.dark,
 :root.ion-palette-dark,
 body.dark,
-body.ion-palette-dark {
+body.ion-palette-dark,
+.dark {
+  color-scheme: dark;
   /* UniTap 2.0 Core Color Palette (Dark Mode) */
   --uni-primary: #5EEAD4;
   --uni-primary-hover: #2DD4BF;
@@ -136,6 +170,35 @@ body.ion-palette-dark {
   --uni-warning: #FBBF24;
   --uni-danger: #F87171;
 
+  /* Accent States & Variants (Dark Mode) */
+  --uni-primary-bg: rgba(94, 234, 212, 0.12);
+  --uni-primary-light: rgba(94, 234, 212, 0.25);
+  --uni-primary-dark: #5EEAD4;
+  --uni-primary-text: #5EEAD4;
+  --uni-border-focus: #5EEAD4;
+  --uni-surface-muted: #1E2027;
+
+  /* Semantic Alert & Badge Tokens (Dark Mode) */
+  --uni-success-bg: rgba(52, 211, 153, 0.14);
+  --uni-success-border: rgba(52, 211, 153, 0.3);
+  --uni-success-text: #34D399;
+
+  --uni-warning-bg: rgba(251, 191, 36, 0.14);
+  --uni-warning-border: rgba(251, 191, 36, 0.3);
+  --uni-warning-text: #FBBF24;
+
+  --uni-danger-bg: rgba(248, 113, 113, 0.14);
+  --uni-danger-border: rgba(248, 113, 113, 0.3);
+  --uni-danger-text: #F87171;
+
+  --uni-info-bg: rgba(101, 191, 255, 0.14);
+  --uni-info-border: rgba(101, 191, 255, 0.3);
+  --uni-info-text: #65BFFF;
+
+  --uni-neutral-bg: var(--uni-surface-secondary);
+  --uni-neutral-border: var(--uni-border);
+  --uni-neutral-text: var(--uni-text-secondary);
+
   /* Shadows (Dark Mode) */
   --uni-shadow-card: 0 4px 18px rgba(0, 0, 0, 0.35);
   --uni-shadow-dock: 0 14px 40px rgba(0, 0, 0, 0.6);
@@ -154,6 +217,8 @@ body.ion-palette-dark {
 
   /* Aliases and Bridge Variables */
   --uni-bg: var(--uni-background);
+  --uni-card-bg: var(--uni-surface);
+  --uni-input-bg: var(--uni-surface-secondary);
   --uni-surface-elevated: var(--uni-surface-secondary);
   --uni-surface-input: var(--uni-surface-secondary);
   --uni-text-primary: var(--uni-text);
@@ -195,6 +260,12 @@ body.ion-palette-dark {
    3. IONIC COMPONENT THEME INTEGRATION
    ========================================================================== */
 ion-app {
+  background-color: var(--uni-background);
+  color: var(--uni-text);
+}
+
+ion-page,
+.ion-page {
   background-color: var(--uni-background);
   color: var(--uni-text);
 }
@@ -250,11 +321,13 @@ ion-modal {
 ion-action-sheet {
   --background: var(--uni-surface);
   --color: var(--uni-text);
+  z-index: 25000 !important;
 }
 
 ion-alert {
   --background: var(--uni-surface);
   --color: var(--uni-text);
+  z-index: 35000 !important;
 }
 
 ion-toast {

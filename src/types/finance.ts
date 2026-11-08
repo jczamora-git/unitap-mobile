@@ -183,6 +183,24 @@ export interface BulkFineAssessmentResult {
   createdObligations: StudentObligationItem[];
 }
 
+export interface ContributionCollectionItem {
+  id: string;
+  ruleId?: string;
+  name: string;
+  amountCentavos: number;
+  dueDate: string | null;
+  semesterId: string;
+  semesterTerm?: string;
+  totalStudentsAssigned: number;
+  fullyPaidCount: number;
+  partialPaymentCount: number;
+  unpaidCount: number;
+  totalCollectedCentavos: number;
+  totalAssessedCentavos: number;
+  status: 'ACTIVE' | 'COMPLETED' | 'INACTIVE';
+  createdAt: string;
+}
+
 export interface BulkContributionParams {
   semesterId: string;
   ruleId?: string;
@@ -190,11 +208,26 @@ export interface BulkContributionParams {
   amountCentavos: number;
   dueDate?: string | null;
   notes?: string | null;
-  targetScope: 'ALL' | 'YEAR_LEVEL' | 'SECTION' | 'INDIVIDUAL';
+  targetScope: 'ALL' | 'PROGRAM' | 'YEAR_LEVEL' | 'SECTION' | 'INDIVIDUAL';
+  programIds?: string[];
   yearLevels?: number[];
   sections?: string[];
   studentIds?: string[];
   actorUserId: string;
+}
+
+export interface CreateContributionCollectionParams {
+  name: string;
+  amountCentavos: number;
+  dueDate?: string | null;
+  semesterId: string;
+  targetScope: 'ALL' | 'PROGRAM' | 'YEAR_LEVEL' | 'SECTION' | 'INDIVIDUAL';
+  programIds?: string[];
+  yearLevels?: number[];
+  sections?: string[];
+  studentIds?: string[];
+  notes?: string | null;
+  actorUserId?: string;
 }
 
 export interface BulkContributionResult {

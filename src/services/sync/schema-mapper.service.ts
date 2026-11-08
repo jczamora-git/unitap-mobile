@@ -440,9 +440,16 @@ export class SchemaMapperService {
           'obligation_rules.default_amount_centavos'
         );
         const statusVal = ['ACTIVE', 'INACTIVE'].includes(raw.status) ? raw.status : 'ACTIVE';
+        let ruleId = String(raw.id);
+        if (ruleId.startsWith('rule_')) {
+          const suffix = ruleId.substring(5);
+          if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(suffix)) {
+            ruleId = suffix.toLowerCase();
+          }
+        }
 
         return {
-          id: String(raw.id),
+          id: ruleId,
           semester_id: String(raw.semester_id),
           name: nameVal,
           type: typeVal,
@@ -469,11 +476,19 @@ export class SchemaMapperService {
             ? 'VOID'
             : 'ACTIVE';
 
+        let ruleRefId = raw.rule_id ? String(raw.rule_id) : null;
+        if (ruleRefId && ruleRefId.startsWith('rule_')) {
+          const suffix = ruleRefId.substring(5);
+          if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(suffix)) {
+            ruleRefId = suffix.toLowerCase();
+          }
+        }
+
         return {
           id: String(raw.id),
           student_id: String(raw.student_id),
           semester_id: String(raw.semester_id),
-          rule_id: raw.rule_id ? String(raw.rule_id) : null,
+          rule_id: ruleRefId,
           related_event_id: raw.related_event_id ? String(raw.related_event_id) : null,
           related_occurrence_id: occId ? String(occId) : null,
           title: String(raw.title || 'Obligation'),

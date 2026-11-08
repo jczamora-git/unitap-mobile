@@ -29,6 +29,7 @@ import {
   UniButton,
   UniStatusBadge,
   UniDialog,
+  UniSelect,
 } from '@/components/ui';
 import {
   OfficerManagementService,
@@ -65,6 +66,11 @@ const customPermissions = ref<string[]>([]);
 const appointmentStart = ref('');
 const appointmentEnd = ref('');
 const scopeType = ref<OfficerScopeType>('ORGANIZATION');
+const scopeTypeOptions = [
+  { value: 'ORGANIZATION', label: 'All Organization (Campus-Wide)' },
+  { value: 'PROGRAM', label: 'Specific Program' },
+  { value: 'SECTION', label: 'Specific Section' },
+];
 
 // Academic options
 const academicYears = ref<{ id: string; label: string }[]>([]);
@@ -576,11 +582,12 @@ function handleDone() {
 
               <div class="form-group">
                 <label class="form-label">Scope Reach</label>
-                <select v-model="scopeType" class="form-input form-select">
-                  <option value="ORGANIZATION">All Organization (Campus-Wide)</option>
-                  <option value="PROGRAM">Specific Program</option>
-                  <option value="SECTION">Specific Section</option>
-                </select>
+                <UniSelect
+                  v-model="scopeType"
+                  :options="scopeTypeOptions"
+                  placeholder="Select Scope"
+                  header="Scope Reach"
+                />
               </div>
             </div>
           </div>

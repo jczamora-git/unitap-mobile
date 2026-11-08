@@ -31,11 +31,13 @@ import type { AttendanceScanResult, AttendanceStats, AttendanceScanLog } from '@
 import { formatTime, formatDate } from '@/utilities/date-formatters';
 import { formatFullName, formatStudentAcademicSummary } from '@/utilities/student-formatters';
 import { haptics } from '@/utilities/haptics';
-import { UniPageHeader, UniButton } from '@/components/ui';
+import { UniPageHeader, UniButton, UniSelect } from '@/components/ui';
+import { useToast } from '@/composables/useToast';
 import { useOperationPolicy } from '@/composables/useOperationPolicy';
 
 const route = useRoute();
 const router = useRouter();
+const { showToast } = useToast();
 const { isOnline } = useOperationPolicy();
 
 const {
@@ -51,6 +53,13 @@ const openOccurrences = ref<Array<{ occurrence: EventOccurrence; event: Event }>
 const selectedOccurrenceId = ref<string>('');
 const selectedOccurrence = computed(() => 
   openOccurrences.value.find(item => item.occurrence.id === selectedOccurrenceId.value) || null
+);
+
+const sessionOptions = computed(() =>
+  openOccurrences.value.map((item) => ({
+    value: item.occurrence.id,
+    label: `${item.event.title} — ${item.occurrence.title} (${formatTime(item.occurrence.startTime)})`,
+  }))
 );
 
 const sessionStats = ref<AttendanceStats | null>(null);
@@ -170,7 +179,7 @@ async function handleConfirmStudent() {
     pendingVerification.value = null;
     await refreshSessionData();
   } catch (err: unknown) {
-    alert((err as Error).message);
+    await showToast((err as Error).message, 'error');
   }
 }
 
@@ -196,44 +205,44 @@ async function handleRejectStudent() {
     pendingVerification.value = null;
     await refreshSessionData();
   } catch (err: unknown) {
-    alert((err as Error).message);
+    await showToast((err as Error).message, 'error');
   }
 }
 
 async function handleVoidAttendance(recordId: string) {
   const reason = window.prompt('Enter mandatory reason to void this attendance record:');
   if (!reason || !reason.trim()) {
-    alert('A reason is mandatory to void attendance.');
+    await showToast('A reason is mandatory to void attendance.', 'warning');
     return;
   }
   const officerId = authService.user.value?.id || 'officer_user';
   try {
     await attendanceService.voidAttendance(recordId, reason.trim(), officerId);
-    alert('Attendance record voided with audit log.');
+    await showToast('Attendance record voided with audit log.', 'info');
     await refreshSessionData();
   } catch (err: unknown) {
-    alert((err as Error).message);
+    await showToast((err as Error).message, 'error');
   }
 }
 
 async function handleRecheckAttendance(recordId?: string) {
   if (!recordId) {
-    alert('No attendance record found to recheck.');
+    await showToast('No attendance record found to recheck.', 'warning');
     return;
   }
   const reason = window.prompt('Enter mandatory reason to approve rechecking this student:');
   if (!reason || !reason.trim()) {
-    alert('A reason is mandatory to approve an attendance recheck.');
+    await showToast('A reason is mandatory to approve an attendance recheck.', 'warning');
     return;
   }
   const officerId = authService.user.value?.id || 'officer_user';
   try {
     await attendanceService.recheckStudentAttendance(recordId, reason.trim(), officerId);
-    alert('Attendance reinstated successfully with immutable audit trail.');
+    await showToast('Attendance reinstated successfully with immutable audit trail.', 'success');
     lastResult.value = null;
     await refreshSessionData();
   } catch (err: unknown) {
-    alert((err as Error).message);
+    await showToast((err as Error).message, 'error');
   }
 }
 
@@ -296,21 +305,13 @@ function handleRegisterCard() {
           </div>
 
           <div v-if="openOccurrences.length > 0" class="select-box-wrap">
-            <ion-select 
-              v-model="selectedOccurrenceId" 
-              interface="action-sheet" 
-              :interface-options="{ header: 'Target Attendance Session' }"
-              class="clean-session-select"
-              @ion-change="refreshSessionData"
-            >
-              <ion-select-option 
-                v-for="item in openOccurrences" 
-                :key="item.occurrence.id" 
-                :value="item.occurrence.id"
-              >
-                {{ item.event.title }} — {{ item.occurrence.title }} ({{ formatTime(item.occurrence.startTime) }})
-              </ion-select-option>
-            </ion-select>
+            <UniSelect
+              v-model="selectedOccurrenceId"
+              :options="sessionOptions"
+              placeholder="Select Target Attendance Session"
+              header="Target Attendance Session"
+              @change="refreshSessionData"
+            />
           </div>
 
           <div v-else class="neutral-info-banner">

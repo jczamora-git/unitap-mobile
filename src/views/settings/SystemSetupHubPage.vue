@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted } from 'vue';
+import { ref, computed, onMounted, watch } from 'vue';
 import { useRouter } from 'vue-router';
 import {
   IonPage,
@@ -15,28 +15,48 @@ import {
   schoolOutline,
   peopleOutline,
   chevronForwardOutline,
-  shieldCheckmarkOutline
+  shieldCheckmarkOutline,
+  bookOutline,
+  alertCircleOutline,
 } from 'ionicons/icons';
-import { UniPageHeader } from '@/components/ui';
+import { UniPageHeader, UniButton } from '@/components/ui';
 import { SystemSetupService } from '@/services/system-setup.service';
 import { OfficerManagementService } from '@/services/officer-management.service';
+import { DataModeService } from '@/services/data-mode.service';
+import { SupabaseAuthService } from '@/integrations/supabase/auth.service';
+import { authService } from '@/services/auth.service';
 import { haptics } from '@/utilities/haptics';
 
 const router = useRouter();
 
 const isLoading = ref(true);
 const categoryCount = ref(0);
+const programCount = ref(0);
 const yearLevelCount = ref(0);
 const sectionCount = ref(0);
 const academicYearCount = ref(0);
 const semesterCount = ref(0);
 const officerCount = ref(0);
 
+const isDirectMode = computed(() => DataModeService.isDirectSupabase());
+const hasCloudSession = ref(false);
+
 async function loadCounts() {
   isLoading.value = true;
   try {
-    const [cats, yls, secs, ays, sems, officers] = await Promise.all([
+    if (isDirectMode.value) {
+      await SupabaseAuthService.waitForInitialization();
+      const valid = await SupabaseAuthService.hasValidCloudSession();
+      hasCloudSession.value = valid;
+      if (!valid || SupabaseAuthService.role.value !== 'DEVADMIN') {
+        isLoading.value = false;
+        return;
+      }
+    }
+
+    const [cats, progs, yls, secs, ays, sems, officers] = await Promise.all([
       SystemSetupService.getEventCategories(true),
+      SystemSetupService.getPrograms(true),
       SystemSetupService.getYearLevels(true),
       SystemSetupService.getSections({ includeInactive: true }),
       SystemSetupService.getAcademicYears(),
@@ -44,6 +64,7 @@ async function loadCounts() {
       OfficerManagementService.getOfficers().catch(() => []),
     ]);
     categoryCount.value = cats.length;
+    programCount.value = progs.length;
     yearLevelCount.value = yls.length;
     sectionCount.value = secs.length;
     academicYearCount.value = ays.length;
@@ -55,6 +76,25 @@ async function loadCounts() {
     isLoading.value = false;
   }
 }
+
+// Watch for authentication changes and resume pending page initialization
+watch(
+  () => SupabaseAuthService.isCloudAuthenticated.value,
+  async (isAuth) => {
+    if (isAuth) {
+      await loadCounts();
+    } else if (isDirectMode.value) {
+      hasCloudSession.value = false;
+      categoryCount.value = 0;
+      programCount.value = 0;
+      yearLevelCount.value = 0;
+      sectionCount.value = 0;
+      academicYearCount.value = 0;
+      semesterCount.value = 0;
+      officerCount.value = 0;
+    }
+  }
+);
 
 function navigateTo(path: string) {
   haptics.light();
@@ -75,15 +115,35 @@ onMounted(loadCounts);
 
     <ion-content class="system-setup-content">
       <div class="page-container">
-        <!-- Security Header Banner -->
-        <div class="security-banner minimal-card">
+        <!-- Security Header Banner: Cloud Sign-In Required -->
+        <div v-if="isDirectMode && !hasCloudSession" class="security-banner minimal-card banner-warning">
+          <div class="banner-icon-col">
+            <ion-icon :icon="alertCircleOutline" class="shield-icon warning-icon" />
+          </div>
+          <div class="banner-text-col">
+            <div class="banner-tag font-mono warning-tag">CLOUD SIGN-IN REQUIRED</div>
+            <p class="banner-desc">
+              Direct Supabase Mode is active, but no authenticated Supabase Auth session was detected. Direct queries will execute under the anonymous role and be rejected by PostgreSQL RLS. Please sign in with an authorized cloud DevAdmin account.
+            </p>
+            <div class="banner-action-wrap">
+              <UniButton variant="primary" size="sm" @click="router.push({ path: '/login', query: { redirect: '/settings/system-setup', mode: 'cloud' } })">
+                Sign In with Cloud Account
+              </UniButton>
+            </div>
+          </div>
+        </div>
+
+        <!-- Security Header Banner: DevAdmin Authorized -->
+        <div v-else class="security-banner minimal-card">
           <div class="banner-icon-col">
             <ion-icon :icon="shieldCheckmarkOutline" class="shield-icon" />
           </div>
           <div class="banner-text-col">
-            <div class="banner-tag font-mono">DEVADMIN AUTHORIZED</div>
+            <div class="banner-tag font-mono">
+              {{ isDirectMode ? 'DEVADMIN AUTHORIZED (SUPABASE CLOUD)' : 'DEVADMIN AUTHORIZED' }}
+            </div>
             <p class="banner-desc">
-              Changes made here update central institution configurations and synchronize to all operational terminals.
+              {{ isDirectMode ? 'Changes made here directly update central PostgreSQL tables via authenticated Supabase Auth credentials.' : 'Changes made here update central institution configurations and synchronize to all operational terminals.' }}
             </p>
           </div>
         </div>
@@ -105,7 +165,22 @@ onMounted(loadCounts);
             <ion-icon :icon="chevronForwardOutline" class="module-arrow" />
           </div>
 
-          <!-- 2. Year Levels -->
+          <!-- 2. Programs -->
+          <div class="module-card minimal-card" @click="navigateTo('/settings/system-setup/programs')">
+            <div class="module-icon-wrap">
+              <ion-icon :icon="bookOutline" />
+            </div>
+            <div class="module-info">
+              <div class="module-title-row">
+                <span class="module-title">Programs</span>
+                <span class="module-badge font-mono">{{ programCount }} programs</span>
+              </div>
+              <p class="module-desc">Academic degree programs, course codes, and curriculum offerings.</p>
+            </div>
+            <ion-icon :icon="chevronForwardOutline" class="module-arrow" />
+          </div>
+
+          <!-- 3. Year Levels -->
           <div class="module-card minimal-card" @click="navigateTo('/settings/system-setup/year-levels')">
             <div class="module-icon-wrap">
               <ion-icon :icon="layersOutline" />
@@ -224,6 +299,27 @@ onMounted(loadCounts);
   padding: 14px 16px;
   background: var(--uni-surface, #ffffff);
   border-left: 3px solid var(--uni-primary, #10b981);
+}
+
+.banner-warning {
+  border-left-color: #f59e0b;
+}
+
+.warning-icon {
+  color: #f59e0b;
+}
+
+.warning-tag {
+  color: #d97706;
+}
+
+:global(.dark) .warning-tag,
+:global(.ion-palette-dark) .warning-tag {
+  color: #fbbf24;
+}
+
+.banner-action-wrap {
+  margin-top: 10px;
 }
 
 .banner-icon-col {

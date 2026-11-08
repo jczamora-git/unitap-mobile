@@ -25,8 +25,13 @@ import {
 } from '@/components/ui';
 
 import { SystemSetupService } from '@/services/system-setup.service';
+import { DataModeService } from '@/services/data-mode.service';
+import { SupabaseAuthService } from '@/integrations/supabase/auth.service';
 import type { EventCategory } from '@/types/database';
 import { haptics } from '@/utilities/haptics';
+import { useToast } from '@/composables/useToast';
+
+const { showToast } = useToast();
 
 const categories = ref<EventCategory[]>([]);
 const usageCounts = ref<Record<string, number>>({});
@@ -71,6 +76,15 @@ const filteredCategories = computed(() => {
 async function loadData() {
   isLoading.value = true;
   try {
+    if (DataModeService.isDirectSupabase()) {
+      const valid = await SupabaseAuthService.hasValidCloudSession();
+      if (!valid || SupabaseAuthService.role.value !== 'DEVADMIN') {
+        isLoading.value = false;
+        await showToast('Direct Supabase Mode requires an authenticated cloud DevAdmin session. Please sign in.', 'error');
+        return;
+      }
+    }
+
     const list = await SystemSetupService.getEventCategories(true);
     categories.value = list;
 
@@ -143,6 +157,7 @@ async function handleSaveCategory(isEdit: boolean) {
       showAddModal.value = false;
     }
     haptics.success();
+    await showToast(isEdit ? 'Event category updated' : 'Event category created successfully', 'success');
     await loadData();
   } catch (err: unknown) {
     errorMessage.value = err instanceof Error ? err.message : 'Failed to save event category.';
@@ -156,6 +171,7 @@ async function handleToggleStatus(cat: EventCategory) {
   haptics.medium();
   try {
     await SystemSetupService.toggleCategoryStatus(cat.id);
+    await showToast(`Category ${cat.name} ${cat.status === 'ACTIVE' ? 'deactivated' : 'activated'}`, 'info');
     await loadData();
   } catch (err) {
     console.error('Failed to toggle status:', err);
@@ -175,10 +191,11 @@ async function confirmDelete() {
     showDeleteConfirm.value = false;
     activeCategoryForDelete.value = null;
     haptics.success();
+    await showToast('Category deleted successfully', 'success');
     await loadData();
   } catch (err: unknown) {
     showDeleteConfirm.value = false;
-    alert(err instanceof Error ? err.message : 'Cannot delete category.');
+    await showToast(err instanceof Error ? err.message : 'Cannot delete category.', 'error');
     haptics.error();
   }
 }

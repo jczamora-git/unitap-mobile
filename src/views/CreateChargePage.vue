@@ -1,13 +1,12 @@
 <script setup lang="ts">
-import { ref, onMounted } from 'vue';
+import { ref, computed, onMounted } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import {
   IonPage,
   IonContent,
   IonInput,
   IonTextarea,
-  IonSelect,
-  IonSelectOption
+  IonIcon
 } from '@ionic/vue';
 import { checkmarkOutline, alertCircleOutline } from 'ionicons/icons';
 import { studentService } from '@/services/student.service';
@@ -17,10 +16,12 @@ import type { Student } from '@/types/student';
 import type { ChargeType, ChargeTemplate } from '@/types/finance';
 import { centavosToPeso, pesoToCentavos } from '@/utilities/finance-formatters';
 import { formatFullName } from '@/utilities/student-formatters';
-import { UniPageHeader, UniButton } from '@/components/ui';
+import { UniPageHeader, UniButton, UniSelect } from '@/components/ui';
+import { useToast } from '@/composables/useToast';
 
 const route = useRoute();
 const router = useRouter();
+const { showToast } = useToast();
 const { isPermitted, getDisabledReason } = useOperationPolicy();
 const canCreateCharge = isPermitted('FINANCE_ASSESSMENTS_AND_RULES');
 const createChargeDisabledReason = getDisabledReason('FINANCE_ASSESSMENTS_AND_RULES');
@@ -44,6 +45,27 @@ async function loadData() {
 }
 
 onMounted(loadData);
+
+const studentOptions = computed(() =>
+  students.value.map((s) => ({
+    value: s.id,
+    label: `${formatFullName(s.firstName, s.middleName, s.lastName)} (${s.studentNumber || s.section || 'Student'})`,
+  }))
+);
+
+const templateOptions = computed(() => [
+  { value: '', label: 'None (Custom Charge)' },
+  ...templates.value.map((t) => ({
+    value: t.id,
+    label: `${t.name} — ₱${centavosToPeso(t.defaultAmount ?? t.defaultAmountCentavos ?? 0)}`,
+  })),
+]);
+
+const chargeTypeOptions = [
+  { value: 'FINE', label: 'Fine' },
+  { value: 'CONTRIBUTION', label: 'Contribution' },
+  { value: 'OTHER', label: 'Other' },
+];
 
 function onTemplateChange() {
   const tmpl = templates.value.find(t => t.id === selectedTemplateId.value);
@@ -84,7 +106,8 @@ async function handleSaveCharge() {
       remarks: remarks.value.trim()
     });
 
-    router.replace('/finance/charges');
+    await showToast('Fee obligation issued successfully', 'success');
+    router.replace('/finance/fines');
   } catch (err: unknown) {
     console.error('Error issuing charge:', err);
     errorMessage.value = err instanceof Error ? err.message : 'Error creating charge.';
@@ -97,10 +120,10 @@ async function handleSaveCharge() {
 <template>
   <ion-page>
     <UniPageHeader
-      title="Issue Charge"
+      title="Issue Fine / Fee"
       subtitle="Assign fee obligation to a student"
       :back-button="true"
-      default-back-href="/finance/charges"
+      default-back-href="/finance/fines"
       variant="detail"
     />
 
@@ -118,17 +141,12 @@ async function handleSaveCharge() {
 
             <div class="field-item">
               <label class="field-label">Target Student <span class="req">*</span></label>
-              <ion-select 
-                v-model="selectedStudentId" 
-                interface="action-sheet" 
-                :interface-options="{ header: 'Target Student' }"
+              <UniSelect
+                v-model="selectedStudentId"
+                :options="studentOptions"
                 placeholder="Choose student"
-                class="clean-select"
-              >
-                <ion-select-option v-for="s in students" :key="s.id" :value="s.id">
-                  {{ formatFullName(s.firstName, s.middleName, s.lastName) }} ({{ s.studentNumber || s.section }})
-                </ion-select-option>
-              </ion-select>
+                header="Target Student"
+              />
             </div>
           </div>
 
@@ -138,19 +156,13 @@ async function handleSaveCharge() {
 
             <div class="field-item">
               <label class="field-label">Pre-configured Template</label>
-              <ion-select 
-                v-model="selectedTemplateId" 
-                interface="action-sheet" 
-                :interface-options="{ header: 'Fee Template' }"
+              <UniSelect
+                v-model="selectedTemplateId"
+                :options="templateOptions"
                 placeholder="Select fee template (Optional)"
-                class="clean-select"
-                @ion-change="onTemplateChange"
-              >
-                <ion-select-option value="">None (Custom Charge)</ion-select-option>
-                <ion-select-option v-for="t in templates" :key="t.id" :value="t.id">
-                  {{ t.name }} — ₱{{ centavosToPeso(t.defaultAmount ?? t.defaultAmountCentavos ?? 0) }}
-                </ion-select-option>
-              </ion-select>
+                header="Fee Template"
+                @change="onTemplateChange"
+              />
             </div>
 
             <div class="field-item">
@@ -165,16 +177,12 @@ async function handleSaveCharge() {
             <div class="category-and-amount-grid">
               <div class="field-item">
                 <label class="field-label">Category</label>
-                <ion-select 
-                  v-model="chargeType" 
-                  interface="action-sheet" 
-                  :interface-options="{ header: 'Category' }"
-                  class="clean-select"
-                >
-                  <ion-select-option value="FINE">Fine</ion-select-option>
-                  <ion-select-option value="CONTRIBUTION">Contribution</ion-select-option>
-                  <ion-select-option value="OTHER">Other</ion-select-option>
-                </ion-select>
+                <UniSelect
+                  v-model="chargeType"
+                  :options="chargeTypeOptions"
+                  placeholder="Select Category"
+                  header="Category"
+                />
               </div>
 
               <div class="field-item">

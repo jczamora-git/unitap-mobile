@@ -32,32 +32,28 @@ withDefaults(defineProps<Props>(), {
 
 .status-active,
 .status-success {
-  background: rgba(112, 243, 207, 0.12);
-  color: #0E8560;
-  border: 1px solid rgba(112, 243, 207, 0.28);
-}
-@media (prefers-color-scheme: dark) {
-  .status-active,
-  .status-success { color: var(--uni-mint); }
+  background: var(--uni-success-bg);
+  color: var(--uni-success-text);
+  border: 1px solid var(--uni-success-border);
 }
 
 .status-pending,
 .status-warning {
-  background: rgba(255, 183, 143, 0.14);
-  color: #D97706;
-  border: 1px solid rgba(255, 183, 143, 0.28);
+  background: var(--uni-warning-bg);
+  color: var(--uni-warning-text);
+  border: 1px solid var(--uni-warning-border);
 }
 
 .status-danger {
-  background: rgba(220, 75, 75, 0.12);
-  color: #DC2626;
-  border: 1px solid rgba(220, 75, 75, 0.28);
+  background: var(--uni-danger-bg);
+  color: var(--uni-danger-text);
+  border: 1px solid var(--uni-danger-border);
 }
 
 .status-neutral {
-  background: var(--uni-surface-elevated);
-  color: var(--uni-text-secondary);
-  border: 1px solid var(--uni-border);
+  background: var(--uni-neutral-bg);
+  color: var(--uni-neutral-text);
+  border: 1px solid var(--uni-neutral-border);
 }
 
 .badge-pulse-dot {

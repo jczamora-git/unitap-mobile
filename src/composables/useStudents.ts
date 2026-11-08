@@ -2,6 +2,7 @@ import { ref, computed } from 'vue';
 import type { Student, CreateStudentDto, UpdateStudentDto, YearLevel } from '@/types/student';
 import { studentService } from '@/services/student.service';
 import { SelectiveSyncService } from '@/services/sync/selective-sync.service';
+import { DataModeService } from '@/services/data-mode.service';
 
 const students = ref<Student[]>([]);
 const currentStudent = ref<Student | null>(null);
@@ -58,9 +59,9 @@ export function useStudents() {
       const data = await studentService.getStudents();
       students.value = data;
 
-      // 2. Smart selective background refresh (if online, stale, or forced)
-      // Only refreshes students domain (students, enrollments, cards); avoids redundant 19-table sync
-      if (typeof navigator !== 'undefined' && navigator.onLine) {
+      // 2. Smart selective background refresh (if offline_first mode, online, stale, or forced)
+      // In direct Supabase mode, live data was already retrieved directly.
+      if (!DataModeService.isDirectSupabase() && typeof navigator !== 'undefined' && navigator.onLine) {
         SelectiveSyncService.refreshStudents(forceRemote)
           .then(async (res) => {
             if (res.refreshed && res.recordsPulled > 0) {

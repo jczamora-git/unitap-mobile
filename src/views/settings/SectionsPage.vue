@@ -28,8 +28,13 @@ import {
 
 import { SystemSetupService } from '@/services/system-setup.service';
 import { AcademicRepository } from '@/database/repositories/academic.repository';
+import { DataModeService } from '@/services/data-mode.service';
+import { SupabaseAuthService } from '@/integrations/supabase/auth.service';
 import type { SectionRecord, YearLevel, AcademicYear, Program } from '@/types/database';
 import { haptics } from '@/utilities/haptics';
+import { useToast } from '@/composables/useToast';
+
+const { showToast } = useToast();
 
 const sections = ref<(SectionRecord & { year_display?: string; program_code?: string })[]>([]);
 const yearLevels = ref<YearLevel[]>([]);
@@ -200,6 +205,15 @@ const sectionTreeNodes = computed(() => {
 async function loadData() {
   isLoading.value = true;
   try {
+    if (DataModeService.isDirectSupabase()) {
+      const valid = await SupabaseAuthService.hasValidCloudSession();
+      if (!valid || SupabaseAuthService.role.value !== 'DEVADMIN') {
+        isLoading.value = false;
+        await showToast('Direct Supabase Mode requires an authenticated cloud DevAdmin session. Please sign in.', 'error');
+        return;
+      }
+    }
+
     const [yls, ays, progs] = await Promise.all([
       SystemSetupService.getYearLevels(true),
       SystemSetupService.getAcademicYears(),
@@ -285,6 +299,7 @@ async function handleSave(isEdit: boolean) {
       showAddModal.value = false;
     }
     haptics.success();
+    await showToast(isEdit ? 'Section updated successfully' : 'Section created successfully', 'success');
     await loadData();
   } catch (err: unknown) {
     errorMessage.value = err instanceof Error ? err.message : 'Failed to save section.';
@@ -298,6 +313,7 @@ async function handleToggleStatus(sec: SectionRecord) {
   haptics.medium();
   try {
     await SystemSetupService.toggleSectionStatus(sec.id);
+    await showToast(`Section ${sec.section_name} ${sec.status === 'ACTIVE' ? 'deactivated' : 'activated'}`, 'info');
     await loadData();
   } catch (err) {
     console.error('Failed to toggle section status:', err);

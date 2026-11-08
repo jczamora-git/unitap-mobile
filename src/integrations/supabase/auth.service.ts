@@ -4,6 +4,7 @@ import { AuthSessionService, type CachedOfflineSession } from './auth-session.se
 import { AccountLinkingService } from './account-linking.service';
 import { AuthRepository } from '@/database/repositories/auth.repository';
 import { StudentsRepository } from '@/database/repositories/students.repository';
+import { DataModeService } from '@/services/data-mode.service';
 import type { UserAccount, UserRoleRecord, StudentRecord } from '@/types/database';
 
 export interface LoginResult {
@@ -18,6 +19,9 @@ export class SupabaseAuthService {
   private static currentRole = ref<'DEVADMIN' | 'OFFICER' | 'STUDENT' | null>(null);
   private static currentStudent = ref<StudentRecord | null>(null);
   private static isOfflineMode = ref(false);
+  private static authListenerInitialized = false;
+  private static isInitialized = ref(false);
+  private static initPromise: Promise<void> | null = null;
 
   public static get user() {
     return computed(() => this.currentUser.value);
@@ -39,6 +43,61 @@ export class SupabaseAuthService {
     return computed(() => this.currentUser.value !== null);
   }
 
+  public static get isCloudAuthenticated() {
+    return computed(() => this.currentUser.value !== null && !this.isOfflineMode.value);
+  }
+
+  public static get initialized() {
+    return computed(() => this.isInitialized.value);
+  }
+
+  /**
+   * Reliable authentication initialization barrier.
+   * Guarantees session restoration completes before protected direct queries execute.
+   */
+  public static async waitForInitialization(): Promise<void> {
+    if (this.isInitialized.value) return;
+    if (this.initPromise) {
+      await this.initPromise;
+      return;
+    }
+    await this.initialize();
+  }
+
+  /**
+   * Verifies whether an active, valid, non-expired Supabase Auth JWT session exists.
+   */
+  public static async hasValidCloudSession(): Promise<boolean> {
+    await this.waitForInitialization();
+    if (!this.currentUser.value || this.isOfflineMode.value) {
+      return false;
+    }
+    try {
+      const { data: { session }, error } = await supabase.auth.getSession();
+      if (error || !session || !session.access_token) {
+        return false;
+      }
+      if (session.expires_at && session.expires_at * 1000 < Date.now()) {
+        return false;
+      }
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Returns current session access token JWT if present.
+   */
+  public static async getAccessToken(): Promise<string | null> {
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      return session?.access_token || null;
+    } catch {
+      return null;
+    }
+  }
+
   public static async switchWorkspace(workspace: 'DEVADMIN' | 'OFFICER' | 'STUDENT'): Promise<void> {
     const { authService } = await import('@/services/auth.service');
     await authService.switchWorkspace(workspace);
@@ -50,46 +109,106 @@ export class SupabaseAuthService {
     return authService.hasRole(role);
   }
 
+  public static setupAuthStateListener(): void {
+    if (this.authListenerInitialized) return;
+    this.authListenerInitialized = true;
+
+    try {
+      supabase.auth.onAuthStateChange(async (event, session) => {
+        if (event === 'SIGNED_IN' || event === 'TOKEN_REFRESHED' || event === 'USER_UPDATED') {
+          if (session?.user) {
+            await this.handleOnlineSession(session.user.id, session.user.email || '');
+            this.isOfflineMode.value = false;
+            this.isInitialized.value = true;
+          }
+        } else if (event === 'SIGNED_OUT') {
+          this.currentUser.value = null;
+          this.currentRole.value = null;
+          this.currentStudent.value = null;
+          this.isOfflineMode.value = false;
+          this.isInitialized.value = true;
+        }
+      });
+    } catch (err) {
+      console.warn('[SupabaseAuth] Failed to attach onAuthStateChange listener:', err);
+    }
+  }
+
   /**
    * Initializes auth state from active Supabase session or cached offline ticket.
-   * Priority: Restores valid offline session immediately (0ms delay), then verifies
-   * online asynchronously without freezing route transitions or app cold start.
+   * Priority: In Direct Supabase Mode, verifies live Supabase Auth session first.
+   * In Offline-First Mode, restores valid offline session immediately (0ms delay).
    */
   public static async initialize(): Promise<void> {
-    // 1. Fast path: check valid cached offline session first
-    const cached = await AuthSessionService.getCachedOfflineSession();
-    if (cached && AuthSessionService.isOfflineSessionValid(cached)) {
-      await this.restoreOfflineSession(cached);
-
-      // Asynchronously revalidate in background if online (never blocks startup)
-      const isOnline = typeof navigator !== 'undefined' ? navigator.onLine : true;
-      if (isOnline) {
-        this.revalidateSessionOnline(cached.userId, cached.email).catch((e) => {
-          console.warn('[SupabaseAuth] Background session revalidation error:', e);
-        });
-      }
-      return;
+    if (this.initPromise) {
+      return this.initPromise;
     }
 
-    // 2. Online verification path (First-time login or expired session)
-    const isOnline = typeof navigator !== 'undefined' ? navigator.onLine : true;
-    if (isOnline) {
+    this.initPromise = (async () => {
       try {
-        const { data: { session }, error } = await supabase.auth.getSession();
-        if (!error && session && session.user) {
-          await this.handleOnlineSession(session.user.id, session.user.email || '');
+        this.setupAuthStateListener();
+
+        // 1. In Direct Supabase Mode, authoritative authentication is live Supabase Auth
+        if (DataModeService.isDirectSupabase()) {
+          try {
+            const { data: { session }, error } = await supabase.auth.getSession();
+            if (!error && session && session.user) {
+              await this.handleOnlineSession(session.user.id, session.user.email || '');
+              this.isOfflineMode.value = false;
+              return;
+            }
+          } catch (err) {
+            console.warn('[SupabaseAuth] Live session check error in Direct Mode:', err);
+          }
+          // If Direct Mode has no live session, do not restore local stubs
+          this.currentUser.value = null;
+          this.currentRole.value = null;
+          this.currentStudent.value = null;
           this.isOfflineMode.value = false;
           return;
         }
-      } catch (err) {
-        console.warn('[SupabaseAuth] Online session check failed:', err);
-      }
-    }
 
-    // 3. Fallback to expired or remaining cached offline session if any
-    if (cached) {
-      await this.restoreOfflineSession(cached);
-    }
+        // 2. In Offline-First Mode: Fast path check valid cached offline session first
+        const cached = await AuthSessionService.getCachedOfflineSession();
+        if (cached && AuthSessionService.isOfflineSessionValid(cached)) {
+          await this.restoreOfflineSession(cached);
+
+          // Asynchronously revalidate in background if online (never blocks startup)
+          const isOnline = typeof navigator !== 'undefined' ? navigator.onLine : true;
+          if (isOnline) {
+            this.revalidateSessionOnline(cached.userId, cached.email).catch((e) => {
+              console.warn('[SupabaseAuth] Background session revalidation error:', e);
+            });
+          }
+          return;
+        }
+
+        // 3. Online verification path (First-time login or expired session)
+        const isOnline = typeof navigator !== 'undefined' ? navigator.onLine : true;
+        if (isOnline) {
+          try {
+            const { data: { session }, error } = await supabase.auth.getSession();
+            if (!error && session && session.user) {
+              await this.handleOnlineSession(session.user.id, session.user.email || '');
+              this.isOfflineMode.value = false;
+              return;
+            }
+          } catch (err) {
+            console.warn('[SupabaseAuth] Online session check failed:', err);
+          }
+        }
+
+        // 4. Fallback to expired or remaining cached offline session if any
+        if (cached) {
+          await this.restoreOfflineSession(cached);
+        }
+      } finally {
+        this.isInitialized.value = true;
+        this.initPromise = null;
+      }
+    })();
+
+    return this.initPromise;
   }
 
   /**
@@ -188,17 +307,41 @@ export class SupabaseAuthService {
         if (resolvedEmail && typeof resolvedEmail === 'string' && resolvedEmail.includes('@')) {
           candidates.push(resolvedEmail.toLowerCase());
         }
-      } catch {
-        // Fallback to domain aliases
+      } catch (rpcErr) {
+        console.warn('[SupabaseAuth] resolve_login_email RPC call error:', rpcErr);
       }
 
-      if (cleanId === 'admin' || cleanId === 'devadmin') {
-        candidates.push('admin@unitap.com');
+      // If identifier is devadmin and RPC returned nothing, try resolving 'admin'
+      if (cleanId === 'devadmin' && !candidates.length) {
+        try {
+          const { data: adminEmail } = await supabase.rpc('resolve_login_email', {
+            p_identifier: 'admin',
+          });
+          if (adminEmail && typeof adminEmail === 'string' && adminEmail.includes('@')) {
+            candidates.push(adminEmail.toLowerCase());
+          }
+        } catch {
+          // Ignored
+        }
       }
-      candidates.push(`${cleanId}@unitap.com`);
+
+      // Known default aliases for DevAdmin
+      if (cleanId === 'admin' || cleanId === 'devadmin') {
+        if (!candidates.includes('admin@unitap.com')) candidates.push('admin@unitap.com');
+        if (!candidates.includes('devadmin@unitap.com')) candidates.push('devadmin@unitap.com');
+      }
+
+      const domainAlias = `${cleanId}@unitap.com`;
+      if (!candidates.includes(domainAlias)) {
+        candidates.push(domainAlias);
+      }
     }
 
-    // 1. Attempt Online Supabase Auth
+    // 1. Attempt Online Supabase Auth across candidates
+    let authError: string | null = null;
+    let successfulSession: { user: any; session: any } | null = null;
+    let matchedEmail: string | null = null;
+
     for (const emailCandidate of candidates) {
       try {
         const { data, error } = await supabase.auth.signInWithPassword({
@@ -206,29 +349,44 @@ export class SupabaseAuthService {
           password,
         });
 
-        if (!error && data.user) {
-          try {
-            const role = await this.handleOnlineSession(data.user.id, emailCandidate);
-            this.isOfflineMode.value = false;
-            return { success: true, role, isOffline: false };
-          } catch (dbErr) {
-            console.error('[SupabaseAuth] Error initializing local user session from online auth:', dbErr);
-            return {
-              success: false,
-              error: `Session initialization error: ${(dbErr as Error).message || 'Database error'}`,
-            };
-          }
+        if (!error && data.user && data.session) {
+          successfulSession = data;
+          matchedEmail = emailCandidate;
+          break;
         }
 
-        if (error && error.message.includes('Invalid login credentials') && candidates.length === 1) {
-          return { success: false, error: 'Invalid email or password.' };
+        if (error) {
+          authError = error.message;
         }
       } catch (netErr) {
-        console.warn('[SupabaseAuth] Network failure during login, attempting offline verification:', netErr);
+        authError = (netErr as Error).message;
+        console.warn('[SupabaseAuth] Network failure attempting email candidate:', emailCandidate, netErr);
       }
     }
 
-    // 2. Offline Fallback for previously provisioned users
+    if (successfulSession && successfulSession.user && matchedEmail) {
+      try {
+        const role = await this.handleOnlineSession(successfulSession.user.id, matchedEmail);
+        this.isOfflineMode.value = false;
+        return { success: true, role, isOffline: false };
+      } catch (dbErr) {
+        console.error('[SupabaseAuth] Error initializing local user session from online auth:', dbErr);
+        return {
+          success: false,
+          error: `Session initialization error: ${(dbErr as Error).message || 'Database error'}`,
+        };
+      }
+    }
+
+    // Direct Supabase Mode: NEVER fall back to offline cache or local SQLite
+    if (DataModeService.isDirectSupabase()) {
+      return {
+        success: false,
+        error: authError || 'Invalid credentials. Please verify your Supabase Auth account and password.',
+      };
+    }
+
+    // 2. Offline Fallback for previously provisioned users in Offline-First Mode
     const cached = await AuthSessionService.getCachedOfflineSession();
     if (cached && (cached.email.toLowerCase() === cleanId || cached.username.toLowerCase() === cleanId)) {
       if (AuthSessionService.isOfflineSessionValid(cached)) {
@@ -242,7 +400,7 @@ export class SupabaseAuthService {
 
     return {
       success: false,
-      error: 'Invalid credentials or connection error. Please verify your email and password.',
+      error: authError || 'Invalid credentials or connection error. Please verify your email and password.',
     };
   }
 
@@ -342,6 +500,7 @@ export class SupabaseAuthService {
     this.currentRole.value = null;
     this.currentStudent.value = null;
     this.isOfflineMode.value = false;
+    this.isInitialized.value = true;
 
     const { SyncManager } = await import('@/services/sync/sync-manager');
     SyncManager.stop();

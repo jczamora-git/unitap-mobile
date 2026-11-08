@@ -8,11 +8,96 @@
       variant="detail"
     />
 
+    <!-- FULL BLOCKING PROCESSING MODAL WITH REAL CANCELLATION -->
+    <ion-modal
+      :is-open="isBlockingModalOpen"
+      :backdrop-dismiss="false"
+      class="blocking-process-modal"
+    >
+      <div class="blocking-modal-wrap">
+        <div class="blocking-modal-card animate-fade-up">
+          <!-- Animated Header Icon -->
+          <div class="blocking-icon-box">
+            <ion-spinner name="crescent" class="blocking-spinner" />
+          </div>
+
+          <!-- Dynamic Title & Description -->
+          <div class="blocking-text-block">
+            <h3 class="blocking-modal-title">
+              {{ importState === 'VALIDATING' ? 'Validating Student Roster...' : 'Importing Student Roster...' }}
+            </h3>
+            <p class="blocking-modal-desc">
+              {{
+                importState === 'VALIDATING'
+                  ? 'Verifying CSV syntax, student IDs, and academic foreign keys in database.'
+                  : 'Contacting Supabase Cloud Database. Ingesting student records and academic enrollments.'
+              }}
+            </p>
+          </div>
+
+          <!-- Indeterminate Progress Indicator -->
+          <div class="indeterminate-progress-bar">
+            <div class="indeterminate-bar-fill"></div>
+          </div>
+
+          <!-- Metadata Context Card -->
+          <div class="blocking-meta-box font-mono">
+            <div class="meta-row">
+              <span class="meta-lbl">File:</span>
+              <span class="meta-val">{{ selectedFileName || 'student_roster.csv' }}</span>
+            </div>
+            <div v-if="parseResult" class="meta-row">
+              <span class="meta-lbl">Valid Records:</span>
+              <span class="meta-val">{{ parseResult.validRows.length }} Students</span>
+            </div>
+            <div class="meta-row">
+              <span class="meta-lbl">Target Semester:</span>
+              <span class="meta-val">{{ selectedSemesterLabel }}</span>
+            </div>
+            <div class="meta-row">
+              <span class="meta-lbl">Target Program:</span>
+              <span class="meta-val">{{ selectedProgramLabel }}</span>
+            </div>
+          </div>
+
+          <div class="blocking-disclaimer font-mono">
+            <ion-icon :icon="alertCircleOutline" />
+            <span>Screen is blocked to protect data integrity and prevent double execution.</span>
+          </div>
+
+          <!-- REAL CANCEL BUTTON -->
+          <div class="blocking-modal-actions">
+            <UniButton
+              variant="destructive"
+              size="md"
+              :block="true"
+              :icon="closeCircleOutline"
+              @click="cancelActiveProcess"
+            >
+              Cancel Process
+            </UniButton>
+          </div>
+        </div>
+      </div>
+    </ion-modal>
+
     <ion-content class="safe-content">
       <div class="page-container">
         <!-- Error banner -->
         <div v-if="errorMessage" class="error-banner font-mono" role="alert">
-          {{ errorMessage }}
+          <div class="error-banner-content">
+            <ion-icon :icon="alertCircleOutline" class="error-icon" />
+            <div class="error-text">
+              <strong>Import Operation Alert</strong>
+              <p>{{ errorMessage }}</p>
+            </div>
+          </div>
+        </div>
+
+        <!-- Academic Setup Prerequisite Warning -->
+        <div v-if="!hasAcademicPrerequisites" class="error-banner font-mono" role="alert">
+          <ion-icon :icon="alertCircleOutline" style="font-size: 16px; vertical-align: -2px; margin-right: 6px;" />
+          <strong>Academic Setup Required:</strong> Target Semester and Program are required before importing students. Please configure them in Settings.
         </div>
 
         <div class="form-flow">
@@ -31,7 +116,7 @@
                 <UniSelect
                   v-model="selectedSemesterId"
                   :options="semesterOptions"
-                  :disabled="isImporting"
+                  :disabled="isImporting || importState === 'IMPORTING'"
                   placeholder="Select Semester"
                   header="Target Semester"
                 />
@@ -45,7 +130,7 @@
                 <UniSelect
                   v-model="selectedProgramId"
                   :options="programOptions"
-                  :disabled="isImporting"
+                  :disabled="isImporting || importState === 'IMPORTING'"
                   placeholder="Select Program"
                   header="Program"
                 />
@@ -53,11 +138,16 @@
             </div>
           </section>
 
-          <!-- Section 2: File Upload Drop Zone -->
-          <section class="form-section">
+          <!-- Section 2: File Upload Drop Zone (Hidden during Success state) -->
+          <section v-if="importState !== 'SUCCESS'" class="form-section">
             <div class="section-title-row">
               <span class="section-title">Upload roster file</span>
-              <button type="button" class="btn-text-link" @click="downloadTemplate">
+              <button
+                type="button"
+                class="btn-text-link"
+                :disabled="isImporting || importState === 'IMPORTING'"
+                @click="downloadTemplate"
+              >
                 <ion-icon :icon="cloudDownloadOutline" />
                 <span>Sample CSV</span>
               </button>
@@ -68,34 +158,57 @@
               ref="fileInputRef"
               accept=".csv,text/csv"
               style="display: none"
+              :disabled="isImporting || importState === 'IMPORTING'"
               @change="handleFileSelected"
             />
 
+            <!-- Drop Zone -->
             <div
               class="drop-zone"
-              :class="{ 'has-file': Boolean(selectedFileName) }"
+              :class="{
+                'has-file': Boolean(selectedFileName),
+                'disabled-zone': !selectedSemesterId || !selectedProgramId || isImporting || importState === 'IMPORTING'
+              }"
               @click="triggerFileInput"
             >
               <div class="drop-icon-wrapper">
                 <ion-icon :icon="documentTextOutline" class="drop-icon" />
               </div>
-              <div class="drop-text">
-                <span class="drop-primary">Click to select CSV file</span> or drag &amp; drop here
+              <div v-if="!selectedSemesterId || !selectedProgramId" class="drop-text">
+                <span class="drop-primary" style="color: #d97706;">Select Target Semester &amp; Program first</span>
+                <div class="drop-hint">Enrollment requires matching Semester and Program foreign keys.</div>
               </div>
-              <div class="drop-hint font-mono">
-                Headers: school_id, first_name, middle_name, lastname, year, section
+              <div v-else-if="isImporting || importState === 'IMPORTING'" class="drop-text">
+                <span class="drop-primary">Import in progress...</span>
+                <div class="drop-hint">File upload disabled while records are being processed.</div>
+              </div>
+              <div v-else class="drop-text">
+                <span class="drop-primary">Click to select CSV file</span> or drag &amp; drop here
+                <div class="drop-hint font-mono">
+                  Headers: school_id, first_name, middle_name, last_name, year, section
+                </div>
               </div>
             </div>
 
-            <div v-if="selectedFileName" class="selected-file-badge">
+            <!-- Validating Feedback Banner -->
+            <div v-if="importState === 'VALIDATING'" class="validating-banner">
+              <ion-spinner name="crescent" class="spinner-sm text-primary" />
+              <div class="validating-text font-mono">
+                <strong>Validating CSV &amp; Foreign Keys...</strong>
+                <span>Matching school IDs, year levels, and sections in database</span>
+              </div>
+            </div>
+
+            <div v-if="selectedFileName && importState !== 'VALIDATING'" class="selected-file-badge">
               <div class="file-badge-info">
                 <ion-icon :icon="checkmarkCircle" class="file-badge-icon" />
                 <span class="file-badge-name">{{ selectedFileName }}</span>
               </div>
               <button
+                v-if="!isImporting && importState !== 'IMPORTING'"
                 type="button"
                 class="btn-clear-file"
-                @click.stop="clearSelection"
+                @click.stop="resetToIdle"
                 aria-label="Clear selected file"
               >
                 <ion-icon :icon="closeOutline" />
@@ -103,12 +216,72 @@
             </div>
           </section>
 
-          <!-- Section 3: Validation Preview & Confirmation -->
-          <section v-if="parseResult" class="form-section preview-section">
-            <div class="section-title-row">
-              <span class="section-title">Validation preview</span>
+          <!-- Section 3: Visible In-Flight Progress Panel (IMPORTING STATE) -->
+          <section v-if="importState === 'IMPORTING'" class="form-section import-progress-section" role="status">
+            <div class="progress-panel-head">
+              <div class="progress-spinner-wrap">
+                <ion-spinner name="crescent" class="import-spinner" />
+              </div>
+              <div class="progress-title-col">
+                <h3 class="progress-title">Importing student roster...</h3>
+                <p class="progress-subtitle">
+                  Contacting Supabase Cloud Database. Processing atomic student records and academic enrollments.
+                </p>
+              </div>
             </div>
 
+            <!-- Indeterminate Progress Indicator (Atomic RPC) -->
+            <div class="indeterminate-progress-bar">
+              <div class="indeterminate-bar-fill"></div>
+            </div>
+
+            <div class="progress-details-grid font-mono">
+              <div class="progress-detail-item">
+                <span class="p-label">Selected File</span>
+                <span class="p-value">{{ selectedFileName }}</span>
+              </div>
+              <div class="progress-detail-item">
+                <span class="p-label">Valid Ingest Rows</span>
+                <span class="p-value">{{ parseResult?.validRows.length }} student(s)</span>
+              </div>
+              <div class="progress-detail-item">
+                <span class="p-label">Target Semester</span>
+                <span class="p-value">{{ selectedSemesterLabel }}</span>
+              </div>
+              <div class="progress-detail-item">
+                <span class="p-label">Target Program</span>
+                <span class="p-value">{{ selectedProgramLabel }}</span>
+              </div>
+            </div>
+
+            <div class="progress-disclaimer font-mono">
+              <ion-icon :icon="alertCircleOutline" />
+              <span>Please do not close or navigate away while the database transaction is in progress.</span>
+            </div>
+          </section>
+
+          <!-- Section 4: Validation Preview & Confirmation (READY or FAILED or IMPORTING) -->
+          <section v-if="parseResult && importState !== 'SUCCESS'" class="form-section preview-section">
+            <div class="section-title-row">
+              <span class="section-title">Validation preview</span>
+              <span v-if="importState === 'READY'" class="preview-badge ready-badge font-mono">Ready to Import</span>
+              <span v-else-if="importState === 'IMPORTING'" class="preview-badge importing-badge font-mono">Processing</span>
+              <span v-else-if="importState === 'FAILED'" class="preview-badge failed-badge font-mono">Retry Allowed</span>
+            </div>
+
+            <!-- Foreign Key Enrollment Context -->
+            <div class="fk-context-badge">
+              <span class="fk-tag">
+                <ion-icon :icon="checkmarkCircle" />
+                Semester FK: <strong>{{ selectedSemesterLabel }}</strong>
+              </span>
+              <span class="fk-tag">
+                <ion-icon :icon="checkmarkCircle" />
+                Program FK: <strong>{{ selectedProgramLabel }}</strong>
+              </span>
+            </div>
+
+            <!-- KPI Stats Grid -->
             <div class="stats-grid">
               <div class="stat-card">
                 <span class="stat-num font-mono">{{ parseResult.totalRows }}</span>
@@ -125,6 +298,26 @@
               <div class="stat-card invalid">
                 <span class="stat-num font-mono">{{ parseResult.invalidRows.length }}</span>
                 <span class="stat-lbl">Invalid Rows</span>
+              </div>
+            </div>
+
+            <!-- Duplicate School IDs in CSV Warning -->
+            <div v-if="duplicateSchoolIdsInCsv > 0" class="warning-box font-mono">
+              <ion-icon :icon="alertCircleOutline" />
+              <span><strong>{{ duplicateSchoolIdsInCsv }} Duplicate School ID(s)</strong> detected within CSV file and rejected.</span>
+            </div>
+
+            <!-- Year-level and section distribution breakdown -->
+            <div v-if="sectionDistribution.length > 0" class="distribution-card">
+              <div class="distribution-header">
+                <span class="distribution-title">Enrollment Distribution</span>
+                <span class="distribution-count font-mono">{{ sectionDistribution.length }} Group(s)</span>
+              </div>
+              <div class="distribution-grid">
+                <div v-for="item in sectionDistribution" :key="item.label" class="distribution-item font-mono">
+                  <span class="dist-label">{{ item.label }}</span>
+                  <span class="dist-value font-mono">{{ item.count }}</span>
+                </div>
               </div>
             </div>
 
@@ -150,45 +343,78 @@
                 variant="primary"
                 size="lg"
                 :block="true"
-                :disabled="parseResult.validRows.length === 0 || isImporting"
-                :loading="isImporting"
+                :disabled="!selectedSemesterId || !selectedProgramId || parseResult.validRows.length === 0 || isImporting || importState === 'IMPORTING'"
+                :loading="isImporting || importState === 'IMPORTING'"
                 :icon="cloudUploadOutline"
                 @click="executeImport"
               >
-                <span v-if="isImporting">Importing into Database...</span>
+                <span v-if="isImporting || importState === 'IMPORTING'">Importing Students...</span>
+                <span v-else-if="importState === 'FAILED'">Retry Import {{ parseResult.validRows.length }} Student(s)</span>
                 <span v-else>Confirm &amp; Import {{ parseResult.validRows.length }} Student(s)</span>
               </UniButton>
             </div>
           </section>
 
-          <!-- Section 4: Success Summary -->
-          <div v-if="importResult" class="import-success-card" role="status">
+          <!-- Section 5: Confirmed Server Success Summary (SUCCESS STATE) -->
+          <div v-if="importState === 'SUCCESS' && importResult" class="import-success-card" role="status">
             <div class="success-header">
               <ion-icon :icon="checkmarkCircle" class="success-icon" />
               <div class="success-header-text">
                 <h3 class="success-title">Import Completed Successfully</h3>
                 <p class="success-sub">
-                  Enrolled and updated <strong>{{ importResult.importedCount }}</strong> student records.
+                  Server confirmed ingestion of student records and academic enrollments.
                 </p>
               </div>
             </div>
-            <div v-if="importResult.batchId" class="batch-badge">
-              <span class="batch-label">Batch Reference:</span>
-              <code class="font-mono">{{ importResult.batchId }}</code>
+
+            <div class="success-stats-grid">
+              <div class="success-stat-box">
+                <span class="stat-num font-mono">{{ importResult.totalRows }}</span>
+                <span class="stat-lbl">Processed</span>
+              </div>
+              <div class="success-stat-box text-success">
+                <span class="stat-num font-mono">{{ importResult.importedCount }}</span>
+                <span class="stat-lbl">Imported/Updated</span>
+              </div>
+              <div class="success-stat-box text-accent">
+                <span class="stat-num font-mono">{{ importResult.enrolledCount }}</span>
+                <span class="stat-lbl">Enrolled</span>
+              </div>
+              <div class="success-stat-box">
+                <span class="stat-num font-mono">{{ importResult.skippedCount }}</span>
+                <span class="stat-lbl">Skipped</span>
+              </div>
+              <div class="success-stat-box" :class="{ 'text-danger': importResult.rejectedCount > 0 }">
+                <span class="stat-num font-mono">{{ importResult.rejectedCount }}</span>
+                <span class="stat-lbl">Rejected</span>
+              </div>
             </div>
+
+            <div class="success-meta-container font-mono">
+              <div v-if="importResult.batchId" class="success-meta-row">
+                <span class="meta-label">Import Batch ID:</span>
+                <code class="meta-code font-mono">{{ importResult.batchId }}</code>
+              </div>
+              <div v-if="importResult.completedAt" class="success-meta-row">
+                <span class="meta-label">Completion Time:</span>
+                <span class="meta-val font-mono">{{ new Date(importResult.completedAt).toLocaleString() }}</span>
+              </div>
+            </div>
+
             <div v-if="importResult.serverSynced" class="server-sync-badge">
               <ion-icon :icon="cloudDoneOutline" class="sync-icon" />
-              <span>Synced directly with Supabase Cloud Database</span>
+              <span>Direct Supabase Mode — Confirmed in Remote Database</span>
             </div>
             <div v-else class="server-sync-badge offline">
               <ion-icon :icon="cloudUploadOutline" class="sync-icon" />
               <span>Saved locally &amp; queued to sync outbox</span>
             </div>
+
             <div class="success-actions">
-              <UniButton variant="secondary" size="md" @click="router.push('/tabs/students')">
-                View Student Roster
+              <UniButton variant="primary" size="md" :block="true" @click="router.push('/tabs/students')">
+                Return to Student Management
               </UniButton>
-              <UniButton variant="ghost" size="md" @click="clearSelection">
+              <UniButton variant="secondary" size="md" :block="true" @click="resetToIdle">
                 Import Another File
               </UniButton>
             </div>
@@ -200,15 +426,16 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue';
+import { ref, computed, watch, onMounted } from 'vue';
 import { useRouter } from 'vue-router';
-import { IonPage, IonContent, IonIcon } from '@ionic/vue';
+import { IonPage, IonContent, IonIcon, IonSpinner, IonModal } from '@ionic/vue';
 import {
   cloudDownloadOutline,
   cloudUploadOutline,
   cloudDoneOutline,
   documentTextOutline,
   closeOutline,
+  closeCircleOutline,
   checkmarkCircle,
   alertCircleOutline,
 } from 'ionicons/icons';
@@ -225,13 +452,22 @@ import {
   type ImportExecutionResult,
 } from '@/services/csv-import.service';
 import { authService } from '@/services/auth.service';
+import { SupabaseAuthService } from '@/integrations/supabase/auth.service';
 import { useToast } from '@/composables/useToast';
 import { haptics } from '@/utilities/haptics';
 import type { Semester, Program } from '@/types/database';
 
+export type ImportUiState = 'IDLE' | 'VALIDATING' | 'READY' | 'IMPORTING' | 'SUCCESS' | 'FAILED';
+
 const router = useRouter();
 const { showToast } = useToast();
 
+const importState = ref<ImportUiState>('IDLE');
+let activeAbortController: AbortController | null = null;
+
+const isBlockingModalOpen = computed(() => {
+  return importState.value === 'VALIDATING' || importState.value === 'IMPORTING';
+});
 const semesters = ref<Semester[]>([]);
 const programs = ref<Program[]>([]);
 const selectedSemesterId = ref('');
@@ -253,7 +489,20 @@ const programOptions = computed(() =>
   }))
 );
 
+const selectedSemesterLabel = computed(() => {
+  const sem = semesters.value.find((s) => s.id === selectedSemesterId.value);
+  return sem ? `${sem.term} Semester (${sem.academic_year_id})` : 'None Selected';
+});
+
+const selectedProgramLabel = computed(() => {
+  const prog = programs.value.find((p) => p.id === selectedProgramId.value);
+  return prog ? `${prog.code} — ${prog.name}` : 'None Selected';
+});
+
+const hasAcademicPrerequisites = computed(() => semesters.value.length > 0 && programs.value.length > 0);
+
 const selectedFileName = ref('');
+const rawFileContent = ref<string | null>(null);
 const parseResult = ref<CsvParseResult | null>(null);
 const isImporting = ref(false);
 const importResult = ref<ImportExecutionResult | null>(null);
@@ -262,6 +511,26 @@ const errorMessage = ref<string | null>(null);
 const existingCount = computed(() => {
   if (!parseResult.value) return 0;
   return parseResult.value.validRows.filter((r) => r.isExistingStudent).length;
+});
+
+const duplicateSchoolIdsInCsv = computed(() => {
+  if (!parseResult.value) return 0;
+  return parseResult.value.invalidRows.filter((r) =>
+    r.error?.toLowerCase().includes('duplicate school_id')
+  ).length;
+});
+
+const sectionDistribution = computed(() => {
+  if (!parseResult.value) return [];
+  const map = new Map<string, number>();
+  for (const row of parseResult.value.validRows) {
+    if (!row.data) continue;
+    const key = `Year ${row.data.year} • Sec ${row.data.section}`;
+    map.set(key, (map.get(key) || 0) + 1);
+  }
+  return Array.from(map.entries())
+    .map(([label, count]) => ({ label, count }))
+    .sort((a, b) => a.label.localeCompare(b.label));
 });
 
 onMounted(async () => {
@@ -284,19 +553,91 @@ onMounted(async () => {
   }
 });
 
+function cancelActiveProcess() {
+  haptics.warning();
+  if (activeAbortController) {
+    activeAbortController.abort();
+    activeAbortController = null;
+  }
+  CsvImportService.resetImportLock();
+  const wasValidating = importState.value === 'VALIDATING';
+  if (wasValidating) {
+    resetToIdle();
+    errorMessage.value = 'Validation process was cancelled by user.';
+    showToast('Validation cancelled.', 'warning');
+  } else {
+    isImporting.value = false;
+    importState.value = 'FAILED';
+    errorMessage.value = 'Import operation was cancelled by user. No database changes were applied.';
+    showToast('Import cancelled by user.', 'warning');
+  }
+}
+
+async function revalidateCurrentFile() {
+  if (!rawFileContent.value || !selectedFileName.value) return;
+  if (!selectedSemesterId.value || !selectedProgramId.value) {
+    parseResult.value = null;
+    importState.value = 'IDLE';
+    return;
+  }
+  activeAbortController = new AbortController();
+  importState.value = 'VALIDATING';
+  try {
+    const res = await CsvImportService.parseAndValidate(
+      rawFileContent.value,
+      selectedFileName.value,
+      selectedSemesterId.value,
+      selectedProgramId.value,
+      activeAbortController.signal
+    );
+    parseResult.value = res;
+    errorMessage.value = null;
+    importState.value = res.validRows.length > 0 ? 'READY' : 'FAILED';
+  } catch (err: unknown) {
+    if (activeAbortController?.signal.aborted) {
+      resetToIdle();
+      return;
+    }
+    const msg = (err as Error).message || 'Failed to re-validate CSV file.';
+    errorMessage.value = msg;
+    parseResult.value = null;
+    importState.value = 'FAILED';
+  } finally {
+    activeAbortController = null;
+  }
+}
+
+watch([selectedSemesterId, selectedProgramId], () => {
+  if (rawFileContent.value && importState.value !== 'IMPORTING') {
+    revalidateCurrentFile();
+  }
+});
+
 function triggerFileInput() {
+  if (isImporting.value || importState.value === 'IMPORTING') return;
+  if (!selectedSemesterId.value || !selectedProgramId.value) {
+    const msg = 'Please select both Target Semester and Program above to validate foreign key matching for enrollment.';
+    errorMessage.value = msg;
+    showToast(msg, 'warning');
+    haptics.error();
+    return;
+  }
   fileInputRef.value?.click();
 }
 
-function clearSelection() {
+function resetToIdle() {
+  if (isImporting.value || importState.value === 'IMPORTING') return;
   selectedFileName.value = '';
+  rawFileContent.value = null;
   parseResult.value = null;
   importResult.value = null;
   errorMessage.value = null;
+  importState.value = 'IDLE';
   if (fileInputRef.value) fileInputRef.value.value = '';
 }
 
 async function handleFileSelected(e: Event) {
+  if (isImporting.value || importState.value === 'IMPORTING') return;
   const files = (e.target as HTMLInputElement).files;
   if (!files || files.length === 0) return;
   const file = files[0];
@@ -304,56 +645,127 @@ async function handleFileSelected(e: Event) {
   importResult.value = null;
   errorMessage.value = null;
 
+  if (!selectedSemesterId.value || !selectedProgramId.value) {
+    const msg = 'Please select both Target Semester and Program first so enrollment foreign keys can be validated.';
+    errorMessage.value = msg;
+    showToast(msg, 'warning');
+    haptics.error();
+    resetToIdle();
+    return;
+  }
+
+  activeAbortController = new AbortController();
+  importState.value = 'VALIDATING';
+
   try {
     const content = await file.text();
-    parseResult.value = await CsvImportService.parseAndValidate(
+    rawFileContent.value = content;
+    const res = await CsvImportService.parseAndValidate(
       content,
       file.name,
       selectedSemesterId.value,
-      selectedProgramId.value
+      selectedProgramId.value,
+      activeAbortController.signal
     );
+    parseResult.value = res;
+    importState.value = res.validRows.length > 0 ? 'READY' : 'FAILED';
     haptics.light();
   } catch (err: unknown) {
+    if (activeAbortController?.signal.aborted) {
+      resetToIdle();
+      return;
+    }
     const msg = (err as Error).message || 'Failed to parse CSV file.';
     errorMessage.value = msg;
     showToast(msg, 'error');
     haptics.error();
-    clearSelection();
+    importState.value = 'FAILED';
+    resetToIdle();
+  } finally {
+    activeAbortController = null;
   }
 }
 
 async function executeImport() {
-  if (!parseResult.value) return;
+  // Prevent double-click or concurrent clicks
+  if (isImporting.value || importState.value === 'IMPORTING') return;
+  if (!parseResult.value || parseResult.value.validRows.length === 0) return;
+
+  if (!selectedSemesterId.value) {
+    errorMessage.value = 'Target semester foreign key is required.';
+    showToast(errorMessage.value, 'error');
+    return;
+  }
+  if (!selectedProgramId.value) {
+    errorMessage.value = 'Program foreign key is required.';
+    showToast(errorMessage.value, 'error');
+    return;
+  }
+
+  // Switch immediately to IMPORTING state
+  importState.value = 'IMPORTING';
   isImporting.value = true;
   errorMessage.value = null;
+  activeAbortController = new AbortController();
 
   try {
-    const user = authService.user.value;
+    // Persistent duplicate protection check
+    if (parseResult.value.sha256) {
+      const existing = await CsvImportService.findExistingBatch(
+        parseResult.value.sha256,
+        selectedSemesterId.value
+      );
+      if (existing) {
+        const msg = `This CSV roster (${existing.source_filename}) was already successfully imported for ${selectedSemesterLabel.value} on ${new Date(existing.imported_at).toLocaleString()} (Batch: ${existing.id}). Duplicate submission prevented.`;
+        errorMessage.value = msg;
+        importState.value = 'FAILED';
+        isImporting.value = false;
+        haptics.error();
+        showToast(msg, 'warning');
+        return;
+      }
+    }
+
+    if (activeAbortController.signal.aborted) {
+      return;
+    }
+
+    const user = SupabaseAuthService.user.value || authService.user.value;
     const userId = user ? user.id : 'usr_admin';
     const res = await CsvImportService.executeImport(
       parseResult.value,
       selectedSemesterId.value,
       selectedProgramId.value,
-      userId
+      userId,
+      activeAbortController.signal
     );
+
+    // Confirmed server success
     importResult.value = res;
-    parseResult.value = null;
-    selectedFileName.value = '';
+    importState.value = 'SUCCESS';
     haptics.success();
     showToast(`Successfully imported ${res.importedCount} student(s)`, 'success');
   } catch (err: unknown) {
+    if (activeAbortController?.signal.aborted) {
+      errorMessage.value = 'Import was cancelled by user.';
+      importState.value = 'FAILED';
+      return;
+    }
+    // Failure handling: preserve selected CSV and validation preview for safe retry
     const msg = 'Import failed: ' + ((err as Error).message || String(err));
     errorMessage.value = msg;
+    importState.value = 'FAILED';
     showToast(msg, 'error');
     haptics.error();
   } finally {
     isImporting.value = false;
+    activeAbortController = null;
   }
 }
 
 function downloadTemplate() {
   const csvContent =
-    'school_id,first_name,middle_name,lastname,year,section\n2026-0001,Juan,Protacio,Dela Cruz,1,1F4\n2026-0002,Maria,Clara,Santos,1,1F4\n';
+    'school_id,first_name,middle_name,last_name,year,section\nMCC2026-0001,Juan,Protacio,Dela Cruz,1,1F4\nMCC2026-0002,Maria,Clara,Santos,1,1F4\n';
   const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
   const url = URL.createObjectURL(blob);
   const link = document.createElement('a');
@@ -482,6 +894,34 @@ function downloadTemplate() {
   gap: 8px;
   width: 100%;
   box-sizing: border-box;
+}
+
+.drop-zone.disabled-zone {
+  border-color: rgba(217, 119, 6, 0.4);
+  background: rgba(245, 158, 11, 0.04);
+}
+
+.fk-context-badge {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.fk-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11.5px;
+  color: #047857;
+  background: rgba(16, 185, 129, 0.1);
+  border: 1px solid rgba(16, 185, 129, 0.25);
+  padding: 4px 8px;
+  border-radius: 6px;
+}
+
+.fk-tag strong {
+  color: var(--uni-text-primary);
 }
 
 :global(.dark) .drop-zone,
@@ -774,6 +1214,11 @@ function downloadTemplate() {
   display: flex;
   flex-direction: column;
   gap: 12px;
+  box-sizing: border-box;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  overflow: hidden;
 }
 
 .success-header {
@@ -836,6 +1281,9 @@ function downloadTemplate() {
   padding: 4px 10px;
   border-radius: 8px;
   width: fit-content;
+  max-width: 100%;
+  box-sizing: border-box;
+  flex-wrap: wrap;
 }
 
 .server-sync-badge.offline {
@@ -850,8 +1298,20 @@ function downloadTemplate() {
 
 .success-actions {
   display: flex;
+  flex-direction: column;
   gap: 10px;
-  margin-top: 4px;
+  margin-top: 6px;
+  width: 100%;
+}
+
+@media (min-width: 640px) {
+  .success-actions {
+    flex-direction: row;
+  }
+
+  .success-actions > * {
+    flex: 1;
+  }
 }
 
 .form-submit-row {
@@ -868,7 +1328,547 @@ function downloadTemplate() {
   line-height: 1.4;
 }
 
+.error-banner-content {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.error-icon {
+  font-size: 20px;
+  color: #DC2626;
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+
+.error-text strong {
+  display: block;
+  font-size: 13px;
+  margin-bottom: 2px;
+}
+
+.error-text p {
+  margin: 0;
+}
+
+/* Validating banner */
+.validating-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: rgba(15, 118, 110, 0.08);
+  border: 1px dashed rgba(15, 118, 110, 0.35);
+  border-radius: 12px;
+  padding: 12px 14px;
+}
+
+:global(.dark) .validating-banner,
+:global(.ion-palette-dark) .validating-banner {
+  background: rgba(94, 234, 212, 0.08);
+  border-color: rgba(94, 234, 212, 0.35);
+}
+
+.spinner-sm {
+  width: 20px;
+  height: 20px;
+  flex-shrink: 0;
+}
+
+.validating-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 12px;
+  color: var(--uni-text-primary);
+}
+
+.validating-text span {
+  font-size: 11px;
+  color: var(--uni-text-muted);
+}
+
+/* Import Progress Section */
+.import-progress-section {
+  background: rgba(15, 118, 110, 0.05);
+  border: 1px solid rgba(15, 118, 110, 0.3);
+  gap: 14px;
+}
+
+:global(.dark) .import-progress-section,
+:global(.ion-palette-dark) .import-progress-section {
+  background: rgba(94, 234, 212, 0.06);
+  border-color: rgba(94, 234, 212, 0.35);
+}
+
+.progress-panel-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.progress-spinner-wrap {
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
+  background: rgba(15, 118, 110, 0.12);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+:global(.dark) .progress-spinner-wrap,
+:global(.ion-palette-dark) .progress-spinner-wrap {
+  background: rgba(94, 234, 212, 0.15);
+}
+
+.import-spinner {
+  width: 20px;
+  height: 20px;
+  --color: var(--uni-primary);
+}
+
+.progress-title-col {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.progress-title {
+  font-size: 15px;
+  font-weight: 750;
+  color: var(--uni-text-primary);
+  margin: 0;
+}
+
+.progress-subtitle {
+  font-size: 12px;
+  color: var(--uni-text-secondary);
+  margin: 0;
+  line-height: 1.4;
+}
+
+/* Indeterminate Progress Bar */
+.indeterminate-progress-bar {
+  width: 100%;
+  height: 6px;
+  background: rgba(15, 118, 110, 0.15);
+  border-radius: 999px;
+  overflow: hidden;
+  position: relative;
+}
+
+:global(.dark) .indeterminate-progress-bar,
+:global(.ion-palette-dark) .indeterminate-progress-bar {
+  background: rgba(94, 234, 212, 0.15);
+}
+
+.indeterminate-bar-fill {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  background: linear-gradient(90deg, #0F766E, #14B8A6, #0F766E);
+  border-radius: 999px;
+  animation: indeterminate-loading 1.6s infinite ease-in-out;
+}
+
+:global(.dark) .indeterminate-bar-fill,
+:global(.ion-palette-dark) .indeterminate-bar-fill {
+  background: linear-gradient(90deg, #0D9488, #5EEAD4, #0D9488);
+}
+
+@keyframes indeterminate-loading {
+  0% {
+    left: -35%;
+    right: 100%;
+    width: 35%;
+  }
+  60% {
+    left: 100%;
+    right: -35%;
+    width: 35%;
+  }
+  100% {
+    left: 100%;
+    right: -35%;
+    width: 35%;
+  }
+}
+
+.progress-details-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 8px;
+  background: var(--uni-surface);
+  border: 1px solid var(--uni-border);
+  border-radius: 10px;
+  padding: 10px 12px;
+}
+
+:global(.dark) .progress-details-grid,
+:global(.ion-palette-dark) .progress-details-grid {
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.progress-detail-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.p-label {
+  font-size: 10px;
+  text-transform: uppercase;
+  color: var(--uni-text-muted);
+  letter-spacing: 0.05em;
+}
+
+.p-value {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--uni-text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.progress-disclaimer {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: #D97706;
+}
+
+/* Badges */
+.preview-badge {
+  font-size: 11px;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 6px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.ready-badge {
+  color: #059669;
+  background: rgba(16, 185, 129, 0.12);
+  border: 1px solid rgba(16, 185, 129, 0.3);
+}
+
+.importing-badge {
+  color: #0284C7;
+  background: rgba(14, 165, 233, 0.12);
+  border: 1px solid rgba(14, 165, 233, 0.3);
+}
+
+.failed-badge {
+  color: #DC2626;
+  background: rgba(239, 68, 68, 0.12);
+  border: 1px solid rgba(239, 68, 68, 0.3);
+}
+
+/* Warning box for duplicates */
+.warning-box {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: rgba(245, 158, 11, 0.1);
+  border: 1px solid rgba(245, 158, 11, 0.3);
+  border-radius: 10px;
+  padding: 10px 12px;
+  color: #B45309;
+  font-size: 12px;
+}
+
+:global(.dark) .warning-box,
+:global(.ion-palette-dark) .warning-box {
+  color: #FBBF24;
+}
+
+/* Section distribution */
+.distribution-card {
+  background: var(--uni-surface-secondary, #F8FAFC);
+  border: 1px solid var(--uni-border, #E2E8F0);
+  border-radius: 12px;
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+:global(.dark) .distribution-card,
+:global(.ion-palette-dark) .distribution-card {
+  background: var(--uni-surface-secondary, #252830);
+  border-color: var(--uni-border, #30343D);
+}
+
+.distribution-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.distribution-title {
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--uni-text-muted);
+}
+
+.distribution-count {
+  font-size: 11px;
+  color: var(--uni-primary);
+  font-weight: 600;
+}
+
+.distribution-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.distribution-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--uni-surface);
+  border: 1px solid var(--uni-border);
+  padding: 4px 8px;
+  border-radius: 6px;
+  font-size: 11.5px;
+}
+
+.dist-label {
+  color: var(--uni-text-secondary);
+}
+
+.dist-value {
+  color: var(--uni-primary);
+  font-weight: 700;
+}
+
+/* Success details */
+.success-stats-grid {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 8px;
+}
+
+@media (max-width: 600px) {
+  .success-stats-grid {
+    grid-template-columns: repeat(3, 1fr);
+  }
+}
+
+.success-stat-box {
+  background: var(--uni-surface);
+  border: 1px solid var(--uni-border);
+  border-radius: 10px;
+  padding: 8px 4px;
+  text-align: center;
+  min-width: 0;
+  box-sizing: border-box;
+}
+
+.text-accent {
+  color: #0284C7;
+}
+
+.success-meta-container {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  background: var(--uni-surface);
+  border: 1px solid var(--uni-border);
+  border-radius: 10px;
+  padding: 10px 12px;
+}
+
+.success-meta-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.meta-label {
+  color: var(--uni-text-muted);
+}
+
+.meta-code {
+  color: var(--uni-primary);
+  font-weight: 600;
+}
+
+.meta-val {
+  color: var(--uni-text-primary);
+}
+
 .font-mono {
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+/* Full Blocking Processing Modal */
+:global(ion-modal.blocking-process-modal) {
+  --background: transparent;
+  --box-shadow: none;
+  --width: calc(100% - 32px);
+  --max-width: 380px;
+  --height: auto;
+  --border-radius: 20px;
+  align-items: center;
+  justify-content: center;
+}
+
+:global(ion-modal.blocking-process-modal::part(backdrop)) {
+  background: rgba(0, 0, 0, 0.75);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+}
+
+:global(ion-modal.blocking-process-modal::part(content)) {
+  background: transparent;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  box-shadow: none;
+  border-radius: 20px;
+  width: calc(100% - 32px);
+  max-width: 380px;
+  margin: auto;
+  overflow: visible;
+}
+
+.blocking-modal-wrap {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  max-width: 380px;
+  box-sizing: border-box;
+}
+
+.blocking-modal-card {
+  background: var(--uni-surface, #ffffff);
+  border: 1px solid var(--uni-border, #e2e8f0);
+  border-radius: var(--uni-radius-card, 20px);
+  padding: 22px 18px;
+  width: 100%;
+  max-width: 380px;
+  box-shadow: 0 24px 48px rgba(0, 0, 0, 0.45);
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  text-align: center;
+  box-sizing: border-box;
+}
+
+:global(.dark) .blocking-modal-card,
+:global(.ion-palette-dark) .blocking-modal-card {
+  background: var(--uni-surface, #1B1D23);
+  border-color: var(--uni-border, #30343D);
+}
+
+.blocking-icon-box {
+  width: 52px;
+  height: 52px;
+  border-radius: 14px;
+  background: rgba(15, 118, 110, 0.12);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin: 0 auto;
+}
+
+:global(.dark) .blocking-icon-box,
+:global(.ion-palette-dark) .blocking-icon-box {
+  background: rgba(94, 234, 212, 0.15);
+}
+
+.blocking-spinner {
+  width: 28px;
+  height: 28px;
+  --color: var(--uni-primary, #0F766E);
+}
+
+:global(.dark) .blocking-spinner,
+:global(.ion-palette-dark) .blocking-spinner {
+  --color: var(--uni-primary, #5EEAD4);
+}
+
+.blocking-text-block {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.blocking-modal-title {
+  font-size: 16.5px;
+  font-weight: 750;
+  color: var(--uni-text-primary, #0F172A);
+  margin: 0;
+}
+
+.blocking-modal-desc {
+  font-size: 12px;
+  color: var(--uni-text-secondary, #64748B);
+  margin: 0;
+  line-height: 1.45;
+}
+
+.blocking-meta-box {
+  background: var(--uni-surface-secondary, #F8FAFC);
+  border: 1px solid var(--uni-border, #E2E8F0);
+  border-radius: 10px;
+  padding: 10px 12px;
+  text-align: left;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 11.5px;
+}
+
+:global(.dark) .blocking-meta-box,
+:global(.ion-palette-dark) .blocking-meta-box {
+  background: rgba(255, 255, 255, 0.03);
+  border-color: var(--uni-border, #30343D);
+}
+
+.blocking-meta-box .meta-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.blocking-meta-box .meta-lbl {
+  color: var(--uni-text-muted);
+}
+
+.blocking-meta-box .meta-val {
+  color: var(--uni-text-primary);
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 60%;
+}
+
+.blocking-disclaimer {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  font-size: 11px;
+  color: #D97706;
+}
+
+.blocking-modal-actions {
+  margin-top: 4px;
 }
 </style>

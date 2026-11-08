@@ -4,6 +4,7 @@ import type { DatabaseAdapter } from '@/database/adapters/database-adapter.inter
 import { SyncStatusService } from './sync-status.service';
 import { SchemaMapperService } from './schema-mapper.service';
 import { EntityCheckpointService } from './entity-checkpoint.service';
+import { SyncAuditLogService } from './sync-audit-log.service';
 import { PullReconciliationService, type PullPreviewPlan } from './pull-reconciliation.service';
 import { StudentsRepository } from '@/database/repositories/students.repository';
 import { normalizeSchoolId } from '@/utilities/school-id-normalizer';
@@ -62,6 +63,7 @@ export class PullSyncService {
     entity: string,
     options?: { pageSize?: number }
   ): Promise<EntityPullResult> {
+    const syncStartTime = Date.now();
     const checkpoint = await EntityCheckpointService.getCheckpoint(db, entity);
     let currentSince = checkpoint.last_pulled_at;
     let currentLastId = checkpoint.last_pulled_id;
@@ -84,6 +86,14 @@ export class PullSyncService {
       if (error || !data || data.error) {
         const errMsg = error?.message || data?.message || 'RPC sync_pull_entity_v2 failed';
         await EntityCheckpointService.setCheckpointStatus(db, entity, 'FAILED', errMsg);
+        await SyncAuditLogService.recordLog({
+          direction: 'PULL',
+          entityType: entity,
+          operationType: 'PULL_BATCH',
+          status: 'FAILED',
+          durationMs: Date.now() - syncStartTime,
+          errorMessage: errMsg,
+        }, db);
         return {
           recordsPulled: totalPulledForEntity,
           pagesFetched,
@@ -194,6 +204,21 @@ export class PullSyncService {
         break;
       }
     }
+
+    await SyncAuditLogService.recordLog({
+      direction: 'PULL',
+      entityType: entity,
+      operationType: 'PULL_BATCH',
+      status: entitySkippedPending ? 'SKIPPED' : 'SUCCESS',
+      durationMs: Date.now() - syncStartTime,
+      serverAckRef: `rows:${totalPulledForEntity}`,
+      details: {
+        recordsPulled: totalPulledForEntity,
+        pagesFetched,
+        hasMore,
+        skippedPending: entitySkippedPending,
+      },
+    }, db);
 
     return {
       recordsPulled: totalPulledForEntity,

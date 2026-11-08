@@ -18,6 +18,7 @@ import {
   addOutline,
   checkmarkCircle,
   alertCircle,
+  alertCircleOutline,
   printOutline,
 } from 'ionicons/icons';
 
@@ -53,8 +54,10 @@ import {
 } from '@/components/ui';
 
 import { haptics } from '@/utilities/haptics';
+import { useToast } from '@/composables/useToast';
 
 const router = useRouter();
+const { showToast } = useToast();
 
 const isStudent = computed(() => {
   const role = authService.role.value || SupabaseAuthService.role.value;
@@ -310,6 +313,7 @@ async function confirmPaymentReversal() {
       'officer_local'
     );
     haptics.success();
+    await showToast('Payment successfully reversed and ledger updated.', 'success');
     isReversalModalOpen.value = false;
     await loadFinanceData();
   } catch (err: any) {
@@ -334,6 +338,7 @@ async function confirmVoidObligation() {
   try {
     await financeService.voidObligation(voidingObligationId.value, voidReason.value.trim(), 'officer_local');
     haptics.success();
+    await showToast('Obligation voided successfully.', 'success');
     isVoidModalOpen.value = false;
     await loadFinanceData();
   } catch (err) {
@@ -480,47 +485,97 @@ onIonViewWillEnter(loadFinanceData);
             </UniStatCard>
           </div>
 
-          <!-- Quick Action Navigation Icons (1 Row, Pure Icons) -->
-          <div class="quick-action-icons-row" role="group" aria-label="Finance quick actions">
-            <button
-              type="button"
-              class="quick-action-icon-btn"
-              title="Event Absentees"
-              aria-label="Event Absentees"
-              @click="haptics.light(); router.push('/finance/absentees')"
-            >
-              <ion-icon :icon="calendarOutline" class="action-btn-glyph" />
-            </button>
-
-            <button
-              type="button"
-              class="quick-action-icon-btn"
-              title="Contributions"
-              aria-label="Contributions"
+          <!-- Labeled Finance Navigation Cards -->
+          <div class="finance-nav-cards-grid" role="group" aria-label="Finance navigation modules">
+            <div
+              class="finance-nav-card"
+              role="button"
+              tabindex="0"
               @click="haptics.light(); router.push('/finance/contributions')"
             >
-              <ion-icon :icon="peopleOutline" class="action-btn-glyph" />
-            </button>
+              <div class="nav-card-icon-wrap icon-primary">
+                <ion-icon :icon="peopleOutline" />
+              </div>
+              <div class="nav-card-body">
+                <div class="nav-card-title-row">
+                  <h4 class="nav-card-title">Contributions</h4>
+                  <span class="nav-card-badge font-mono">{{ summary.activeContributionsCount }} active</span>
+                </div>
+                <p class="nav-card-subtitle">Templates, dues & student assessments</p>
+              </div>
+            </div>
 
-            <button
-              type="button"
-              class="quick-action-icon-btn"
-              title="Record Payment"
-              aria-label="Record Payment"
+            <div
+              class="finance-nav-card"
+              role="button"
+              tabindex="0"
+              @click="haptics.light(); router.push('/finance/fines')"
+            >
+              <div class="nav-card-icon-wrap icon-danger">
+                <ion-icon :icon="alertCircleOutline" />
+              </div>
+              <div class="nav-card-body">
+                <div class="nav-card-title-row">
+                  <h4 class="nav-card-title">Fines Management</h4>
+                  <span class="nav-card-badge font-mono">{{ summary.activeFinesCount }} active</span>
+                </div>
+                <p class="nav-card-subtitle">Absence penalties & student fines</p>
+              </div>
+            </div>
+
+            <div
+              class="finance-nav-card"
+              role="button"
+              tabindex="0"
               @click="haptics.light(); router.push('/finance/pay')"
             >
-              <ion-icon :icon="cashOutline" class="action-btn-glyph" />
-            </button>
+              <div class="nav-card-icon-wrap icon-success">
+                <ion-icon :icon="cashOutline" />
+              </div>
+              <div class="nav-card-body">
+                <div class="nav-card-title-row">
+                  <h4 class="nav-card-title">Record Payment</h4>
+                  <span class="nav-card-badge badge-continuous font-mono">NFC / Tap</span>
+                </div>
+                <p class="nav-card-subtitle">Continuous scanning & instant receipts</p>
+              </div>
+            </div>
 
-            <button
-              type="button"
-              class="quick-action-icon-btn"
-              title="Financial Reports"
-              aria-label="Financial Reports"
+            <div
+              class="finance-nav-card"
+              role="button"
+              tabindex="0"
+              @click="haptics.light(); selectTab('PAYMENTS')"
+            >
+              <div class="nav-card-icon-wrap icon-info">
+                <ion-icon :icon="receiptOutline" />
+              </div>
+              <div class="nav-card-body">
+                <div class="nav-card-title-row">
+                  <h4 class="nav-card-title">Payment Records</h4>
+                  <span class="nav-card-badge font-mono">{{ payments.length }} logged</span>
+                </div>
+                <p class="nav-card-subtitle">Ledger, receipts & reversal history</p>
+              </div>
+            </div>
+
+            <div
+              class="finance-nav-card nav-card-full"
+              role="button"
+              tabindex="0"
               @click="haptics.light(); router.push('/finance/reports')"
             >
-              <ion-icon :icon="statsChartOutline" class="action-btn-glyph" />
-            </button>
+              <div class="nav-card-icon-wrap icon-neutral">
+                <ion-icon :icon="statsChartOutline" />
+              </div>
+              <div class="nav-card-body">
+                <div class="nav-card-title-row">
+                  <h4 class="nav-card-title">Financial Reports</h4>
+                  <span class="nav-card-badge font-mono">Export CSV/PDF</span>
+                </div>
+                <p class="nav-card-subtitle">Statements, collections summary & dues audit</p>
+              </div>
+            </div>
           </div>
 
           <!-- Recent Payments Snippet -->
@@ -588,10 +643,10 @@ onIonViewWillEnter(loadFinanceData);
                 <UniButton
                   variant="primary"
                   size="sm"
-                  :icon="addOutline"
-                  @click="router.push('/finance/charges/create')"
+                  :icon="alertCircleOutline"
+                  @click="router.push('/finance/fines')"
                 >
-                  Fine
+                  Manage Fines
                 </UniButton>
               </div>
             </div>
@@ -682,10 +737,10 @@ onIonViewWillEnter(loadFinanceData);
               <UniButton
                 variant="primary"
                 size="sm"
-                :icon="addOutline"
+                :icon="peopleOutline"
                 @click="router.push('/finance/contributions')"
               >
-                Assign
+                Manage Contributions
               </UniButton>
             </div>
 
@@ -1369,41 +1424,131 @@ body.ion-palette-dark .filter-chip.finance-tab.chip-active {
   gap: 12px;
 }
 
-.quick-action-icons-row {
+.finance-nav-cards-grid {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  gap: 10px;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 12px;
 }
 
-.quick-action-icon-btn {
+@media (max-width: 600px) {
+  .finance-nav-cards-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.finance-nav-card {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  background: var(--uni-surface, #ffffff);
+  border: 1px solid var(--uni-border, #e2e8f0);
+  border-radius: 12px;
+  padding: 14px 16px;
+  cursor: pointer;
+  box-shadow: var(--uni-shadow-card, 0 1px 3px rgba(0, 0, 0, 0.05));
+  transition: transform 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+  user-select: none;
+}
+
+.finance-nav-card:hover {
+  background: var(--uni-surface-secondary, #f8fafc);
+  border-color: var(--uni-primary, #0f766e);
+}
+
+.finance-nav-card:active {
+  transform: scale(0.98);
+}
+
+.nav-card-full {
+  grid-column: 1 / -1;
+}
+
+.nav-card-icon-wrap {
+  width: 44px;
+  height: 44px;
+  border-radius: 10px;
   display: flex;
   align-items: center;
   justify-content: center;
-  height: 52px;
-  background: var(--uni-surface, #ffffff);
-  border: 1px solid var(--uni-border, #e2e8f0);
-  border-radius: 14px;
-  color: var(--uni-text, #0f172a);
-  cursor: pointer;
-  padding: 0;
-  box-shadow: none;
-  transition: transform 0.15s ease, background 0.15s ease, border-color 0.15s ease, opacity 0.15s ease;
+  font-size: 22px;
+  flex-shrink: 0;
 }
 
-.quick-action-icon-btn:hover {
+.nav-card-icon-wrap.icon-primary {
+  background: var(--uni-primary-bg, rgba(15, 118, 110, 0.1));
+  color: var(--uni-primary, #0f766e);
+  border: 1px solid var(--uni-primary-light, rgba(15, 118, 110, 0.2));
+}
+
+.nav-card-icon-wrap.icon-danger {
+  background: var(--uni-danger-bg, rgba(239, 68, 68, 0.1));
+  color: var(--uni-danger, #ef4444);
+  border: 1px solid var(--uni-danger-border, rgba(239, 68, 68, 0.2));
+}
+
+.nav-card-icon-wrap.icon-success {
+  background: var(--uni-success-bg, rgba(34, 197, 94, 0.1));
+  color: var(--uni-success, #22c55e);
+  border: 1px solid var(--uni-success-border, rgba(34, 197, 94, 0.2));
+}
+
+.nav-card-icon-wrap.icon-info {
+  background: var(--uni-info-bg, rgba(59, 130, 246, 0.1));
+  color: var(--uni-info, #3b82f6);
+  border: 1px solid var(--uni-info-border, rgba(59, 130, 246, 0.2));
+}
+
+.nav-card-icon-wrap.icon-neutral {
+  background: var(--uni-neutral-bg, rgba(100, 116, 139, 0.1));
+  color: var(--uni-neutral-text, #64748b);
+  border: 1px solid var(--uni-neutral-border, rgba(100, 116, 139, 0.2));
+}
+
+.nav-card-body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+  min-width: 0;
+}
+
+.nav-card-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.nav-card-title {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--uni-text, #0f172a);
+  margin: 0;
+}
+
+.nav-card-badge {
+  font-size: 10px;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 4px;
   background: var(--uni-surface-secondary, #f8fafc);
-  border-color: var(--uni-border-focus, #0f766e);
+  border: 1px solid var(--uni-border, #e2e8f0);
+  color: var(--uni-text-secondary, #64748b);
 }
 
-.quick-action-icon-btn:active {
-  transform: scale(0.94);
-  opacity: 0.85;
+.nav-card-badge.badge-continuous {
+  background: var(--uni-primary-bg, rgba(15, 118, 110, 0.1));
+  color: var(--uni-primary, #0f766e);
+  border-color: var(--uni-primary-light, rgba(15, 118, 110, 0.2));
 }
 
-.quick-action-icon-btn .action-btn-glyph {
-  font-size: 24px;
-  color: var(--uni-text, #0f172a);
-  pointer-events: none;
+.nav-card-subtitle {
+  font-size: 11px;
+  color: var(--uni-text-secondary, #64748b);
+  margin: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 @media (max-width: 340px) {
@@ -1688,12 +1833,15 @@ body.ion-palette-dark .seg-btn.active {
   padding: 2px 6px;
   border-radius: 4px;
   text-transform: uppercase;
+  border: 1px solid transparent;
+  display: inline-flex;
+  align-items: center;
 }
 
-.badge-success { background: #dcfce7; color: #15803d; }
-.badge-warning { background: #fef3c7; color: #b45309; }
-.badge-danger { background: #fee2e2; color: #b91c1c; }
-.badge-neutral { background: #f1f5f9; color: #64748b; }
+.badge-success { background: var(--uni-success-bg); color: var(--uni-success-text); border-color: var(--uni-success-border); }
+.badge-warning { background: var(--uni-warning-bg); color: var(--uni-warning-text); border-color: var(--uni-warning-border); }
+.badge-danger { background: var(--uni-danger-bg); color: var(--uni-danger-text); border-color: var(--uni-danger-border); }
+.badge-neutral { background: var(--uni-neutral-bg); color: var(--uni-neutral-text); border-color: var(--uni-neutral-border); }
 
 .strike { text-decoration: line-through; }
 

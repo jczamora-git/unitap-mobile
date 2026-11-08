@@ -11,9 +11,11 @@ import { localStudentRepository, type IStudentRepository } from './student-stora
 import { formatFullName } from '@/utilities/student-formatters';
 import { normalizeSchoolId } from '@/utilities/school-id-normalizer';
 import { OperationPolicyService } from './operation-policy.service';
+import { DataModeService } from './data-mode.service';
 import { supabase } from '@/integrations/supabase/client';
 import { AcademicRepository } from '@/database/repositories/academic.repository';
 import { getDatabase } from '@/database/database';
+import { logDataSource } from '@/utilities/data-source-logger';
 
 function generateUUID(): string {
   if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
@@ -53,29 +55,273 @@ export class StudentService {
   }
 
   // ============================================================================
-  // OFFLINE CACHED READS (Permitted offline via local SQLite / cache)
+  // READ OPERATIONS (Direct Supabase in direct mode, SQLite repository in offline mode)
   // ============================================================================
 
+  private assembleStudentFromParts(
+    s: any,
+    enrollments: any[] = [],
+    cards: any[] = [],
+    programsMap: Map<string, { code: string; name: string }> = new Map()
+  ): Student {
+    const enrollment = enrollments.find((e) => e.enrollment_status === 'ENROLLED') || enrollments[0] || null;
+    const program = enrollment?.program_id ? programsMap.get(enrollment.program_id) : null;
+    const courseCode = program?.code || enrollment?.course || 'BSIT';
+
+    const cardRecords: NfcCardRecord[] = (cards || []).map((c: any) => ({
+      id: c.id,
+      studentId: s.id,
+      rfidUid: c.uid_normalized,
+      rfidUidCompact: c.uid_normalized ? c.uid_normalized.replace(/[^0-9A-Fa-f]/g, '').toUpperCase() : '',
+      status: c.status,
+      assignedAt: c.assigned_at,
+      note: c.note || undefined,
+    }));
+    const activeCard = cardRecords.find((c) => c.status === 'ACTIVE');
+
+    return {
+      id: s.id,
+      studentNumber: s.school_id,
+      firstName: s.first_name,
+      middleName: s.middle_name || undefined,
+      lastName: s.last_name,
+      yearLevel: (enrollment?.year_level as YearLevel) || 1,
+      section: enrollment?.section || '1A',
+      course: courseCode,
+      rfidUid: activeCard?.rfidUid || '',
+      rfidUidCompact: activeCard?.rfidUidCompact || '',
+      cards: cardRecords,
+      status: s.status || 'ACTIVE',
+      createdAt: s.created_at,
+      updatedAt: s.updated_at,
+    };
+  }
+
+  private async fetchStudentsDirect(): Promise<Student[]> {
+    const [studentsRes, enrollmentsRes, programsRes, cardsRes] = await Promise.all([
+      supabase.from('students').select('*').order('last_name', { ascending: true }),
+      supabase.from('student_enrollments').select('*'),
+      supabase.from('programs').select('id, code, name'),
+      supabase.from('nfc_cards').select('*'),
+    ]);
+
+    if (studentsRes.error) {
+      throw new Error(`Failed to query students from Supabase: ${studentsRes.error.message}`);
+    }
+
+    const programsMap = new Map<string, { code: string; name: string }>();
+    for (const prog of programsRes.data || []) {
+      if (prog.id) programsMap.set(prog.id, prog);
+    }
+
+    const enrollmentsByStudent = new Map<string, any[]>();
+    for (const enr of enrollmentsRes.data || []) {
+      if (!enr.student_id) continue;
+      const list = enrollmentsByStudent.get(enr.student_id) || [];
+      list.push(enr);
+      enrollmentsByStudent.set(enr.student_id, list);
+    }
+
+    const cardsByStudent = new Map<string, any[]>();
+    for (const card of cardsRes.data || []) {
+      if (!card.student_id) continue;
+      const list = cardsByStudent.get(card.student_id) || [];
+      list.push(card);
+      cardsByStudent.set(card.student_id, list);
+    }
+
+    return (studentsRes.data || []).map((s: any) =>
+      this.assembleStudentFromParts(
+        s,
+        enrollmentsByStudent.get(s.id) || [],
+        cardsByStudent.get(s.id) || [],
+        programsMap
+      )
+    );
+  }
+
+  private async fetchStudentDirectById(id: string): Promise<Student | null> {
+    const { data: s, error } = await supabase
+      .from('students')
+      .select('*')
+      .eq('id', id)
+      .maybeSingle();
+
+    if (error) {
+      throw new Error(`Failed to query student from Supabase: ${error.message}`);
+    }
+    if (!s) return null;
+
+    const [enrollmentsRes, programsRes, cardsRes] = await Promise.all([
+      supabase.from('student_enrollments').select('*').eq('student_id', id),
+      supabase.from('programs').select('id, code, name'),
+      supabase.from('nfc_cards').select('*').eq('student_id', id),
+    ]);
+
+    const programsMap = new Map<string, { code: string; name: string }>();
+    for (const prog of programsRes.data || []) {
+      if (prog.id) programsMap.set(prog.id, prog);
+    }
+
+    return this.assembleStudentFromParts(
+      s,
+      enrollmentsRes.data || [],
+      cardsRes.data || [],
+      programsMap
+    );
+  }
+
+  private async fetchStudentDirectBySchoolId(schoolId: string): Promise<Student | null> {
+    const { data: s, error } = await supabase
+      .from('students')
+      .select('*')
+      .eq('school_id', schoolId)
+      .maybeSingle();
+
+    if (error) {
+      throw new Error(`Failed to query student by School ID from Supabase: ${error.message}`);
+    }
+    if (!s) return null;
+
+    return this.fetchStudentDirectById(s.id);
+  }
+
+  private async fetchStudentDirectByRfid(rfidUid: string): Promise<Student | null> {
+    const clean = rfidUid.trim().toUpperCase();
+    const compact = clean.replace(/[^0-9A-F]/g, '');
+
+    const { data: cards, error } = await supabase
+      .from('nfc_cards')
+      .select('*')
+      .eq('status', 'ACTIVE');
+
+    if (error) {
+      throw new Error(`Failed to query card by RFID from Supabase: ${error.message}`);
+    }
+
+    const matched = (cards || []).find((c) => {
+      const u = (c.uid_normalized || '').toUpperCase();
+      const comp = u.replace(/[^0-9A-F]/g, '');
+      return u === clean || (compact.length > 0 && comp === compact);
+    });
+
+    if (matched && matched.student_id) {
+      return this.fetchStudentDirectById(matched.student_id);
+    }
+    return null;
+  }
+
+  private async lookupCardDirect(rfidUid: string): Promise<CardLookupResult> {
+    const raw = (rfidUid || '').trim();
+    if (!raw) {
+      return {
+        status: 'UNREGISTERED',
+        student: null,
+        card: null,
+        scannedUid: '',
+        normalizedUid: '',
+        maskedUid: 'Unavailable',
+      };
+    }
+
+    const cleanUid = raw.toUpperCase();
+    const compactUid = cleanUid.replace(/[^0-9A-F]/g, '');
+
+    const { data: cards, error } = await supabase
+      .from('nfc_cards')
+      .select('*');
+
+    if (error) {
+      throw new Error(`Failed to lookup card from Supabase: ${error.message}`);
+    }
+
+    const matchedCard = (cards || []).find((c) => {
+      const u = (c.uid_normalized || '').toUpperCase();
+      const comp = u.replace(/[^0-9A-F]/g, '');
+      return u === cleanUid || (compactUid.length > 0 && comp === compactUid);
+    });
+
+    if (!matchedCard) {
+      return {
+        status: 'UNREGISTERED',
+        student: null,
+        card: null,
+        scannedUid: raw,
+        normalizedUid: cleanUid,
+        maskedUid: maskRfidUid(cleanUid),
+      };
+    }
+
+    const studentModel = matchedCard.student_id ? await this.fetchStudentDirectById(matchedCard.student_id) : null;
+    const cardRecord: NfcCardRecord = {
+      id: matchedCard.id,
+      studentId: matchedCard.student_id,
+      rfidUid: matchedCard.uid_normalized,
+      rfidUidCompact: matchedCard.uid_normalized ? matchedCard.uid_normalized.replace(/[^0-9A-Fa-f]/g, '').toUpperCase() : '',
+      status: matchedCard.status,
+      assignedAt: matchedCard.assigned_at,
+      note: matchedCard.note || undefined,
+    };
+
+    return {
+      status: matchedCard.status as any,
+      student: studentModel,
+      card: cardRecord,
+      scannedUid: raw,
+      normalizedUid: matchedCard.uid_normalized,
+      maskedUid: maskRfidUid(matchedCard.uid_normalized),
+    };
+  }
+
   async getStudents(): Promise<Student[]> {
-    return this.repo.getAll();
+    if (DataModeService.isDirectSupabase()) {
+      const students = await this.fetchStudentsDirect();
+      logDataSource({
+        page: 'StudentService',
+        source: 'Supabase',
+        operation: 'SELECT students',
+        result: students.length,
+      });
+      return students;
+    }
+    const students = await this.repo.getAll();
+    logDataSource({
+      page: 'StudentService',
+      source: 'SQLite',
+      operation: 'SELECT students',
+      result: students.length,
+    });
+    return students;
   }
 
   async getStudent(id: string): Promise<Student | null> {
     if (!id) return null;
+    if (DataModeService.isDirectSupabase()) {
+      return this.fetchStudentDirectById(id);
+    }
     return this.repo.getById(id);
   }
 
   async findStudentByStudentNumber(studentNumber: string): Promise<Student | null> {
     if (!studentNumber || !studentNumber.trim()) return null;
+    if (DataModeService.isDirectSupabase()) {
+      return this.fetchStudentDirectBySchoolId(studentNumber.trim());
+    }
     return this.repo.getByStudentNumber(studentNumber);
   }
 
   async findStudentByRfid(rfidUid: string): Promise<Student | null> {
     if (!rfidUid || !rfidUid.trim()) return null;
+    if (DataModeService.isDirectSupabase()) {
+      return this.fetchStudentDirectByRfid(rfidUid.trim());
+    }
     return this.repo.getByRfid(rfidUid);
   }
 
   async lookupCard(rfidUid: string): Promise<CardLookupResult> {
+    if (DataModeService.isDirectSupabase()) {
+      return this.lookupCardDirect(rfidUid);
+    }
     const raw = (rfidUid || '').trim();
     if (!raw) {
       return {
@@ -179,7 +425,7 @@ export class StudentService {
   }
 
   async searchStudents(query: string, filters?: StudentFilterOptions): Promise<Student[]> {
-    const all = await this.repo.getAll();
+    const all = await this.getStudents();
     const cleanQuery = (query || '').trim().toLowerCase();
     const compactQuery = cleanQuery.replace(/[^0-9a-f]/g, '');
 
@@ -394,12 +640,15 @@ export class StudentService {
       updatedAt: now
     };
 
+    if (DataModeService.isDirectSupabase()) {
+      return newStudent;
+    }
     return this.repo.save(newStudent);
   }
 
   async updateStudent(id: string, dto: UpdateStudentDto): Promise<Student> {
     await OperationPolicyService.assertPermitted('STUDENTS_CREATE_UPDATE_DEACTIVATE');
-    const student = await this.repo.getById(id);
+    const student = await this.getStudent(id);
     if (!student) {
       throw new Error('Student record not found.');
     }
@@ -580,12 +829,15 @@ export class StudentService {
       updatedAt: now
     };
 
+    if (DataModeService.isDirectSupabase()) {
+      return updated;
+    }
     return this.repo.save(updated);
   }
 
   async deactivateStudent(id: string): Promise<Student> {
     await OperationPolicyService.assertPermitted('STUDENTS_CREATE_UPDATE_DEACTIVATE');
-    const student = await this.repo.getById(id);
+    const student = await this.getStudent(id);
     if (!student) {
       throw new Error('Student record not found.');
     }
@@ -615,12 +867,15 @@ export class StudentService {
       updatedAt: now
     };
 
+    if (DataModeService.isDirectSupabase()) {
+      return updated;
+    }
     return this.repo.save(updated);
   }
 
   async deleteStudent(id: string): Promise<void> {
     await OperationPolicyService.assertPermitted('STUDENTS_CREATE_UPDATE_DEACTIVATE');
-    const existing = await this.repo.getById(id);
+    const existing = await this.getStudent(id);
     if (!existing) {
       throw new Error('Student record not found.');
     }
@@ -644,6 +899,9 @@ export class StudentService {
       .eq('status', 'ACTIVE');
 
     // 2. Commit locally
+    if (DataModeService.isDirectSupabase()) {
+      return;
+    }
     return this.repo.delete(id);
   }
 
@@ -657,7 +915,7 @@ export class StudentService {
     }
   ): Promise<void> {
     await OperationPolicyService.assertPermitted('STUDENTS_CREATE_UPDATE_DEACTIVATE');
-    const student = await this.repo.getById(studentId);
+    const student = await this.getStudent(studentId);
     if (!student) {
       throw new Error('Student record not found.');
     }
@@ -724,6 +982,10 @@ export class StudentService {
       throw new Error(`Server failed to update enrollment: ${enrErr.message}`);
     }
 
+    if (DataModeService.isDirectSupabase()) {
+      return;
+    }
+
     // 2. Mirror locally to SQLite
     try {
       const db = await getDatabase();
@@ -768,7 +1030,7 @@ export class StudentService {
 
   async replaceStudentRfid(id: string, newRfidUid: string, newRfidCompact?: string, note?: string): Promise<Student> {
     await OperationPolicyService.assertPermitted('NFC_CARD_ASSIGNMENT_REASSIGNMENT');
-    const student = await this.repo.getById(id);
+    const student = await this.getStudent(id);
     if (!student) {
       throw new Error('Student record not found.');
     }
@@ -845,12 +1107,15 @@ export class StudentService {
       updatedAt: now
     };
 
+    if (DataModeService.isDirectSupabase()) {
+      return updated;
+    }
     return this.repo.save(updated);
   }
 
   async deactivateStudentRfid(id: string, reason?: string): Promise<Student> {
     await OperationPolicyService.assertPermitted('NFC_CARD_ASSIGNMENT_REASSIGNMENT');
-    const student = await this.repo.getById(id);
+    const student = await this.getStudent(id);
     if (!student) {
       throw new Error('Student record not found.');
     }
@@ -890,6 +1155,9 @@ export class StudentService {
       updatedAt: now
     };
 
+    if (DataModeService.isDirectSupabase()) {
+      return updated;
+    }
     return this.repo.save(updated);
   }
 

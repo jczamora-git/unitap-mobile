@@ -7,6 +7,9 @@ import UniDialog from '@/components/ui/UniDialog.vue';
 import UniPagination from '@/components/ui/UniPagination.vue';
 import UniExpandableRow from '@/components/ui/UniExpandableRow.vue';
 import UniTreeView from '@/components/ui/UniTreeView.vue';
+import UniSelect from '@/components/ui/UniSelect.vue';
+import UniToast from '@/components/ui/UniToast.vue';
+import { useToast } from '@/composables/useToast';
 
 
 // Mock vue-router for components calling useRouter
@@ -257,6 +260,88 @@ describe('UI Component Regression Suite', () => {
       // Toggle collapse
       await wrapper.find('.node-header').trigger('click');
       expect(wrapper.emitted('node-toggle')?.[0]).toEqual(['yl_1', false]);
+    });
+  });
+
+  describe('Toast Notification System', () => {
+    it('sets and clears toast state via useToast', () => {
+      const { toastState, showToast, hideToast } = useToast();
+      showToast('Collection created successfully', 'success', 5000);
+      expect(toastState.value.show).toBe(true);
+      expect(toastState.value.message).toBe('Collection created successfully');
+      expect(toastState.value.type).toBe('success');
+
+      hideToast();
+      expect(toastState.value.show).toBe(false);
+    });
+
+    it('renders UniToast component with proper message and class', () => {
+      const wrapper = mount(UniToast, {
+        props: {
+          show: true,
+          message: 'Payment recorded',
+          type: 'success',
+        },
+        global: {
+          stubs: { Teleport: true, IonIcon: true },
+        },
+      });
+
+      expect(wrapper.find('.toast-text').text()).toBe('Payment recorded');
+      expect(wrapper.find('.uni-toast-card').classes()).toContain('toast-success');
+    });
+  });
+
+  describe('Global Selection Rule (UniSelect)', () => {
+    it('uses a selection sheet when 3 or more options are provided', async () => {
+      const options = [
+        { value: 'ALL', label: 'All Students' },
+        { value: 'PROGRAM', label: 'By Program' },
+        { value: 'YEAR_LEVEL', label: 'By Year Level' },
+      ];
+
+      const wrapper = mount(UniSelect, {
+        props: {
+          modelValue: 'ALL',
+          options,
+          header: 'Assignment Scope',
+        },
+        global: {
+          stubs: { Teleport: true, IonIcon: true },
+        },
+      });
+
+      // Tapping trigger opens selection sheet instead of dropdown menu
+      await wrapper.find('.uni-select-trigger').trigger('click');
+      // Dropdown menu should not be rendered
+      expect(wrapper.find('.uni-dropdown-menu').exists()).toBe(false);
+      // UniSheet container should be rendered
+      expect(wrapper.find('.uni-selection-sheet-container').exists()).toBe(true);
+      expect(wrapper.findAll('.uni-selection-option-row')).toHaveLength(3);
+    });
+
+    it('uses dropdown menu when fewer than 3 options are provided', async () => {
+      const options = [
+        { value: '1', label: 'Option One' },
+        { value: '2', label: 'Option Two' },
+      ];
+
+      const wrapper = mount(UniSelect, {
+        props: {
+          modelValue: '1',
+          options,
+        },
+        global: {
+          stubs: { Teleport: true, IonIcon: true },
+        },
+      });
+
+      await wrapper.find('.uni-select-trigger').trigger('click');
+      // Selection sheet container should not be rendered
+      expect(wrapper.find('.uni-selection-sheet-container').exists()).toBe(false);
+      // Floating dropdown menu should be rendered
+      expect(wrapper.find('.uni-dropdown-menu').exists()).toBe(true);
+      expect(wrapper.findAll('.uni-dropdown-item')).toHaveLength(2);
     });
   });
 });

@@ -28,6 +28,12 @@
 
           <!-- Form Section: Balanced layout with left-aligned controls -->
           <section class="form-section">
+            <!-- Cloud Mode Notice -->
+            <div v-if="route.query.mode === 'cloud'" class="alert-box alert-info" role="status">
+              <ion-icon :icon="informationCircleOutline" class="alert-icon" />
+              <span>Cloud Sign-In: Authenticate with your Supabase account to continue.</span>
+            </div>
+
             <!-- Error Alert -->
             <div v-if="errorMessage" class="alert-box alert-error" role="alert">
               <ion-icon :icon="informationCircleOutline" class="alert-icon" />
@@ -107,7 +113,7 @@
 
 <script setup lang="ts">
 import { ref, onMounted } from 'vue';
-import { useRouter } from 'vue-router';
+import { useRouter, useRoute } from 'vue-router';
 import { IonPage, IonContent, IonIcon, IonSpinner, onIonViewDidEnter, onIonViewWillLeave } from '@ionic/vue';
 import { StatusBar, Style } from '@capacitor/status-bar';
 import { Capacitor } from '@capacitor/core';
@@ -125,8 +131,10 @@ import { SupabaseAuthService } from '@/integrations/supabase/auth.service';
 import { InitialSyncService } from '@/services/sync/initial-sync.service';
 import { SyncManager } from '@/services/sync/sync-manager';
 import { LegacyMigrationService } from '@/services/legacy-migration.service';
+import { DataModeService } from '@/services/data-mode.service';
 
 const router = useRouter();
+const route = useRoute();
 
 const loading = ref(false);
 const errorMessage = ref('');
@@ -161,14 +169,28 @@ async function handleSignIn() {
   errorMessage.value = '';
   loading.value = true;
   try {
-    // 1. Try Supabase Auth first
-    let res = await SupabaseAuthService.login(loginIdentifier.value, loginPassword.value);
+    const redirectTarget = (route.query.redirect as string) || '/tabs/home';
 
-    // 2. Fallback to local auth if Supabase Auth is not provisioned or during local dev test
+    // 1. In Direct Supabase Mode: Require authentic Supabase Auth session (NEVER fall back to SQLite)
+    if (DataModeService.isDirectSupabase()) {
+      const res = await SupabaseAuthService.login(loginIdentifier.value, loginPassword.value);
+      if (!res.success) {
+        errorMessage.value = res.error || 'Failed to authenticate with Supabase Auth. Please check your credentials.';
+        return;
+      }
+
+      const activeUserId = SupabaseAuthService.user.value?.id || 'dev_user';
+      await SyncManager.start(activeUserId);
+      router.replace(redirectTarget);
+      return;
+    }
+
+    // 2. In Offline-First Mode: Try Supabase Auth first, then local SQLite fallback
+    let res = await SupabaseAuthService.login(loginIdentifier.value, loginPassword.value);
     if (!res.success) {
       const localRes = await authService.login(loginIdentifier.value, loginPassword.value);
       if (localRes.success) {
-        res = { success: true, role: localRes.role };
+        res = { success: true, role: localRes.role, isOffline: true };
       }
     }
 
@@ -181,7 +203,7 @@ async function handleSignIn() {
       if (!hydrated && !res.isOffline) {
         router.replace('/initial-sync');
       } else {
-        router.replace('/tabs/home');
+        router.replace(redirectTarget);
       }
     } else {
       errorMessage.value = res.error || 'Failed to sign in. Please verify your credentials.';
@@ -512,6 +534,12 @@ async function handleSignIn() {
   background: #FEF2F2;
   border: 1px solid #FECACA;
   color: #B91C1C;
+}
+
+.alert-info {
+  background: #F0FDF4;
+  border: 1px solid #BBF7D0;
+  color: #166534;
 }
 
 .alert-icon {

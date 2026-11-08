@@ -22,8 +22,10 @@ import {
   UniDialog,
   UniInput 
 } from '@/components/ui';
+import { useToast } from '@/composables/useToast';
 
 const router = useRouter();
+const { showToast } = useToast();
 const voidReason = ref('');
 
 const charges = ref<StudentCharge[]>([]);
@@ -74,9 +76,10 @@ async function executeVoid(reason: string) {
   if (!voidingChargeId.value) return;
   try {
     await financeService.voidCharge(voidingChargeId.value, reason || 'Operator void');
+    await showToast('Fee obligation voided successfully', 'success');
     await loadCharges();
   } catch (err: unknown) {
-    alert(err instanceof Error ? err.message : 'Error voiding charge');
+    await showToast(err instanceof Error ? err.message : 'Error voiding charge', 'error');
   }
 }
 </script>

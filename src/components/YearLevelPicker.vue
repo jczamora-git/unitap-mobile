@@ -105,6 +105,15 @@ function selectLevel(lvl: YearLevel) {
   box-shadow: 0 1px 4px rgba(0, 0, 0, 0.06);
 }
 
+:root.dark .year-segment-active,
+:root.ion-palette-dark .year-segment-active,
+body.dark .year-segment-active,
+body.ion-palette-dark .year-segment-active {
+  background: rgba(112, 243, 207, 0.12);
+  border-color: rgba(112, 243, 207, 0.35);
+  color: var(--uni-mint);
+}
+
 @media (prefers-color-scheme: dark) {
   .year-segment-active {
     background: rgba(112, 243, 207, 0.12);

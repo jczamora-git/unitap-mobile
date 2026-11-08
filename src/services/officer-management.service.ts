@@ -3,6 +3,7 @@ import { AuthRepository } from '@/database/repositories/auth.repository';
 import { StudentsRepository } from '@/database/repositories/students.repository';
 import { StudentActivationService } from './student-activation.service';
 import { OperationPolicyService } from './operation-policy.service';
+import { DataModeService } from './data-mode.service';
 import type {
   OfficerAppointmentRecord,
   OfficerPermissionPreset,
@@ -419,6 +420,41 @@ export class OfficerManagementService {
     status?: OfficerStatus;
     search?: string;
   }): Promise<OfficerListRecord[]> {
+    if (DataModeService.isDirectSupabase()) {
+      const { supabase } = await import('@/integrations/supabase/client');
+      let query = supabase.from('officer_appointments').select('*').order('created_at', { ascending: false });
+      if (filter?.status) {
+        query = query.eq('status', filter.status);
+      }
+      const { data, error } = await query;
+      if (error) throw new Error(`Failed to query officers from Supabase: ${error.message}`);
+      return (data || []).map((row: any) => ({
+        id: row.id,
+        user_id: row.user_id,
+        student_id: row.student_id,
+        full_name: row.full_name,
+        email: row.email,
+        permission_preset: row.permission_preset,
+        custom_permissions_json: JSON.stringify(row.custom_permissions || []),
+        academic_year_id: row.academic_year_id,
+        semester_id: row.semester_id,
+        appointment_start: row.appointment_start,
+        appointment_end: row.appointment_end,
+        scope_type: row.scope_type,
+        scope_id: row.scope_id,
+        status: row.status,
+        invitation_code: row.invitation_code,
+        invitation_sent_at: row.invitation_sent_at,
+        assigned_by_user_id: row.assigned_by_user_id,
+        created_at: row.created_at,
+        updated_at: row.updated_at,
+        suspended_at: row.suspended_at,
+        revoked_at: row.revoked_at,
+        last_activity_at: row.last_activity_at,
+        username: row.email || null,
+        school_id: null,
+      }));
+    }
     return OfficerRepository.getAppointments(filter);
   }
 
@@ -430,6 +466,16 @@ export class OfficerManagementService {
   ): Promise<{ success: boolean; error?: string }> {
     try {
       await OperationPolicyService.assertPermitted('OFFICER_MANAGEMENT_AND_PERMISSIONS');
+      if (DataModeService.isDirectSupabase()) {
+        const { supabase } = await import('@/integrations/supabase/client');
+        const now = new Date().toISOString();
+        const { error } = await supabase
+          .from('officer_appointments')
+          .update({ status: 'SUSPENDED', suspended_at: now, updated_at: now })
+          .eq('id', appointmentId);
+        if (error) throw new Error(`Failed to suspend officer on Supabase: ${error.message}`);
+        return { success: true };
+      }
       await OfficerRepository.suspendAppointment(appointmentId);
       return { success: true };
     } catch (err: unknown) {
@@ -445,6 +491,16 @@ export class OfficerManagementService {
   ): Promise<{ success: boolean; error?: string }> {
     try {
       await OperationPolicyService.assertPermitted('OFFICER_MANAGEMENT_AND_PERMISSIONS');
+      if (DataModeService.isDirectSupabase()) {
+        const { supabase } = await import('@/integrations/supabase/client');
+        const now = new Date().toISOString();
+        const { error } = await supabase
+          .from('officer_appointments')
+          .update({ status: 'REVOKED', revoked_at: now, updated_at: now })
+          .eq('id', appointmentId);
+        if (error) throw new Error(`Failed to revoke officer on Supabase: ${error.message}`);
+        return { success: true };
+      }
       await OfficerRepository.revokeAppointment(appointmentId);
       return { success: true };
     } catch (err: unknown) {
@@ -463,6 +519,19 @@ export class OfficerManagementService {
     try {
       await OperationPolicyService.assertPermitted('OFFICER_MANAGEMENT_AND_PERMISSIONS');
       const perms = preset === 'CUSTOM' ? (customPermissions || []) : PRESET_DEFINITIONS[preset];
+      if (DataModeService.isDirectSupabase()) {
+        const { supabase } = await import('@/integrations/supabase/client');
+        const { error } = await supabase
+          .from('officer_appointments')
+          .update({
+            permission_preset: preset,
+            custom_permissions: perms,
+            updated_at: new Date().toISOString(),
+          })
+          .eq('id', appointmentId);
+        if (error) throw new Error(`Failed to update officer permissions on Supabase: ${error.message}`);
+        return { success: true };
+      }
       await OfficerRepository.updateAppointment(appointmentId, {
         permission_preset: preset,
         custom_permissions_json: JSON.stringify(perms),
@@ -489,6 +558,25 @@ export class OfficerManagementService {
   ): Promise<{ success: boolean; error?: string }> {
     try {
       await OperationPolicyService.assertPermitted('OFFICER_MANAGEMENT_AND_PERMISSIONS');
+      if (DataModeService.isDirectSupabase()) {
+        const { supabase } = await import('@/integrations/supabase/client');
+        const remoteUpdates: Record<string, unknown> = {
+          updated_at: new Date().toISOString(),
+        };
+        if (updates.academicYearId !== undefined) remoteUpdates.academic_year_id = updates.academicYearId;
+        if (updates.semesterId !== undefined) remoteUpdates.semester_id = updates.semesterId;
+        if (updates.startDate) remoteUpdates.appointment_start = updates.startDate;
+        if (updates.endDate) remoteUpdates.appointment_end = updates.endDate;
+        if (updates.scopeType) remoteUpdates.scope_type = updates.scopeType;
+        if (updates.scopeId !== undefined) remoteUpdates.scope_id = updates.scopeId;
+
+        const { error } = await supabase
+          .from('officer_appointments')
+          .update(remoteUpdates)
+          .eq('id', appointmentId);
+        if (error) throw new Error(`Failed to update appointment on Supabase: ${error.message}`);
+        return { success: true };
+      }
       await OfficerRepository.updateAppointment(appointmentId, {
         ...(updates.academicYearId !== undefined && { academic_year_id: updates.academicYearId }),
         ...(updates.semesterId !== undefined && { semester_id: updates.semesterId }),

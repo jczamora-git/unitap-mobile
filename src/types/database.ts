@@ -53,6 +53,9 @@ export interface Program {
   code: string;
   name: string;
   is_active: number;
+  status?: 'ACTIVE' | 'INACTIVE';
+  created_at?: string;
+  updated_at?: string;
 }
 
 export interface StudentRecord {

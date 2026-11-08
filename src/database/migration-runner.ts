@@ -7,6 +7,7 @@ import { OFFICER_MANAGEMENT_MIGRATION_SQL } from './migrations/005_officer_manag
 import { ATTENDANCE_CONCURRENCY_MIGRATION_SQL } from './migrations/006_attendance_concurrency_audit';
 import { SCHEMA_COMPATIBILITY_MIGRATION_SQL } from './migrations/007_schema_compatibility_and_sync_alignment';
 import { ENTITY_CHECKPOINTS_MIGRATION_SQL } from './migrations/008_entity_sync_checkpoints';
+import { LOCAL_SYNC_AUDIT_LOGS_MIGRATION_SQL } from './migrations/009_local_sync_audit_logs';
 
 export interface Migration {
   version: number;
@@ -54,6 +55,11 @@ export const MIGRATIONS: Migration[] = [
     version: 8,
     description: 'UniTap 2.0 SQLite Entity Sync Checkpoints & Lossless Pagination',
     sql: ENTITY_CHECKPOINTS_MIGRATION_SQL,
+  },
+  {
+    version: 9,
+    description: 'UniTap 2.0 Local-Only Sync Audit Logs & Diagnostics',
+    sql: LOCAL_SYNC_AUDIT_LOGS_MIGRATION_SQL,
   },
 ];
 
@@ -199,6 +205,13 @@ export class MigrationRunner {
           PRAGMA foreign_keys = ON;
         `);
       }
+
+      try {
+        const { FinanceRepository } = await import('./repositories/finance.repository');
+        await FinanceRepository.repairLegacyObligationRuleIds(adapter);
+      } catch {
+        // Non-fatal if finance tables not ready
+      }
     } catch {
       // Non-fatal if tables do not exist yet
     }
@@ -218,6 +231,7 @@ export class MigrationRunner {
       'event_categories', 'year_levels', 'sections',
       'officer_appointments',
       'entity_sync_checkpoints',
+      'sync_audit_logs',
     ];
 
     const tables = await adapter.query<{ name: string }>(

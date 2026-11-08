@@ -1,5 +1,7 @@
 import { getDatabase } from '../database';
 import type { DatabaseAdapter } from '../adapters/database-adapter.interface';
+import { DataModeService } from '@/services/data-mode.service';
+import { supabase } from '@/integrations/supabase/client';
 import type {
   ObligationRule,
   StudentObligation,
@@ -7,6 +9,7 @@ import type {
   SimulatedWalletRecord,
   EventOccurrenceRecord,
   EventRecord,
+  SyncOutboxRecord,
 } from '../../types/database';
 import type {
   AbsenteeCandidate,
@@ -41,6 +44,76 @@ export interface PaymentWithAllocations extends PaymentRecord {
 }
 
 export class FinanceRepository {
+  private static generateUuid(): string {
+    if (typeof crypto !== 'undefined' && crypto.randomUUID) {
+      return crypto.randomUUID();
+    }
+    return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
+      const r = (Math.random() * 16) | 0;
+      const v = c === 'x' ? r : (r & 0x3) | 0x8;
+      return v.toString(16);
+    });
+  }
+
+  /**
+   * Scans local SQLite student_obligations for non-UUID identifiers (e.g. legacy 'ob_...' or 'demo_chg_...')
+   * and remaps them to valid RFC 4122 UUIDs, maintaining foreign keys in payment_allocations,
+   * obligation_adjustments, and sync_outbox.
+   */
+  public static async repairLegacyObligationIds(adapter?: DatabaseAdapter): Promise<number> {
+    const db = await this.getDb(adapter);
+    const nonUuidRows = await db.query<{ id: string }>(
+      `SELECT id FROM student_obligations WHERE id NOT LIKE '%-%-%-%-%'`
+    );
+    if (!nonUuidRows || nonUuidRows.length === 0) return 0;
+
+    let repaired = 0;
+    await db.transaction(async (tx) => {
+      for (const row of nonUuidRows) {
+        const oldId = row.id;
+        const newUuid = this.generateUuid();
+        const oldRow = await tx.queryOne<StudentObligation>(
+          'SELECT * FROM student_obligations WHERE id = ?',
+          [oldId]
+        );
+        if (oldRow) {
+          await tx.execute(
+            `INSERT INTO student_obligations (
+              id, student_id, semester_id, rule_id, related_event_id, related_occurrence_id,
+              title, type, amount_centavos, status, due_date, issued_by_user_id, batch_id, issued_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [
+              newUuid,
+              oldRow.student_id,
+              oldRow.semester_id,
+              oldRow.rule_id || null,
+              oldRow.related_event_id || null,
+              oldRow.related_occurrence_id || null,
+              oldRow.title,
+              oldRow.type,
+              oldRow.amount_centavos,
+              oldRow.status,
+              oldRow.due_date || null,
+              oldRow.issued_by_user_id || null,
+              oldRow.batch_id || null,
+              oldRow.issued_at,
+              oldRow.updated_at || new Date().toISOString(),
+            ]
+          );
+          await tx.execute('UPDATE payment_allocations SET obligation_id = ? WHERE obligation_id = ?', [newUuid, oldId]);
+          await tx.execute('UPDATE obligation_adjustments SET obligation_id = ? WHERE obligation_id = ?', [newUuid, oldId]);
+          await tx.execute(
+            `UPDATE sync_outbox SET entity_id = ? WHERE entity_type = 'OBLIGATION' AND entity_id = ?`,
+            [newUuid, oldId]
+          );
+          await tx.execute('DELETE FROM student_obligations WHERE id = ?', [oldId]);
+          repaired++;
+        }
+      }
+    });
+    return repaired;
+  }
+
   private static async getDb(adapter?: DatabaseAdapter): Promise<DatabaseAdapter> {
     return adapter || getDatabase();
   }
@@ -66,6 +139,262 @@ export class FinanceRepository {
     return { deviceId: 'dev_default', validActorId };
   }
 
+  /**
+   * Scans local SQLite obligation_rules, student_obligations, and sync_outbox for legacy
+   * 'rule_' prefixed identifiers and safely remaps them to canonical RFC 4122 UUIDs.
+   *
+   * Verifies collision safety, preserves outbox operation IDs (e.g. 'op_ob_...'),
+   * updates dependent foreign keys in student_obligations, audit_events, sync_conflicts,
+   * and sync_audit_logs, and requeues any eligible failed outbox operations for retry.
+   */
+  public static async repairLegacyObligationRuleIds(
+    adapter?: DatabaseAdapter
+  ): Promise<{
+    rulesRepaired: number;
+    obligationsRepaired: number;
+    outboxRepaired: number;
+    requeuedCount: number;
+  }> {
+    const db = await this.getDb(adapter);
+    const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+    let legacyRules: ObligationRule[] = [];
+    let legacyObligations: { rule_id: string }[] = [];
+    let legacyOutboxRuleOps: SyncOutboxRecord[] = [];
+    let legacyOutboxObOps: SyncOutboxRecord[] = [];
+
+    try {
+      legacyRules = await db.query<ObligationRule>(
+        `SELECT * FROM obligation_rules WHERE id LIKE 'rule_%'`
+      );
+      legacyObligations = await db.query<{ rule_id: string }>(
+        `SELECT DISTINCT rule_id FROM student_obligations WHERE rule_id LIKE 'rule_%'`
+      );
+      legacyOutboxRuleOps = await db.query<SyncOutboxRecord>(
+        `SELECT * FROM sync_outbox WHERE entity_type = 'OBLIGATION_RULE' AND entity_id LIKE 'rule_%'`
+      );
+      legacyOutboxObOps = await db.query<SyncOutboxRecord>(
+        `SELECT * FROM sync_outbox WHERE entity_type IN ('OBLIGATION', 'STUDENT_OBLIGATION') AND payload_json LIKE '%"rule_id":"rule_%'`
+      );
+    } catch {
+      return {
+        rulesRepaired: 0,
+        obligationsRepaired: 0,
+        outboxRepaired: 0,
+        requeuedCount: 0,
+      };
+    }
+
+    const hasLegacyData =
+      legacyRules.length > 0 ||
+      legacyObligations.length > 0 ||
+      legacyOutboxRuleOps.length > 0 ||
+      legacyOutboxObOps.length > 0;
+
+    if (!hasLegacyData) {
+      let requeuedCount = 0;
+      try {
+        const failedOps = await db.query<SyncOutboxRecord>(
+          `SELECT id FROM sync_outbox WHERE synced_at IS NULL AND last_error LIKE '%invalid input syntax for type uuid%'`
+        );
+        if (failedOps.length > 0) {
+          await db.execute(
+            `UPDATE sync_outbox SET retry_count = 0, last_error = NULL WHERE synced_at IS NULL AND last_error LIKE '%invalid input syntax for type uuid%'`
+          );
+          requeuedCount = failedOps.length;
+        }
+      } catch {
+        // ignore
+      }
+      return {
+        rulesRepaired: 0,
+        obligationsRepaired: 0,
+        outboxRepaired: 0,
+        requeuedCount,
+      };
+    }
+
+    // Build consistent mapping from legacyId -> canonicalUuid
+    const idMap = new Map<string, string>();
+    const registerMapping = (legacyId: string) => {
+      if (!legacyId || idMap.has(legacyId)) return;
+      if (legacyId.startsWith('rule_')) {
+        const suffix = legacyId.substring(5);
+        if (UUID_REGEX.test(suffix)) {
+          idMap.set(legacyId, suffix.toLowerCase());
+          return;
+        }
+      }
+      idMap.set(legacyId, this.generateUuid());
+    };
+
+    for (const r of legacyRules) registerMapping(r.id);
+    for (const o of legacyObligations) if (o.rule_id) registerMapping(o.rule_id);
+    for (const op of legacyOutboxRuleOps) registerMapping(op.entity_id);
+    for (const op of legacyOutboxObOps) {
+      try {
+        const parsed = JSON.parse(op.payload_json);
+        if (parsed.rule_id && typeof parsed.rule_id === 'string' && parsed.rule_id.startsWith('rule_')) {
+          registerMapping(parsed.rule_id);
+        }
+      } catch {
+        // ignore
+      }
+    }
+
+    let rulesRepaired = 0;
+    let obligationsRepaired = 0;
+    let outboxRepaired = 0;
+
+    await db.execute('PRAGMA foreign_keys = OFF;');
+    try {
+      await db.transaction(async (tx) => {
+        for (const [legacyId, canonicalId] of idMap.entries()) {
+          const existingTarget = await tx.queryOne<{ id: string }>(
+            'SELECT id FROM obligation_rules WHERE id = ?',
+            [canonicalId]
+          );
+          const legacyRow = await tx.queryOne<ObligationRule>(
+            'SELECT * FROM obligation_rules WHERE id = ?',
+            [legacyId]
+          );
+
+          if (legacyRow) {
+            if (!existingTarget) {
+              await tx.execute(
+                `INSERT INTO obligation_rules (
+                  id, semester_id, name, type, trigger_type, default_amount_centavos, due_on, status, created_by_user_id, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                [
+                  canonicalId,
+                  legacyRow.semester_id,
+                  legacyRow.name,
+                  legacyRow.type,
+                  legacyRow.trigger_type,
+                  legacyRow.default_amount_centavos,
+                  legacyRow.due_on || null,
+                  legacyRow.status,
+                  legacyRow.created_by_user_id || null,
+                  legacyRow.created_at,
+                  (legacyRow as any).updated_at || legacyRow.created_at || new Date().toISOString(),
+                ]
+              );
+            }
+            await tx.execute(
+              'UPDATE student_obligations SET rule_id = ? WHERE rule_id = ?',
+              [canonicalId, legacyId]
+            );
+            await tx.execute('DELETE FROM obligation_rules WHERE id = ?', [legacyId]);
+            rulesRepaired++;
+          } else {
+            await tx.execute(
+              'UPDATE student_obligations SET rule_id = ? WHERE rule_id = ?',
+              [canonicalId, legacyId]
+            );
+          }
+
+          const obCountRow = await tx.queryOne<{ count: number }>(
+            'SELECT COUNT(*) as count FROM student_obligations WHERE rule_id = ?',
+            [canonicalId]
+          );
+          obligationsRepaired += obCountRow?.count || 0;
+
+          // Update sync_outbox (PRESERVING outbox operation IDs!)
+          const ruleOps = await tx.query<SyncOutboxRecord>(
+            `SELECT * FROM sync_outbox WHERE entity_type = 'OBLIGATION_RULE' AND (entity_id = ? OR payload_json LIKE ?)`,
+            [legacyId, `%"id":"${legacyId}"%`]
+          );
+          for (const op of ruleOps) {
+            let updatedPayloadStr = op.payload_json;
+            try {
+              const p = JSON.parse(op.payload_json);
+              p.id = canonicalId;
+              updatedPayloadStr = JSON.stringify(p);
+            } catch {
+              // ignore
+            }
+            await tx.execute(
+              `UPDATE sync_outbox
+               SET entity_id = ?, payload_json = ?, retry_count = 0, last_error = NULL
+               WHERE id = ?`,
+              [canonicalId, updatedPayloadStr, op.id]
+            );
+            outboxRepaired++;
+          }
+
+          const obOps = await tx.query<SyncOutboxRecord>(
+            `SELECT * FROM sync_outbox
+             WHERE entity_type IN ('OBLIGATION', 'STUDENT_OBLIGATION')
+               AND payload_json LIKE ?`,
+            [`%"rule_id":"${legacyId}"%`]
+          );
+          for (const op of obOps) {
+            let updatedPayloadStr = op.payload_json;
+            try {
+              const p = JSON.parse(op.payload_json);
+              if (p.rule_id === legacyId) {
+                p.rule_id = canonicalId;
+                updatedPayloadStr = JSON.stringify(p);
+              }
+            } catch {
+              // ignore
+            }
+            await tx.execute(
+              `UPDATE sync_outbox
+               SET payload_json = ?, retry_count = 0, last_error = NULL
+               WHERE id = ?`,
+              [updatedPayloadStr, op.id]
+            );
+            outboxRepaired++;
+          }
+
+          try {
+            await tx.execute(
+              `UPDATE audit_events SET entity_id = ? WHERE entity_type = 'OBLIGATION_RULE' AND entity_id = ?`,
+              [canonicalId, legacyId]
+            );
+            await tx.execute(
+              `UPDATE sync_conflicts SET entity_id = ? WHERE entity_type = 'OBLIGATION_RULE' AND entity_id = ?`,
+              [canonicalId, legacyId]
+            );
+            await tx.execute(
+              `UPDATE sync_audit_logs SET record_id = ? WHERE entity = 'obligation_rules' AND record_id = ?`,
+              [canonicalId, legacyId]
+            );
+          } catch {
+            // ignore
+          }
+        }
+
+        // Requeue any operations that failed due to the batch UUID syntax rejection
+        await tx.execute(
+          `UPDATE sync_outbox
+           SET retry_count = 0, last_error = NULL
+           WHERE synced_at IS NULL AND last_error LIKE '%invalid input syntax for type uuid%'`
+        );
+      });
+    } finally {
+      await db.execute('PRAGMA foreign_keys = ON;');
+    }
+
+    let requeuedCount = 0;
+    try {
+      const requeuedRow = await db.queryOne<{ count: number }>(
+        `SELECT COUNT(*) as count FROM sync_outbox WHERE synced_at IS NULL AND retry_count = 0`
+      );
+      requeuedCount = requeuedRow?.count || 0;
+    } catch {
+      // ignore
+    }
+
+    return {
+      rulesRepaired,
+      obligationsRepaired,
+      outboxRepaired,
+      requeuedCount,
+    };
+  }
+
   // ==========================================================================
   // --- 1. OBLIGATION RULES ---
   // ==========================================================================
@@ -74,12 +403,21 @@ export class FinanceRepository {
     const db = await this.getDb(adapter);
     const { deviceId, validActorId } = await this.ensureDeviceAndActor(db, rule.created_by_user_id, rule.created_at);
 
+    let ruleId = rule.id;
+    if (ruleId && ruleId.startsWith('rule_')) {
+      const suffix = ruleId.substring(5);
+      const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+      if (UUID_REGEX.test(suffix)) {
+        ruleId = suffix.toLowerCase();
+      }
+    }
+
     await db.execute(
       `INSERT INTO obligation_rules (
         id, semester_id, name, type, trigger_type, default_amount_centavos, due_on, status, created_by_user_id, created_at
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
-        rule.id,
+        ruleId,
         rule.semester_id,
         rule.name,
         rule.type,
@@ -94,19 +432,53 @@ export class FinanceRepository {
 
     // Queue sync outbox
     const outboxId = 'op_rule_' + Math.random().toString(36).substring(2, 10);
+    const queuedRule = { ...rule, id: ruleId };
     await db.execute(
       `INSERT INTO sync_outbox (
         id, device_id, entity_type, entity_id, operation, payload_json, schema_version, created_at, retry_count
       ) VALUES (?, ?, 'OBLIGATION_RULE', ?, 'CREATE', ?, 1, ?, 0)`,
-      [outboxId, deviceId, rule.id, JSON.stringify(rule), rule.created_at]
+      [outboxId, deviceId, ruleId, JSON.stringify(queuedRule), rule.created_at]
     );
   }
 
   public static async getRulesBySemester(semesterId: string, adapter?: DatabaseAdapter): Promise<ObligationRule[]> {
+    if (!adapter && DataModeService.isDirectSupabase()) {
+      const { data, error } = await supabase
+        .from('obligation_rules')
+        .select('*')
+        .eq('semester_id', semesterId)
+        .eq('status', 'ACTIVE')
+        .order('created_at', { ascending: false });
+      if (error) throw new Error(`Failed to query rules from Supabase: ${error.message}`);
+      return (data || []) as ObligationRule[];
+    }
+
     const db = await this.getDb(adapter);
     return db.query<ObligationRule>(
       'SELECT * FROM obligation_rules WHERE semester_id = ? AND status = ? ORDER BY created_at DESC',
       [semesterId, 'ACTIVE']
+    );
+  }
+
+  public static async getActiveRules(semesterId?: string, adapter?: DatabaseAdapter): Promise<ObligationRule[]> {
+    if (!adapter && DataModeService.isDirectSupabase()) {
+      let query = supabase.from('obligation_rules').select('*').eq('status', 'ACTIVE').order('created_at', { ascending: false });
+      if (semesterId) query = query.eq('semester_id', semesterId);
+      const { data, error } = await query;
+      if (error) throw new Error(`Failed to query active rules from Supabase: ${error.message}`);
+      return (data || []) as ObligationRule[];
+    }
+
+    const db = await this.getDb(adapter);
+    if (semesterId) {
+      return db.query<ObligationRule>(
+        'SELECT * FROM obligation_rules WHERE semester_id = ? AND status = ? ORDER BY created_at DESC',
+        [semesterId, 'ACTIVE']
+      );
+    }
+    return db.query<ObligationRule>(
+      'SELECT * FROM obligation_rules WHERE status = ? ORDER BY created_at DESC',
+      ['ACTIVE']
     );
   }
 
@@ -186,6 +558,56 @@ export class FinanceRepository {
     semesterId?: string,
     adapter?: DatabaseAdapter
   ): Promise<StudentObligationWithBalance[]> {
+    if (!adapter && DataModeService.isDirectSupabase()) {
+      let query = supabase.from('student_obligations').select('*').eq('student_id', studentId).eq('status', 'ACTIVE');
+      if (semesterId) query = query.eq('semester_id', semesterId);
+      const { data: obs, error } = await query.order('issued_at', { ascending: false });
+      if (error) throw new Error(`Failed to query student obligations from Supabase: ${error.message}`);
+
+      const obIds = (obs || []).map((o: any) => o.id);
+      let allocs: any[] = [];
+      const postedPayIds = new Set<string>();
+
+      if (obIds.length > 0) {
+        const { data: allocData } = await supabase.from('payment_allocations').select('*').in('obligation_id', obIds);
+        allocs = allocData || [];
+        const payIds = Array.from(new Set(allocs.map((a: any) => a.payment_id).filter(Boolean)));
+        if (payIds.length > 0) {
+          const { data: payData } = await supabase.from('payments').select('id, status').in('id', payIds).eq('status', 'POSTED');
+          for (const p of payData || []) postedPayIds.add(p.id);
+        }
+      }
+
+      const paidByObId = new Map<string, number>();
+      for (const a of allocs) {
+        if (postedPayIds.has(a.payment_id)) {
+          paidByObId.set(a.obligation_id, (paidByObId.get(a.obligation_id) || 0) + Number(a.amount_centavos || 0));
+        }
+      }
+
+      const { data: student } = await supabase.from('students').select('*').eq('id', studentId).maybeSingle();
+      const { data: enrollment } = semesterId
+        ? await supabase.from('student_enrollments').select('*').eq('student_id', studentId).eq('semester_id', semesterId).maybeSingle()
+        : { data: null };
+
+      return (obs || []).map((o: any) => {
+        const assessed = Number(o.amount_centavos || 0);
+        const paid = paidByObId.get(o.id) || 0;
+        const balance = Math.max(0, assessed - paid);
+        return {
+          ...o,
+          assessed_centavos: assessed,
+          paid_centavos: paid,
+          balance_centavos: balance,
+          school_id: student?.school_id,
+          first_name: student?.first_name,
+          last_name: student?.last_name,
+          year_level: enrollment?.year_level || 1,
+          section: enrollment?.section || '1A',
+        };
+      });
+    }
+
     const db = await this.getDb(adapter);
     let sql = `
       WITH adjustment_totals AS (
@@ -228,6 +650,65 @@ export class FinanceRepository {
     type?: 'FINE' | 'CONTRIBUTION',
     adapter?: DatabaseAdapter
   ): Promise<StudentObligationWithBalance[]> {
+    if (!adapter && DataModeService.isDirectSupabase()) {
+      let query = supabase.from('student_obligations').select('*').eq('semester_id', semesterId).eq('status', 'ACTIVE');
+      if (type) query = query.eq('type', type);
+      const { data: obs, error } = await query;
+      if (error) throw new Error(`Failed to query obligations by semester from Supabase: ${error.message}`);
+
+      const obIds = (obs || []).map((o: any) => o.id);
+      let allocs: any[] = [];
+      const postedPayIds = new Set<string>();
+
+      if (obIds.length > 0) {
+        const { data: allocData } = await supabase.from('payment_allocations').select('*').in('obligation_id', obIds);
+        allocs = allocData || [];
+        const payIds = Array.from(new Set(allocs.map((a: any) => a.payment_id).filter(Boolean)));
+        if (payIds.length > 0) {
+          const { data: payData } = await supabase.from('payments').select('id, status').in('id', payIds).eq('status', 'POSTED');
+          for (const p of payData || []) postedPayIds.add(p.id);
+        }
+      }
+
+      const paidByObId = new Map<string, number>();
+      for (const a of allocs) {
+        if (postedPayIds.has(a.payment_id)) {
+          paidByObId.set(a.obligation_id, (paidByObId.get(a.obligation_id) || 0) + Number(a.amount_centavos || 0));
+        }
+      }
+
+      const studentIds = Array.from(new Set((obs || []).map((o: any) => o.student_id).filter(Boolean)));
+      const [studentsRes, enrollmentsRes] = await Promise.all([
+        studentIds.length > 0 ? supabase.from('students').select('*').in('id', studentIds) : Promise.resolve({ data: [] }),
+        studentIds.length > 0 ? supabase.from('student_enrollments').select('*').eq('semester_id', semesterId).in('student_id', studentIds) : Promise.resolve({ data: [] }),
+      ]);
+
+      const stuMap = new Map<string, any>();
+      for (const s of (studentsRes.data || [])) stuMap.set(s.id, s);
+      const enrMap = new Map<string, any>();
+      for (const e of (enrollmentsRes.data || [])) enrMap.set(e.student_id, e);
+
+      return (obs || []).map((o: any) => {
+        const assessed = Number(o.amount_centavos || 0);
+        const paid = paidByObId.get(o.id) || 0;
+        const balance = Math.max(0, assessed - paid);
+        const s = stuMap.get(o.student_id);
+        const enr = enrMap.get(o.student_id);
+
+        return {
+          ...o,
+          assessed_centavos: assessed,
+          paid_centavos: paid,
+          balance_centavos: balance,
+          school_id: s?.school_id,
+          first_name: s?.first_name,
+          last_name: s?.last_name,
+          year_level: enr?.year_level || 1,
+          section: enr?.section || '1A',
+        };
+      });
+    }
+
     const db = await this.getDb(adapter);
     let sql = `
       WITH adjustment_totals AS (
@@ -658,7 +1139,7 @@ export class FinanceRepository {
         }
 
         // D. Create student obligation
-        const obligationId = 'ob_' + Math.random().toString(36).substring(2, 10);
+        const obligationId = this.generateUuid();
         await tx.execute(
           `INSERT INTO student_obligations (
             id, student_id, semester_id, rule_id, related_event_id, related_occurrence_id,
@@ -779,7 +1260,8 @@ export class FinanceRepository {
       title: string;
       amountCentavos: number;
       dueDate?: string | null;
-      targetScope: 'ALL' | 'YEAR_LEVEL' | 'SECTION' | 'INDIVIDUAL';
+      targetScope: 'ALL' | 'PROGRAM' | 'YEAR_LEVEL' | 'SECTION' | 'INDIVIDUAL';
+      programIds?: string[];
       yearLevels?: number[];
       sections?: string[];
       studentIds?: string[];
@@ -811,7 +1293,11 @@ export class FinanceRepository {
       `;
       const qParams: unknown[] = [params.semesterId];
 
-      if (params.targetScope === 'YEAR_LEVEL' && params.yearLevels && params.yearLevels.length > 0) {
+      if (params.targetScope === 'PROGRAM' && params.programIds && params.programIds.length > 0) {
+        const placeholders = params.programIds.map(() => '?').join(',');
+        sql += ` AND se.program_id IN (${placeholders})`;
+        qParams.push(...params.programIds);
+      } else if (params.targetScope === 'YEAR_LEVEL' && params.yearLevels && params.yearLevels.length > 0) {
         const placeholders = params.yearLevels.map(() => '?').join(',');
         sql += ` AND se.year_level IN (${placeholders})`;
         qParams.push(...params.yearLevels);
@@ -846,7 +1332,7 @@ export class FinanceRepository {
           if (existing) continue;
         }
 
-        const obligationId = 'ob_' + Math.random().toString(36).substring(2, 10);
+        const obligationId = this.generateUuid();
         await tx.execute(
           `INSERT INTO student_obligations (
             id, student_id, semester_id, rule_id, title, type, amount_centavos,
@@ -1309,6 +1795,14 @@ export class FinanceRepository {
     semesterId?: string,
     adapter?: DatabaseAdapter
   ): Promise<PaymentRecord[]> {
+    if (!adapter && DataModeService.isDirectSupabase()) {
+      let query = supabase.from('payments').select('*').eq('student_id', studentId);
+      if (semesterId) query = query.eq('semester_id', semesterId);
+      const { data, error } = await query.order('processed_at', { ascending: false });
+      if (error) throw new Error(`Failed to query payments from Supabase: ${error.message}`);
+      return (data || []) as PaymentRecord[];
+    }
+
     const db = await this.getDb(adapter);
     let sql = 'SELECT * FROM payments WHERE student_id = ?';
     const params: unknown[] = [studentId];
@@ -1324,6 +1818,52 @@ export class FinanceRepository {
     semesterId?: string,
     adapter?: DatabaseAdapter
   ): Promise<PaymentWithAllocations[]> {
+    if (!adapter && DataModeService.isDirectSupabase()) {
+      let query = supabase.from('payments').select('*').order('processed_at', { ascending: false });
+      if (semesterId) query = query.eq('semester_id', semesterId);
+      const { data: payments, error } = await query;
+      if (error) throw new Error(`Failed to query payments from Supabase: ${error.message}`);
+
+      const payIds = (payments || []).map((p: any) => p.id);
+      let allocs: any[] = [];
+      if (payIds.length > 0) {
+        const { data: allocData } = await supabase.from('payment_allocations').select('*').in('payment_id', payIds);
+        allocs = allocData || [];
+      }
+
+      const allocsByPayId = new Map<string, any[]>();
+      for (const a of allocs) {
+        const list = allocsByPayId.get(a.payment_id) || [];
+        list.push(a);
+        allocsByPayId.set(a.payment_id, list);
+      }
+
+      const studentIds = Array.from(new Set((payments || []).map((p: any) => p.student_id).filter(Boolean)));
+      const stuMap = new Map<string, any>();
+      if (studentIds.length > 0) {
+        const { data: stuData } = await supabase.from('students').select('id, school_id, first_name, last_name').in('id', studentIds);
+        for (const s of (stuData || [])) stuMap.set(s.id, s);
+      }
+
+      return (payments || []).map((p: any) => {
+        const s = stuMap.get(p.student_id);
+        const pAllocs = allocsByPayId.get(p.id) || [];
+        return {
+          ...p,
+          school_id: s?.school_id,
+          first_name: s?.first_name,
+          last_name: s?.last_name,
+          allocations: pAllocs.map((a: any) => ({
+            id: a.id,
+            obligation_id: a.obligation_id,
+            amount_centavos: Number(a.amount_centavos),
+            obligation_title: a.obligation_title,
+            obligation_type: a.obligation_type,
+          })),
+        };
+      });
+    }
+
     const db = await this.getDb(adapter);
     let sql = `
       SELECT p.*, s.school_id, s.first_name, s.last_name
@@ -1364,6 +1904,40 @@ export class FinanceRepository {
     paymentId: string,
     adapter?: DatabaseAdapter
   ): Promise<PaymentWithAllocations | null> {
+    if (!adapter && DataModeService.isDirectSupabase()) {
+      const { data: p, error } = await supabase.from('payments').select('*').eq('id', paymentId).maybeSingle();
+      if (error || !p) return null;
+
+      const [allocsRes, stuRes] = await Promise.all([
+        supabase.from('payment_allocations').select('*').eq('payment_id', paymentId),
+        supabase.from('students').select('id, school_id, first_name, last_name').eq('id', p.student_id).maybeSingle(),
+      ]);
+
+      const obIds = Array.from(new Set((allocsRes.data || []).map((a: any) => a.obligation_id).filter(Boolean)));
+      const obMap = new Map<string, any>();
+      if (obIds.length > 0) {
+        const { data: obData } = await supabase.from('student_obligations').select('id, title, type').in('id', obIds);
+        for (const ob of obData || []) obMap.set(ob.id, ob);
+      }
+
+      return {
+        ...p,
+        school_id: stuRes.data?.school_id,
+        first_name: stuRes.data?.first_name,
+        last_name: stuRes.data?.last_name,
+        allocations: (allocsRes.data || []).map((a: any) => {
+          const ob = obMap.get(a.obligation_id);
+          return {
+            id: a.id,
+            obligation_id: a.obligation_id,
+            amount_centavos: Number(a.amount_centavos),
+            obligation_title: ob?.title,
+            obligation_type: ob?.type,
+          };
+        }),
+      };
+    }
+
     const db = await this.getDb(adapter);
     const payment = await db.queryOne<PaymentWithAllocations>(
       `SELECT p.*, s.school_id, s.first_name, s.last_name

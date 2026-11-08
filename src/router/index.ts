@@ -99,9 +99,14 @@ const routes: Array<RouteRecordRaw> = [
     component: () => import('@/views/ContributionsPage.vue')
   },
   {
+    path: '/finance/fines',
+    name: 'Fines',
+    component: () => import('@/views/FinesPage.vue')
+  },
+  {
     path: '/finance/charges',
     name: 'Charges',
-    component: () => import('@/views/ChargesPage.vue')
+    redirect: '/finance/fines'
   },
   {
     path: '/finance/charges/create',
@@ -127,6 +132,12 @@ const routes: Array<RouteRecordRaw> = [
     path: '/settings/system-setup/event-categories',
     name: 'EventCategories',
     component: () => import('@/views/settings/EventCategoriesPage.vue'),
+    meta: { requiresDevAdmin: true }
+  },
+  {
+    path: '/settings/system-setup/programs',
+    name: 'Programs',
+    component: () => import('@/views/settings/ProgramsPage.vue'),
     meta: { requiresDevAdmin: true }
   },
   {
@@ -239,19 +250,41 @@ router.afterEach((to, from) => {
 router.beforeEach(async (to, _from) => {
   const { authService } = await import('@/services/auth.service');
   const { SupabaseAuthService } = await import('@/integrations/supabase/auth.service');
+  const { DataModeService } = await import('@/services/data-mode.service');
+
   await authService.initSession();
-  await SupabaseAuthService.initialize();
+  await SupabaseAuthService.waitForInitialization();
 
   const isPublic = to.path === '/login' || to.path === '/register';
-  const authenticated = SupabaseAuthService.isAuthenticated.value || authService.isAuthenticated.value;
+  const isDirectMode = DataModeService.isDirectSupabase();
+  const hasCloudSession = SupabaseAuthService.isCloudAuthenticated.value;
+  const hasLocalSession = authService.isAuthenticated.value;
+  const authenticated = hasCloudSession || hasLocalSession;
+
+  if (to.path === '/login' || to.path === '/register') {
+    // If explicitly signing into cloud (?mode=cloud), or in direct mode without a cloud session,
+    // permit access to /login even if an active local session exists!
+    if ((to.query.mode === 'cloud' || isDirectMode) && !hasCloudSession) {
+      return true;
+    }
+    // If already authenticated in active session, redirect to home
+    if (authenticated) {
+      return '/tabs/home';
+    }
+    return true;
+  }
 
   if (!authenticated && !isPublic) {
-    // If not authenticated, redirect to login
-    return '/login';
-  } else if (authenticated && (to.path === '/login' || to.path === '/register')) {
-    // If already logged in and visiting public auth, go to initial-sync or home
-    return '/tabs/home';
-  } else if (to.matched.some((record) => record.meta?.requiresDevAdmin)) {
+    return {
+      path: '/login',
+      query: {
+        redirect: to.fullPath,
+        ...(isDirectMode ? { mode: 'cloud' } : {})
+      }
+    };
+  }
+
+  if (to.matched.some((record) => record.meta?.requiresDevAdmin)) {
     const role = SupabaseAuthService.role.value || authService.role.value;
     if (role !== 'DEVADMIN') {
       return '/tabs/home';
@@ -268,6 +301,7 @@ router.beforeEach(async (to, _from) => {
         '/finance/pay',
         '/finance/absentees',
         '/finance/contributions',
+        '/finance/fines',
         '/finance/charges',
         '/finance/reports',
         '/academic'

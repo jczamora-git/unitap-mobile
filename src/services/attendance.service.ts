@@ -1,4 +1,5 @@
 import { supabase } from '@/integrations/supabase/client';
+import { DataModeService } from './data-mode.service';
 
 function isTestEnvironment(): boolean {
   const proc = (globalThis as unknown as { process?: { env?: Record<string, string | undefined> } }).process;
@@ -12,6 +13,7 @@ import type {
 } from '@/types/attendance';
 import type { AttendanceStatus, OccurrenceParticipant } from '@/types/event';
 import { eventService } from './event.service';
+import { studentService } from './student.service';
 import { localEventRepository, type IEventRepository } from '@/storage/event-storage.service';
 import { formatFullName } from '@/utilities/student-formatters';
 import { isPastTime } from '@/utilities/date-formatters';
@@ -49,6 +51,184 @@ export interface VerificationPromptData {
 export class AttendanceService {
   constructor(private repo: IEventRepository = localEventRepository) {}
 
+  private async prepareNfcVerificationDirect(
+    occurrenceId: string,
+    rawRfidUid: string,
+    _actorUserId?: string
+  ): Promise<VerificationPromptData> {
+    const cleanUid = (rawRfidUid || '').trim().toUpperCase().replace(/[^0-9A-F]/g, '');
+
+    if (!cleanUid) {
+      return {
+        type: 'INVALID',
+        message: 'Invalid or unreadable NFC tag.',
+        occurrenceId,
+        rfidUid: rawRfidUid,
+        suggestedStatus: 'PRESENT',
+        eligible: false,
+      };
+    }
+
+    // 1. Verify occurrence on Supabase
+    const { data: occurrence, error: occErr } = await supabase
+      .from('event_occurrences')
+      .select('*')
+      .eq('id', occurrenceId)
+      .maybeSingle();
+
+    if (occErr || !occurrence || occurrence.status !== 'OPEN') {
+      return {
+        type: 'SESSION_CLOSED',
+        message: !occurrence ? 'Occurrence session not found.' : 'Attendance session is not currently open.',
+        occurrenceId,
+        rfidUid: cleanUid,
+        suggestedStatus: 'PRESENT',
+        eligible: false,
+      };
+    }
+
+    // 2. Resolve Card & Student on Supabase
+    const { data: cards } = await supabase
+      .from('nfc_cards')
+      .select('*')
+      .eq('uid_normalized', cleanUid);
+
+    const activeCard = (cards || []).find((c: any) => c.status === 'ACTIVE');
+    if (!activeCard || !activeCard.student_id) {
+      return {
+        type: 'UNREGISTERED',
+        message: 'Unregistered card. Please register this card to a student first.',
+        occurrenceId,
+        rfidUid: cleanUid,
+        suggestedStatus: 'PRESENT',
+        eligible: false,
+      };
+    }
+
+    const studentModel = await studentService.getStudent(activeCard.student_id);
+    if (!studentModel || studentModel.status !== 'ACTIVE') {
+      return {
+        type: 'INVALID',
+        message: 'Student account is inactive or not found.',
+        occurrenceId,
+        rfidUid: cleanUid,
+        suggestedStatus: 'PRESENT',
+        eligible: false,
+      };
+    }
+
+    const fullName = formatFullName(studentModel.firstName, studentModel.middleName, studentModel.lastName);
+
+    // 3. Duplicate / revocation check on Supabase
+    const { data: existingRecord } = await supabase
+      .from('attendance_records')
+      .select('*')
+      .eq('occurrence_id', occurrenceId)
+      .eq('student_id', studentModel.id)
+      .maybeSingle();
+
+    if (existingRecord) {
+      if (existingRecord.status === 'REVOKED' || existingRecord.status === 'VOID') {
+        const reason = existingRecord.notes || 'Administrative revocation';
+        return {
+          type: 'REVOKED_REVIEW_REQUIRED',
+          message: `Attendance was revoked. Reason: "${reason}". An explicit recheck with reason is required.`,
+          occurrenceId,
+          rfidUid: cleanUid,
+          student: studentModel as any,
+          studentFullName: fullName,
+          photoLocalUri: null,
+          suggestedStatus: 'REVOKED',
+          eligible: false,
+          existingRecordId: existingRecord.id,
+          revocationReason: reason,
+          revokedAt: existingRecord.updated_at,
+        };
+      }
+
+      if (existingRecord.status === 'PRESENT' || existingRecord.status === 'LATE') {
+        return {
+          type: 'DUPLICATE',
+          message: `${fullName} is already recorded as ${existingRecord.status}.`,
+          occurrenceId,
+          rfidUid: cleanUid,
+          student: studentModel as any,
+          studentFullName: fullName,
+          photoLocalUri: null,
+          suggestedStatus: existingRecord.status as AttendanceStatus,
+          eligible: true,
+          existingRecordId: existingRecord.id,
+        };
+      }
+    }
+
+    // 4. Grace period
+    let suggestedStatus: AttendanceStatus = 'PRESENT';
+    if (occurrence.occurs_on && occurrence.starts_at) {
+      const isLate = isPastTime(occurrence.occurs_on, occurrence.starts_at, occurrence.grace_minutes || 15);
+      if (isLate) {
+        suggestedStatus = 'LATE';
+      }
+    }
+
+    return {
+      type: 'ACCEPTED',
+      message: `Card matched: ${fullName}. Please verify the student's photo.`,
+      occurrenceId,
+      rfidUid: cleanUid,
+      student: studentModel as any,
+      studentFullName: fullName,
+      photoLocalUri: null,
+      programCode: studentModel.course || 'BSIT',
+      yearLevel: studentModel.yearLevel || 1,
+      section: studentModel.section || '1A',
+      suggestedStatus,
+      eligible: true,
+    };
+  }
+
+  private async confirmStudentAttendanceDirect(
+    occurrenceId: string,
+    studentId: string,
+    _officerUserId: string,
+    statusOverride?: AttendanceStatus,
+    nfcCardId?: string,
+    uidNormalized?: string,
+    idempotencyKey?: string,
+    clientScannedAt?: string,
+    scanMethod: 'NFC' | 'MANUAL' = 'NFC'
+  ): Promise<{ status: string; message: string; recordId?: string }> {
+    const now = clientScannedAt || new Date().toISOString();
+    const idemp = idempotencyKey || `idemp_att_${occurrenceId}_${studentId}_${Date.now()}`;
+
+    const { data: rpcRes, error: rpcErr } = await supabase.rpc('record_attendance_scan', {
+      p_occurrence_id: occurrenceId,
+      p_student_id: studentId,
+      p_nfc_card_id: nfcCardId || null,
+      p_uid_normalized: uidNormalized || null,
+      p_status_override: statusOverride || null,
+      p_device_id: 'dev_direct',
+      p_idempotency_key: idemp,
+      p_client_scanned_at: now,
+      p_scan_method: scanMethod,
+      p_photo_checked: 1,
+    });
+
+    if (rpcErr) {
+      throw new Error(`Direct attendance recording failed: ${rpcErr.message}`);
+    }
+
+    if (rpcRes?.status === 'REJECTED') {
+      throw new Error(`Attendance rejected by server: ${rpcRes?.reason || 'Validation error'}`);
+    }
+
+    return {
+      status: rpcRes?.status || 'RECORDED',
+      message: 'Attendance confirmed successfully on Supabase!',
+      recordId: rpcRes?.record_id || rpcRes?.attendance_id,
+    };
+  }
+
   /**
    * UniTap 2.0 Photo Identity Verification Step 1:
    * Resolves student card and photo without marking attendance immediately.
@@ -58,6 +238,10 @@ export class AttendanceService {
     rawRfidUid: string,
     actorUserId?: string
   ): Promise<VerificationPromptData> {
+    if (DataModeService.isDirectSupabase()) {
+      return this.prepareNfcVerificationDirect(occurrenceId, rawRfidUid, actorUserId);
+    }
+
     const timestamp = new Date().toISOString();
     const cleanUid = (rawRfidUid || '').trim().toUpperCase().replace(/[^0-9A-F]/g, '');
 
@@ -254,6 +438,20 @@ export class AttendanceService {
     clientScannedAt?: string,
     scanMethod: 'NFC' | 'MANUAL' = 'NFC'
   ): Promise<{ status: string; message: string; recordId?: string }> {
+    if (DataModeService.isDirectSupabase()) {
+      return this.confirmStudentAttendanceDirect(
+        occurrenceId,
+        studentId,
+        officerUserId,
+        statusOverride,
+        nfcCardId,
+        uidNormalized,
+        idempotencyKey,
+        clientScannedAt,
+        scanMethod
+      );
+    }
+
     const now = clientScannedAt || new Date().toISOString();
     const occurrence = await EventsRepository.getOccurrenceById(occurrenceId);
     let status: AttendanceStatus = statusOverride || 'PRESENT';
@@ -392,6 +590,10 @@ export class AttendanceService {
       }
     }
 
+    if (DataModeService.isDirectSupabase()) {
+      return;
+    }
+
     // Always update local SQLite and enqueue outbox VOID operation
     await AttendanceRepository.voidAttendance(attendanceId, reason, officerUserId, expectedVersion);
   }
@@ -437,6 +639,10 @@ export class AttendanceService {
       }
     }
 
+    if (DataModeService.isDirectSupabase()) {
+      return;
+    }
+
     // Always update local SQLite and enqueue outbox UPDATE operation
     await AttendanceRepository.recheckAttendance(attendanceId, reason, officerUserId, targetStatus, expectedVersion);
   }
@@ -473,6 +679,25 @@ export class AttendanceService {
   }
 
   async getScanLogs(occurrenceId?: string): Promise<AttendanceScanLog[]> {
+    if (DataModeService.isDirectSupabase()) {
+      let query = supabase.from('attendance_scan_audit_logs').select('*').order('occurred_at', { ascending: false });
+      if (occurrenceId) query = query.eq('occurrence_id', occurrenceId);
+      const { data, error } = await query;
+      if (error) {
+        return [];
+      }
+      return (data || []).map((row: any) => ({
+        id: row.id,
+        occurrenceId: row.occurrence_id,
+        studentId: row.student_id,
+        studentName: row.student_name || 'Student',
+        studentNumber: row.student_number || '',
+        rfidUid: row.uid_normalized || '',
+        result: row.result === 'ACCEPTED' ? 'SUCCESS' : row.result,
+        message: row.notes || row.result,
+        timestamp: row.occurred_at,
+      }));
+    }
     return this.repo.getScanLogs(occurrenceId);
   }
 
@@ -485,15 +710,15 @@ export class AttendanceService {
     event?: import('@/types/event').Event;
     occurrence?: import('@/types/event').EventOccurrence;
   }>> {
-    const allParticipants = await this.repo.getParticipants();
-    const studentParts = allParticipants.filter(p => p.studentId === studentId);
+    const allParticipants = await eventService.getParticipants();
+    const studentParts = allParticipants.filter((p) => p.studentId === studentId);
     const events = await eventService.getEvents();
     const occurrences = await eventService.getOccurrences();
 
-    return studentParts.map(part => ({
+    return studentParts.map((part) => ({
       participant: part,
-      event: events.find(e => e.id === part.eventId),
-      occurrence: occurrences.find(o => o.id === part.occurrenceId)
+      event: events.find((e) => e.id === part.eventId),
+      occurrence: occurrences.find((o) => o.id === part.occurrenceId),
     }));
   }
 }

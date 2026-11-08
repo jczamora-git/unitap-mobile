@@ -1,6 +1,8 @@
 import { getDatabase } from '../database';
 import type { DatabaseAdapter } from '../adapters/database-adapter.interface';
 import type { AttendanceRecord, AttendanceAttemptRecord } from '../../types/database';
+import { DataModeService } from '@/services/data-mode.service';
+import { supabase } from '@/integrations/supabase/client';
 
 export interface AttendanceRecordWithStudent extends AttendanceRecord {
   school_id: string;
@@ -292,6 +294,17 @@ export class AttendanceRepository {
     studentId: string,
     adapter?: DatabaseAdapter
   ): Promise<AttendanceRecord | null> {
+    if (!adapter && DataModeService.isDirectSupabase()) {
+      const { data, error } = await supabase
+        .from('attendance_records')
+        .select('*')
+        .eq('occurrence_id', occurrenceId)
+        .eq('student_id', studentId)
+        .maybeSingle();
+      if (error || !data) return null;
+      return data as AttendanceRecord;
+    }
+
     const db = await this.getDb(adapter);
     return db.queryOne<AttendanceRecord>(
       'SELECT * FROM attendance_records WHERE occurrence_id = ? AND student_id = ?',
@@ -303,6 +316,45 @@ export class AttendanceRepository {
     occurrenceId: string,
     adapter?: DatabaseAdapter
   ): Promise<AttendanceRecordWithStudent[]> {
+    if (!adapter && DataModeService.isDirectSupabase()) {
+      const { data: records, error } = await supabase
+        .from('attendance_records')
+        .select('*')
+        .eq('occurrence_id', occurrenceId)
+        .order('checked_in_at', { ascending: false });
+      if (error) throw new Error(`Failed to query attendance records from Supabase: ${error.message}`);
+
+      const studentIds = Array.from(new Set((records || []).map((r: any) => r.student_id).filter(Boolean)));
+      const [stuRes, enrRes] = await Promise.all([
+        studentIds.length > 0
+          ? supabase.from('students').select('*').in('id', studentIds)
+          : Promise.resolve({ data: [] }),
+        studentIds.length > 0
+          ? supabase.from('student_enrollments').select('*').in('student_id', studentIds)
+          : Promise.resolve({ data: [] }),
+      ]);
+
+      const stuMap = new Map<string, any>();
+      for (const s of (stuRes.data || [])) stuMap.set(s.id, s);
+      const enrMap = new Map<string, any>();
+      for (const e of (enrRes.data || [])) enrMap.set(e.student_id, e);
+
+      return (records || []).map((ar: any) => {
+        const s = stuMap.get(ar.student_id);
+        const enr = enrMap.get(ar.student_id);
+        return {
+          ...ar,
+          school_id: s?.school_id || '',
+          first_name: s?.first_name || '',
+          middle_name: s?.middle_name || null,
+          last_name: s?.last_name || '',
+          photo_local_uri: s?.photo_storage_path || null,
+          year_level: enr?.year_level || 1,
+          section: enr?.section || '1A',
+        };
+      });
+    }
+
     const db = await this.getDb(adapter);
     return db.query<AttendanceRecordWithStudent>(
       `SELECT ar.*, s.school_id, s.first_name, s.middle_name, s.last_name, s.photo_local_uri,
@@ -323,6 +375,52 @@ export class AttendanceRepository {
     semesterId?: string,
     adapter?: DatabaseAdapter
   ): Promise<(AttendanceRecord & { event_title: string; occurrence_title: string; occurs_on: string })[]> {
+    if (!adapter && DataModeService.isDirectSupabase()) {
+      const { data: records, error } = await supabase
+        .from('attendance_records')
+        .select('*')
+        .eq('student_id', studentId)
+        .order('checked_in_at', { ascending: false });
+      if (error) throw new Error(`Failed to query student attendance history from Supabase: ${error.message}`);
+
+      const occIds = Array.from(new Set((records || []).map((r: any) => r.occurrence_id).filter(Boolean)));
+      let occs: any[] = [];
+      let evs: any[] = [];
+      if (occIds.length > 0) {
+        const { data: occData } = await supabase.from('event_occurrences').select('*').in('id', occIds);
+        occs = occData || [];
+        const evIds = Array.from(new Set(occs.map((o: any) => o.event_id).filter(Boolean)));
+        if (evIds.length > 0) {
+          let evQuery = supabase.from('events').select('*').in('id', evIds);
+          if (semesterId) evQuery = evQuery.eq('semester_id', semesterId);
+          const { data: evData } = await evQuery;
+          evs = evData || [];
+        }
+      }
+
+      const occMap = new Map<string, any>();
+      for (const o of occs) occMap.set(o.id, o);
+      const evMap = new Map<string, any>();
+      for (const e of evs) evMap.set(e.id, e);
+
+      return (records || [])
+        .filter((ar: any) => {
+          const occ = occMap.get(ar.occurrence_id);
+          const ev = occ ? evMap.get(occ.event_id) : null;
+          return !semesterId || ev;
+        })
+        .map((ar: any) => {
+          const occ = occMap.get(ar.occurrence_id);
+          const ev = occ ? evMap.get(occ.event_id) : null;
+          return {
+            ...ar,
+            event_title: ev?.title || 'Campus Event',
+            occurrence_title: occ?.title || 'Attendance Session',
+            occurs_on: occ?.occurs_on || '',
+          };
+        });
+    }
+
     const db = await this.getDb(adapter);
     let sql = `
       SELECT ar.*, ev.title as event_title, eo.title as occurrence_title, eo.occurs_on

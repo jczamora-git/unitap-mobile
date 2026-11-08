@@ -1,5 +1,7 @@
 import { ReportsRepository, type StudentObligationReportRow, type CategorySummaryReportRow, type CombinedFinancialSummary } from '../database/repositories/reports.repository';
 import { formatCentavosToPesos } from '@/utilities/finance-formatters';
+import { DataModeService } from './data-mode.service';
+import { supabase } from '@/integrations/supabase/client';
 
 export interface ReportFilterOptions {
   semesterId: string;
@@ -10,6 +12,101 @@ export interface ReportFilterOptions {
 
 export class ReportService {
   public static async getObligationsReport(filters: ReportFilterOptions): Promise<StudentObligationReportRow[]> {
+    if (DataModeService.isDirectSupabase()) {
+      let query = supabase
+        .from('student_obligations')
+        .select('*')
+        .eq('semester_id', filters.semesterId);
+
+      if (filters.type) {
+        query = query.eq('type', filters.type);
+      }
+
+      const { data: obs, error } = await query;
+      if (error) {
+        throw new Error(`Failed to query financial report from Supabase: ${error.message}`);
+      }
+
+      const obIds = (obs || []).map((o: any) => o.id);
+      let allocs: any[] = [];
+      const postedPaymentIds = new Set<string>();
+
+      if (obIds.length > 0) {
+        const { data: allocData } = await supabase
+          .from('payment_allocations')
+          .select('*')
+          .in('obligation_id', obIds);
+        allocs = allocData || [];
+
+        const payIds = Array.from(new Set(allocs.map((a: any) => a.payment_id).filter(Boolean)));
+        if (payIds.length > 0) {
+          const { data: payData } = await supabase
+            .from('payments')
+            .select('id, status')
+            .in('id', payIds)
+            .eq('status', 'POSTED');
+          for (const p of payData || []) {
+            postedPaymentIds.add(p.id);
+          }
+        }
+      }
+
+      const paidByObId = new Map<string, number>();
+      for (const a of allocs) {
+        if (postedPaymentIds.has(a.payment_id)) {
+          paidByObId.set(
+            a.obligation_id,
+            (paidByObId.get(a.obligation_id) || 0) + Number(a.amount_centavos || 0)
+          );
+        }
+      }
+
+      const studentIds = Array.from(new Set((obs || []).map((o: any) => o.student_id).filter(Boolean)));
+      const [studentsRes, enrollmentsRes] = await Promise.all([
+        studentIds.length > 0
+          ? supabase.from('students').select('id, school_id, first_name, middle_name, last_name').in('id', studentIds)
+          : Promise.resolve({ data: [] }),
+        studentIds.length > 0
+          ? supabase.from('student_enrollments').select('*').eq('semester_id', filters.semesterId).in('student_id', studentIds)
+          : Promise.resolve({ data: [] }),
+      ]);
+
+      const studentMap = new Map<string, any>();
+      for (const s of (studentsRes.data || [])) studentMap.set(s.id, s);
+
+      const enrollmentMap = new Map<string, any>();
+      for (const e of (enrollmentsRes.data || [])) enrollmentMap.set(e.student_id, e);
+
+      const rows: StudentObligationReportRow[] = [];
+      for (const row of (obs || []) as any[]) {
+        const student = studentMap.get(row.student_id);
+        if (!student) continue;
+        const enr = enrollmentMap.get(row.student_id);
+
+        if (filters.yearLevel && enr?.year_level !== filters.yearLevel) continue;
+        if (filters.section && enr?.section?.toLowerCase() !== filters.section.toLowerCase()) continue;
+
+        const paid = paidByObId.get(row.id) || 0;
+        const assessed = Number(row.amount_centavos || 0);
+        const balance = Math.max(0, assessed - paid);
+
+        rows.push({
+          school_id: student.school_id,
+          first_name: student.first_name,
+          middle_name: student.middle_name,
+          last_name: student.last_name,
+          year_level: enr?.year_level || 1,
+          section: enr?.section || '1A',
+          obligation_type: row.type,
+          title: row.title,
+          assessed_centavos: assessed,
+          paid_centavos: paid,
+          balance_centavos: balance,
+        });
+      }
+      return rows;
+    }
+
     return ReportsRepository.getStudentObligationsReport(filters.semesterId, {
       type: filters.type,
       yearLevel: filters.yearLevel,
@@ -18,10 +115,47 @@ export class ReportService {
   }
 
   public static async getCategorySummary(semesterId: string): Promise<CategorySummaryReportRow[]> {
+    if (DataModeService.isDirectSupabase()) {
+      const rows = await this.getObligationsReport({ semesterId });
+      const fines = rows.filter((r) => r.obligation_type === 'FINE');
+      const contribs = rows.filter((r) => r.obligation_type === 'CONTRIBUTION');
+
+      const sumCat = (items: StudentObligationReportRow[], type: 'FINE' | 'CONTRIBUTION'): CategorySummaryReportRow => ({
+        type,
+        obligations_count: items.length,
+        assessed_centavos: items.reduce((sum, r) => sum + r.assessed_centavos, 0),
+        paid_centavos: items.reduce((sum, r) => sum + r.paid_centavos, 0),
+        outstanding_centavos: items.reduce((sum, r) => sum + r.balance_centavos, 0),
+      });
+
+      return [sumCat(fines, 'FINE'), sumCat(contribs, 'CONTRIBUTION')];
+    }
     return ReportsRepository.getCategorySummaryReport(semesterId);
   }
 
   public static async getCombinedSummary(semesterId: string): Promise<CombinedFinancialSummary> {
+    if (DataModeService.isDirectSupabase()) {
+      const cat = await this.getCategorySummary(semesterId);
+      const fines = cat.find((c) => c.type === 'FINE') || { obligations_count: 0, assessed_centavos: 0, paid_centavos: 0, outstanding_centavos: 0, type: 'FINE' as const };
+      const contribs = cat.find((c) => c.type === 'CONTRIBUTION') || { obligations_count: 0, assessed_centavos: 0, paid_centavos: 0, outstanding_centavos: 0, type: 'CONTRIBUTION' as const };
+
+      return {
+        fines: {
+          assessed_centavos: fines.assessed_centavos,
+          paid_centavos: fines.paid_centavos,
+          outstanding_centavos: fines.outstanding_centavos,
+          count: fines.obligations_count,
+        },
+        contributions: {
+          assessed_centavos: contribs.assessed_centavos,
+          paid_centavos: contribs.paid_centavos,
+          outstanding_centavos: contribs.outstanding_centavos,
+          count: contribs.obligations_count,
+        },
+        overall_collected_centavos: fines.paid_centavos + contribs.paid_centavos,
+        overall_outstanding_centavos: fines.outstanding_centavos + contribs.outstanding_centavos,
+      };
+    }
     return ReportsRepository.getCombinedFinancialSummary(semesterId);
   }
 

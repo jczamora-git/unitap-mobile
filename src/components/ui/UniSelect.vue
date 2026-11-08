@@ -1,8 +1,14 @@
 <script setup lang="ts">
 import { ref, computed, inject } from 'vue';
 import { IonIcon, actionSheetController } from '@ionic/vue';
-import { chevronDownOutline, checkmarkOutline, chevronForwardOutline } from 'ionicons/icons';
+import {
+  chevronDownOutline,
+  checkmarkOutline,
+  chevronForwardOutline,
+  searchOutline,
+} from 'ionicons/icons';
 import { haptics } from '@/utilities/haptics';
+import UniSheet from './UniSheet.vue';
 
 export interface SelectOption {
   value: string | number;
@@ -17,7 +23,7 @@ interface Props {
   emptyPlaceholder?: string;
   disabled?: boolean;
   header?: string;
-  presentation?: 'dropdown' | 'embedded' | 'action-sheet';
+  presentation?: 'dropdown' | 'embedded' | 'action-sheet' | 'sheet';
 }
 
 const props = withDefaults(defineProps<Props>(), {
@@ -46,6 +52,8 @@ const isEmbedded = computed(() => {
 });
 
 const isDropdownOpen = ref(false);
+const isSelectionSheetOpen = ref(false);
+const searchFilter = ref('');
 
 const selectedOption = computed(() => {
   return props.options.find((opt) => String(opt.value) === String(props.modelValue)) || null;
@@ -65,6 +73,24 @@ const isEffectivelyDisabled = computed(() => {
   return props.disabled || props.options.length === 0;
 });
 
+// Established UniTap UI rule: when a selection control has 3 or more choices, use a selection sheet
+const shouldUseSheet = computed(() => {
+  if (isEmbedded.value) return false;
+  if (props.presentation === 'dropdown') return false;
+  if (props.presentation === 'action-sheet' || props.presentation === 'sheet') return true;
+  return props.options.length >= 3;
+});
+
+const filteredOptions = computed(() => {
+  if (!searchFilter.value.trim()) return props.options;
+  const q = searchFilter.value.toLowerCase().trim();
+  return props.options.filter(
+    (opt) =>
+      opt.label.toLowerCase().includes(q) ||
+      (opt.badge && opt.badge.toLowerCase().includes(q))
+  );
+});
+
 async function handleTriggerClick() {
   if (isEffectivelyDisabled.value) return;
 
@@ -80,51 +106,30 @@ async function handleTriggerClick() {
     return;
   }
 
-  // If explicit action-sheet or more than 4 options, use action sheet controller
-  if (props.presentation === 'action-sheet' || (!props.presentation && props.options.length > 4)) {
-    isDropdownOpen.value = false;
-    await openActionSheet();
-  } else {
-    // Floating dropdown: compute viewport bounds to prevent clipping at the bottom
-    if (triggerRef.value && typeof window !== 'undefined') {
-      const rect = triggerRef.value.getBoundingClientRect();
-      const spaceBelow = window.innerHeight - rect.bottom;
-      openUpward.value = spaceBelow < 250 && rect.top > 220;
-    } else {
-      openUpward.value = false;
-    }
+  // 3 or more options, or explicit sheet/action-sheet => open Selection Sheet
+  if (shouldUseSheet.value) {
     haptics.light();
-    isDropdownOpen.value = !isDropdownOpen.value;
+    searchFilter.value = '';
+    isDropdownOpen.value = false;
+    isSelectionSheetOpen.value = true;
+    return;
   }
+
+  // Floating dropdown menu for 1-2 options: compute viewport bounds
+  if (triggerRef.value && typeof window !== 'undefined') {
+    const rect = triggerRef.value.getBoundingClientRect();
+    const spaceBelow = window.innerHeight - rect.bottom;
+    openUpward.value = spaceBelow < 250 && rect.top > 220;
+  } else {
+    openUpward.value = false;
+  }
+  haptics.light();
+  isDropdownOpen.value = !isDropdownOpen.value;
 }
 
-async function openActionSheet() {
-  haptics.light();
-  const buttons = props.options.map((opt) => {
-    const isSelected = String(opt.value) === String(props.modelValue);
-    return {
-      text: opt.label + (opt.badge ? ` (${opt.badge})` : ''),
-      role: isSelected ? 'selected' : undefined,
-      cssClass: isSelected ? 'action-sheet-selected' : undefined,
-      handler: () => {
-        selectValue(opt.value);
-      },
-    };
-  });
-
-  buttons.push({
-    text: 'Cancel',
-    role: 'cancel',
-    cssClass: 'action-sheet-cancel',
-    handler: () => {},
-  } as any);
-
-  const sheet = await actionSheetController.create({
-    header: props.header || props.placeholder || 'Select',
-    buttons,
-  });
-
-  await sheet.present();
+function handleSheetOptionSelect(val: string | number) {
+  selectValue(val);
+  isSelectionSheetOpen.value = false;
 }
 
 function selectValue(val: string | number) {
@@ -142,7 +147,7 @@ function selectValue(val: string | number) {
     class="uni-select-container"
     :class="{ 'is-disabled': isEffectivelyDisabled, 'is-active': isDropdownOpen }"
   >
-    <!-- Backdrop for custom dropdown when <= 3 options -->
+    <!-- Backdrop for custom dropdown when <= 2 options -->
     <div
       v-if="isDropdownOpen"
       class="uni-dropdown-backdrop"
@@ -155,14 +160,14 @@ function selectValue(val: string | number) {
       type="button"
       class="uni-select-trigger"
       :class="{
-        'is-open': !isEmbedded && isDropdownOpen,
+        'is-open': (!isEmbedded && isDropdownOpen) || isSelectionSheetOpen,
         'has-value': !!selectedOption,
         'is-empty': options.length === 0,
         'is-embedded': isEmbedded,
       }"
       :disabled="isEffectivelyDisabled"
       aria-haspopup="listbox"
-      :aria-expanded="isEmbedded ? false : isDropdownOpen"
+      :aria-expanded="isEmbedded ? false : (isDropdownOpen || isSelectionSheetOpen)"
       @click="handleTriggerClick"
     >
       <span class="trigger-label" :class="{ 'is-placeholder': !selectedOption }">
@@ -171,14 +176,17 @@ function selectValue(val: string | number) {
       <ion-icon
         :icon="isEmbedded ? chevronForwardOutline : chevronDownOutline"
         class="trigger-chevron"
-        :class="{ 'is-rotated': !isEmbedded && isDropdownOpen, 'is-forward': isEmbedded }"
+        :class="{
+          'is-rotated': (!isEmbedded && isDropdownOpen) || isSelectionSheetOpen,
+          'is-forward': isEmbedded,
+        }"
       />
     </button>
 
-    <!-- Custom Modern Floating Dropdown Menu (for <= 4 items) -->
+    <!-- Custom Modern Floating Dropdown Menu (for <= 2 items) -->
     <Transition name="dropdown-pop">
       <div
-        v-if="isDropdownOpen"
+        v-if="isDropdownOpen && !shouldUseSheet"
         class="uni-dropdown-menu"
         :class="{ 'is-upward': openUpward }"
         role="listbox"
@@ -203,6 +211,51 @@ function selectValue(val: string | number) {
         </button>
       </div>
     </Transition>
+
+    <!-- Global Selection Sheet for >= 3 choices -->
+    <UniSheet
+      v-model:isOpen="isSelectionSheetOpen"
+      :title="header || placeholder || 'Select Option'"
+      size="compact"
+    >
+      <div class="uni-selection-sheet-container">
+        <!-- Quick search filter for long option lists (> 7 options) -->
+        <div v-if="options.length > 7" class="selection-search-box">
+          <ion-icon :icon="searchOutline" class="selection-search-icon" />
+          <input
+            v-model="searchFilter"
+            type="text"
+            class="selection-search-input"
+            :placeholder="`Search ${header || 'options'}...`"
+          />
+        </div>
+
+        <div class="uni-selection-options-list">
+          <button
+            v-for="opt in filteredOptions"
+            :key="opt.value"
+            type="button"
+            class="uni-selection-option-row"
+            :class="{ 'is-selected': String(opt.value) === String(modelValue) }"
+            @click="handleSheetOptionSelect(opt.value)"
+          >
+            <div class="option-text-group">
+              <span class="option-label">{{ opt.label }}</span>
+              <span v-if="opt.badge" class="option-badge">{{ opt.badge }}</span>
+            </div>
+            <ion-icon
+              v-if="String(opt.value) === String(modelValue)"
+              :icon="checkmarkOutline"
+              class="option-check-icon"
+            />
+          </button>
+
+          <div v-if="filteredOptions.length === 0" class="selection-empty-hint">
+            No options match your search.
+          </div>
+        </div>
+      </div>
+    </UniSheet>
   </div>
 </template>
 
@@ -463,5 +516,162 @@ body.ion-palette-dark .uni-dropdown-item.is-selected .item-text,
 .is-disabled {
   opacity: 0.55;
   pointer-events: none;
+}
+
+/* ========================================================
+   SELECTION SHEET STYLES (FOR >= 3 OPTIONS)
+   ======================================================== */
+.uni-selection-sheet-container {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 0 4px;
+}
+
+.selection-search-box {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--uni-surface-secondary, #F1F5F9);
+  border: 1px solid var(--uni-border, #E2E8F0);
+  border-radius: 12px;
+  padding: 0 12px;
+  height: 42px;
+  margin-bottom: 4px;
+}
+
+:global(.dark) .selection-search-box,
+:global(.ion-palette-dark) .selection-search-box {
+  background: var(--uni-surface-secondary, #252830);
+  border-color: var(--uni-border, #30343D);
+}
+
+.selection-search-icon {
+  font-size: 16px;
+  color: var(--uni-text-secondary, #64748B);
+  flex-shrink: 0;
+}
+
+.selection-search-input {
+  flex: 1;
+  background: transparent;
+  border: none;
+  outline: none;
+  font-family: inherit;
+  font-size: 13.5px;
+  color: var(--uni-text, #0F172A);
+}
+
+:global(.dark) .selection-search-input,
+:global(.ion-palette-dark) .selection-search-input {
+  color: var(--uni-text, #F8FAFC);
+}
+
+.uni-selection-options-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 55vh;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+.uni-selection-option-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  min-height: 48px;
+  padding: 12px 14px;
+  border-radius: 12px;
+  background: transparent;
+  border: 1px solid transparent;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color 0.15s ease, border-color 0.15s ease;
+  user-select: none;
+  box-sizing: border-box;
+}
+
+.uni-selection-option-row:hover {
+  background: var(--uni-surface-secondary, #F1F5F9);
+}
+
+:global(.dark) .uni-selection-option-row:hover,
+:global(.ion-palette-dark) .uni-selection-option-row:hover {
+  background: var(--uni-surface-secondary, #252830);
+}
+
+.uni-selection-option-row.is-selected {
+  background: var(--uni-primary-bg, rgba(15, 118, 110, 0.08));
+  border-color: rgba(15, 118, 110, 0.2);
+}
+
+:global(.dark) .uni-selection-option-row.is-selected,
+:global(.ion-palette-dark) .uni-selection-option-row.is-selected {
+  background: rgba(94, 234, 212, 0.1);
+  border-color: rgba(94, 234, 212, 0.25);
+}
+
+.option-text-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+}
+
+.option-label {
+  font-size: 14px;
+  font-weight: 550;
+  color: var(--uni-text, #0F172A);
+  line-height: 1.35;
+}
+
+.uni-selection-option-row.is-selected .option-label {
+  color: var(--uni-primary, #0F766E);
+  font-weight: 650;
+}
+
+:global(.dark) .option-label,
+:global(.ion-palette-dark) .option-label {
+  color: var(--uni-text, #F8FAFC);
+}
+
+:global(.dark) .uni-selection-option-row.is-selected .option-label,
+:global(.ion-palette-dark) .uni-selection-option-row.is-selected .option-label {
+  color: var(--uni-primary, #5EEAD4);
+}
+
+.option-badge {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 2px 7px;
+  border-radius: 9999px;
+  background: var(--uni-surface-secondary, #E2E8F0);
+  color: var(--uni-text-secondary, #475569);
+  flex-shrink: 0;
+}
+
+.option-check-icon {
+  font-size: 19px;
+  font-weight: 700;
+  color: var(--uni-primary, #0F766E);
+  flex-shrink: 0;
+  margin-left: 8px;
+}
+
+:global(.dark) .option-check-icon,
+:global(.ion-palette-dark) .option-check-icon {
+  color: var(--uni-primary, #5EEAD4);
+}
+
+.selection-empty-hint {
+  padding: 24px 12px;
+  text-align: center;
+  font-size: 13px;
+  color: var(--uni-text-secondary, #64748B);
 }
 </style>

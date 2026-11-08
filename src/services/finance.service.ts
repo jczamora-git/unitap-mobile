@@ -5,9 +5,12 @@ import {
 } from '@/database/repositories/finance.repository';
 import { AcademicRepository } from '@/database/repositories/academic.repository';
 import { StudentsRepository } from '@/database/repositories/students.repository';
+import { PushSyncService } from '@/services/sync/push-sync.service';
 import { generateReferenceNumber, formatCentavosToPesos } from '@/utilities/finance-formatters';
 import { OperationPolicyService } from './operation-policy.service';
+import { DataModeService } from './data-mode.service';
 import { supabase } from '@/integrations/supabase/client';
+import { logDataSource } from '@/utilities/data-source-logger';
 import type {
   ObligationRuleItem,
   StudentObligationItem,
@@ -18,6 +21,8 @@ import type {
   BulkFineAssessmentResult,
   BulkContributionParams,
   BulkContributionResult,
+  ContributionCollectionItem,
+  CreateContributionCollectionParams,
   PaymentReceipt,
   FinanceSummary,
   PaymentMethod,
@@ -29,6 +34,7 @@ import type {
   WalletTransaction,
   ChargeType,
   ChargeTrigger,
+  ObligationStatus,
 } from '@/types/finance';
 
 function generateId(prefix: string): string {
@@ -55,7 +61,74 @@ export class FinanceService {
   // ==========================================================================
 
   async getRules(semesterId: string): Promise<ObligationRuleItem[]> {
+    if (DataModeService.isDirectSupabase()) {
+      let query = supabase.from('obligation_rules').select('*').order('created_at', { ascending: false });
+      if (semesterId && semesterId !== 'sem_default') {
+        query = query.eq('semester_id', semesterId);
+      }
+      const { data, error } = await query;
+      if (error) {
+        throw new Error(`Failed to load obligation rules from Supabase: ${error.message}`);
+      }
+      return (data || []).map((r) => ({
+        id: r.id,
+        semesterId: r.semester_id,
+        name: r.name,
+        type: r.type,
+        triggerType: r.trigger_type,
+        defaultAmountCentavos: Number(r.default_amount_centavos),
+        dueOn: r.due_on || null,
+        status: r.status,
+        createdAt: r.created_at,
+      }));
+    }
+
     const rules = await FinanceRepository.getRulesBySemester(semesterId);
+    return rules.map((r) => ({
+      id: r.id,
+      semesterId: r.semester_id,
+      name: r.name,
+      type: r.type,
+      triggerType: r.trigger_type,
+      defaultAmountCentavos: r.default_amount_centavos,
+      dueOn: r.due_on,
+      status: r.status,
+      createdAt: r.created_at,
+    }));
+  }
+
+  async getActiveTemplates(semesterId?: string): Promise<ObligationRuleItem[]> {
+    if (DataModeService.isDirectSupabase()) {
+      let query = supabase.from('obligation_rules').select('*').eq('status', 'ACTIVE').order('created_at', { ascending: false });
+      if (semesterId && semesterId !== 'sem_default') {
+        query = query.eq('semester_id', semesterId);
+      }
+      const { data, error } = await query;
+      if (error) {
+        throw new Error(`Failed to load obligation rules from Supabase: ${error.message}`);
+      }
+      return (data || []).map((r) => ({
+        id: r.id,
+        semesterId: r.semester_id,
+        name: r.name,
+        type: r.type,
+        triggerType: r.trigger_type,
+        defaultAmountCentavos: Number(r.default_amount_centavos),
+        dueOn: r.due_on || null,
+        status: r.status,
+        createdAt: r.created_at,
+      }));
+    }
+
+    let semId = semesterId;
+    if (!semId) {
+      const activeSem = await AcademicRepository.getActiveSemester();
+      semId = activeSem?.id;
+    }
+    let rules = await FinanceRepository.getActiveRules(semId);
+    if ((!rules || rules.length === 0) && semId) {
+      rules = await FinanceRepository.getActiveRules();
+    }
     return rules.map((r) => ({
       id: r.id,
       semesterId: r.semester_id,
@@ -87,8 +160,41 @@ export class FinanceService {
       throw new Error('Default amount must be greater than 0.');
     }
 
-    const id = generateId('rule');
+    const id = generateUuid();
     const now = new Date().toISOString();
+
+    if (DataModeService.isDirectSupabase()) {
+      let semesterId = params.semesterId;
+      if (!semesterId || semesterId === 'sem_default') {
+        const { data: semData } = await supabase.from('semesters').select('id').eq('status', 'ACTIVE').limit(1).maybeSingle();
+        semesterId = semData?.id || 'sem_2026_2027_1';
+      }
+      const { error } = await supabase.from('obligation_rules').insert({
+        id,
+        semester_id: semesterId,
+        name: params.name.trim(),
+        type: params.type,
+        trigger_type: params.triggerType,
+        default_amount_centavos: Math.round(params.defaultAmountCentavos),
+        status: 'ACTIVE',
+        created_at: now,
+      });
+      if (error) {
+        throw new Error(`Failed to create rule on Supabase: ${error.message}`);
+      }
+      return {
+        id,
+        semesterId,
+        name: params.name.trim(),
+        type: params.type,
+        triggerType: params.triggerType,
+        defaultAmountCentavos: Math.round(params.defaultAmountCentavos),
+        dueOn: params.dueOn || null,
+        status: 'ACTIVE',
+        createdAt: now,
+      };
+    }
+
     await FinanceRepository.createRule({
       id,
       semester_id: params.semesterId,
@@ -153,6 +259,46 @@ export class FinanceService {
     const id = generateUuid();
     const now = new Date().toISOString();
 
+    if (DataModeService.isDirectSupabase()) {
+      let semesterId = params.semesterId;
+      if (!semesterId || semesterId === 'sem_default') {
+        const { data: semData } = await supabase.from('semesters').select('id').eq('status', 'ACTIVE').limit(1).maybeSingle();
+        semesterId = semData?.id || 'sem_2026_2027_1';
+      }
+      const { error } = await supabase.from('student_obligations').insert({
+        id,
+        student_id: params.studentId,
+        semester_id: semesterId,
+        rule_id: params.ruleId || null,
+        title: params.title.trim(),
+        type: 'FINE',
+        amount_centavos: Math.round(params.amountCentavos),
+        status: 'ACTIVE',
+        due_date: params.dueDate || null,
+        issued_at: now,
+        updated_at: now,
+      });
+      if (error) {
+        throw new Error(`Failed to assess fine on Supabase: ${error.message}`);
+      }
+      return {
+        id,
+        studentId: params.studentId,
+        semesterId,
+        ruleId: params.ruleId || null,
+        title: params.title.trim(),
+        type: 'FINE',
+        amountCentavos: Math.round(params.amountCentavos),
+        paidCentavos: 0,
+        balanceCentavos: Math.round(params.amountCentavos),
+        status: 'UNPAID',
+        dueDate: params.dueDate || null,
+        issuedByUserId: params.actorUserId || null,
+        issuedAt: now,
+        updatedAt: now,
+      };
+    }
+
     await FinanceRepository.assessObligation({
       id,
       student_id: params.studentId,
@@ -195,6 +341,147 @@ export class FinanceService {
     return FinanceRepository.assessBulkContributions(params);
   }
 
+  async createContributionCollection(params: CreateContributionCollectionParams): Promise<{
+    rule: ObligationRuleItem;
+    assessResult: BulkContributionResult;
+  }> {
+    await OperationPolicyService.assertPermitted('FINANCE_ASSESSMENTS_AND_RULES');
+
+    if (!params.name || !params.name.trim()) {
+      throw new Error('Contribution collection name is required.');
+    }
+    if (params.amountCentavos <= 0) {
+      throw new Error('Amount must be greater than zero centavos.');
+    }
+    if (!params.semesterId) {
+      throw new Error('Academic period (semester) is required.');
+    }
+
+    // 1. Create the underlying obligation rule (acting as the collection definition)
+    const rule = await this.createRule({
+      semesterId: params.semesterId,
+      name: params.name.trim(),
+      type: 'CONTRIBUTION',
+      triggerType: 'MANUAL',
+      defaultAmountCentavos: params.amountCentavos,
+      dueOn: params.dueDate || null,
+      actorUserId: params.actorUserId,
+    });
+
+    // 2. Assess individual student obligations linked to this collection rule
+    const assessResult = await this.assessBulkContributions({
+      semesterId: params.semesterId,
+      ruleId: rule.id,
+      title: params.name.trim(),
+      amountCentavos: params.amountCentavos,
+      dueDate: params.dueDate || null,
+      notes: params.notes || null,
+      targetScope: params.targetScope,
+      programIds: params.programIds,
+      yearLevels: params.yearLevels,
+      sections: params.sections,
+      studentIds: params.studentIds,
+      actorUserId: params.actorUserId || 'officer_user',
+    });
+
+    return { rule, assessResult };
+  }
+
+  async getContributionCollections(semesterId?: string): Promise<ContributionCollectionItem[]> {
+    let semId = semesterId;
+    if (!semId) {
+      const activeSem = await AcademicRepository.getActiveSemester();
+      semId = activeSem?.id;
+    }
+    if (!semId) return [];
+
+    const [rules, obligations] = await Promise.all([
+      this.getRules(semId),
+      this.getObligationsBySemester(semId, 'CONTRIBUTION'),
+    ]);
+
+    const contribRules = rules.filter((r) => r.type === 'CONTRIBUTION');
+    const collections: ContributionCollectionItem[] = [];
+    const accountedObligationIds = new Set<string>();
+
+    for (const rule of contribRules) {
+      const assigned = obligations.filter((o) => o.ruleId === rule.id && o.status !== 'VOID');
+      assigned.forEach((o) => accountedObligationIds.add(o.id));
+
+      const totalStudentsAssigned = assigned.length;
+      const fullyPaidCount = assigned.filter((o) => o.status === 'PAID').length;
+      const partialPaymentCount = assigned.filter((o) => o.status === 'PARTIALLY_PAID').length;
+      const unpaidCount = assigned.filter((o) => o.status === 'UNPAID').length;
+      const totalCollectedCentavos = assigned.reduce((sum, o) => sum + o.paidCentavos, 0);
+      const totalAssessedCentavos = assigned.reduce((sum, o) => sum + o.amountCentavos, 0);
+
+      let status: 'ACTIVE' | 'COMPLETED' | 'INACTIVE' = rule.status === 'ACTIVE' ? 'ACTIVE' : 'INACTIVE';
+      if (totalStudentsAssigned > 0 && fullyPaidCount === totalStudentsAssigned) {
+        status = 'COMPLETED';
+      }
+
+      collections.push({
+        id: rule.id,
+        ruleId: rule.id,
+        name: rule.name,
+        amountCentavos: rule.defaultAmountCentavos || (assigned[0]?.amountCentavos ?? 0),
+        dueDate: rule.dueOn || assigned[0]?.dueDate || null,
+        semesterId: semId,
+        totalStudentsAssigned,
+        fullyPaidCount,
+        partialPaymentCount,
+        unpaidCount,
+        totalCollectedCentavos,
+        totalAssessedCentavos,
+        status,
+        createdAt: rule.createdAt,
+      });
+    }
+
+    // Support legacy/unlinked contribution assessments (e.g. created prior to rule linkage)
+    const unlinked = obligations.filter((o) => !accountedObligationIds.has(o.id) && o.status !== 'VOID');
+    const unlinkedByTitle = new Map<string, StudentObligationItem[]>();
+    for (const u of unlinked) {
+      const list = unlinkedByTitle.get(u.title) || [];
+      list.push(u);
+      unlinkedByTitle.set(u.title, list);
+    }
+
+    for (const [title, group] of unlinkedByTitle.entries()) {
+      const totalStudentsAssigned = group.length;
+      const fullyPaidCount = group.filter((o) => o.status === 'PAID').length;
+      const partialPaymentCount = group.filter((o) => o.status === 'PARTIALLY_PAID').length;
+      const unpaidCount = group.filter((o) => o.status === 'UNPAID').length;
+      const totalCollectedCentavos = group.reduce((sum, o) => sum + o.paidCentavos, 0);
+      const totalAssessedCentavos = group.reduce((sum, o) => sum + o.amountCentavos, 0);
+      const first = group[0];
+
+      let status: 'ACTIVE' | 'COMPLETED' | 'INACTIVE' = 'ACTIVE';
+      if (totalStudentsAssigned > 0 && fullyPaidCount === totalStudentsAssigned) {
+        status = 'COMPLETED';
+      }
+
+      collections.push({
+        id: 'legacy_' + (first.batchId || title.replace(/\s+/g, '_').toLowerCase()),
+        ruleId: undefined,
+        name: title,
+        amountCentavos: first.amountCentavos,
+        dueDate: first.dueDate || null,
+        semesterId: semId,
+        totalStudentsAssigned,
+        fullyPaidCount,
+        partialPaymentCount,
+        unpaidCount,
+        totalCollectedCentavos,
+        totalAssessedCentavos,
+        status,
+        createdAt: first.issuedAt,
+      });
+    }
+
+    return collections;
+  }
+
   // ==========================================================================
   // --- 4. OBLIGATION QUERIES & VOIDING ---
   // ==========================================================================
@@ -203,14 +490,197 @@ export class FinanceService {
     studentId: string,
     semesterId?: string
   ): Promise<StudentObligationItem[]> {
+    if (DataModeService.isDirectSupabase()) {
+      let query = supabase
+        .from('student_obligations')
+        .select('*')
+        .eq('student_id', studentId)
+        .order('issued_at', { ascending: false });
+
+      if (semesterId && semesterId !== 'sem_default') {
+        query = query.eq('semester_id', semesterId);
+      }
+
+      const { data: obs, error } = await query;
+      if (error) {
+        throw new Error(`Failed to query student obligations from Supabase: ${error.message}`);
+      }
+
+      const obIds = (obs || []).map((o: any) => o.id);
+      let allocs: any[] = [];
+      const postedPaymentIds = new Set<string>();
+
+      if (obIds.length > 0) {
+        const { data: allocData } = await supabase
+          .from('payment_allocations')
+          .select('*')
+          .in('obligation_id', obIds);
+        allocs = allocData || [];
+
+        const payIds = Array.from(new Set(allocs.map((a: any) => a.payment_id).filter(Boolean)));
+        if (payIds.length > 0) {
+          const { data: payData } = await supabase
+            .from('payments')
+            .select('id, status')
+            .in('id', payIds)
+            .eq('status', 'POSTED');
+          for (const p of payData || []) {
+            postedPaymentIds.add(p.id);
+          }
+        }
+      }
+
+      const paidByObId = new Map<string, number>();
+      for (const a of allocs) {
+        if (postedPaymentIds.has(a.payment_id)) {
+          paidByObId.set(
+            a.obligation_id,
+            (paidByObId.get(a.obligation_id) || 0) + Number(a.amount_centavos || 0)
+          );
+        }
+      }
+
+      return (obs || []).map((row: any) => {
+        const paid = paidByObId.get(row.id) || 0;
+        const total = Number(row.amount_centavos || 0);
+        const balance = Math.max(0, total - paid);
+        let derivedStatus: ObligationStatus = 'UNPAID';
+        if (row.status === 'VOID') {
+          derivedStatus = 'VOID';
+        } else if (balance === 0 && total > 0) {
+          derivedStatus = 'PAID';
+        } else if (paid > 0 && balance > 0) {
+          derivedStatus = 'PARTIALLY_PAID';
+        }
+
+        return {
+          id: row.id,
+          studentId: row.student_id,
+          semesterId: row.semester_id,
+          ruleId: row.rule_id || null,
+          title: row.title,
+          type: row.type,
+          amountCentavos: total,
+          paidCentavos: paid,
+          balanceCentavos: balance,
+          status: derivedStatus,
+          dueDate: row.due_date || null,
+          issuedAt: row.issued_at,
+          updatedAt: row.updated_at,
+        };
+      });
+    }
+
+    await FinanceRepository.repairLegacyObligationIds();
     const records = await FinanceRepository.getStudentObligations(studentId, semesterId);
     return records.map(this.mapObligationRecordToItem);
+  }
+
+  async checkStudentObligationForTemplate(
+    studentId: string,
+    ruleId: string
+  ): Promise<{
+    status: 'DUE' | 'PAID' | 'NO_OBLIGATION';
+    obligation: StudentObligationItem | null;
+  }> {
+    const obligations = await this.getStudentObligations(studentId);
+    const matching = obligations.filter((o) => o.ruleId === ruleId && o.status !== 'VOID');
+    if (matching.length === 0) {
+      return { status: 'NO_OBLIGATION', obligation: null };
+    }
+    const withBalance = matching.find((o) => o.balanceCentavos > 0);
+    if (withBalance) {
+      return { status: 'DUE', obligation: withBalance };
+    }
+    return { status: 'PAID', obligation: matching[0] };
   }
 
   async getObligationsBySemester(
     semesterId: string,
     type?: 'FINE' | 'CONTRIBUTION'
   ): Promise<StudentObligationItem[]> {
+    if (DataModeService.isDirectSupabase()) {
+      let query = supabase.from('student_obligations').select('*').eq('semester_id', semesterId);
+      if (type) query = query.eq('type', type);
+      const { data: obs, error } = await query.order('issued_at', { ascending: false });
+      if (error) throw new Error(`Failed to load obligations from Supabase: ${error.message}`);
+
+      const obIds = (obs || []).map((o: any) => o.id);
+      let allocs: any[] = [];
+      const postedPaymentIds = new Set<string>();
+
+      if (obIds.length > 0) {
+        const { data: allocData } = await supabase
+          .from('payment_allocations')
+          .select('*')
+          .in('obligation_id', obIds);
+        allocs = allocData || [];
+
+        const payIds = Array.from(new Set(allocs.map((a: any) => a.payment_id).filter(Boolean)));
+        if (payIds.length > 0) {
+          const { data: payData } = await supabase
+            .from('payments')
+            .select('id, status')
+            .in('id', payIds)
+            .eq('status', 'POSTED');
+          for (const p of payData || []) {
+            postedPaymentIds.add(p.id);
+          }
+        }
+      }
+
+      const paidByObId = new Map<string, number>();
+      for (const a of allocs) {
+        if (postedPaymentIds.has(a.payment_id)) {
+          paidByObId.set(
+            a.obligation_id,
+            (paidByObId.get(a.obligation_id) || 0) + Number(a.amount_centavos || 0)
+          );
+        }
+      }
+
+      const studentIds = Array.from(new Set((obs || []).map((o: any) => o.student_id).filter(Boolean)));
+      const studentMap = new Map<string, any>();
+      if (studentIds.length > 0) {
+        const { data: stuData } = await supabase
+          .from('students')
+          .select('id, school_id, first_name, last_name')
+          .in('id', studentIds);
+        for (const s of stuData || []) {
+          studentMap.set(s.id, s);
+        }
+      }
+
+      return (obs || []).map((row: any) => {
+        const paid = paidByObId.get(row.id) || 0;
+        const total = Number(row.amount_centavos || 0);
+        const balance = Math.max(0, total - paid);
+        let derivedStatus: ObligationStatus = 'UNPAID';
+        if (row.status === 'VOID') derivedStatus = 'VOID';
+        else if (balance === 0 && total > 0) derivedStatus = 'PAID';
+        else if (paid > 0 && balance > 0) derivedStatus = 'PARTIALLY_PAID';
+
+        const s = studentMap.get(row.student_id);
+        return {
+          id: row.id,
+          studentId: row.student_id,
+          semesterId: row.semester_id,
+          ruleId: row.rule_id || null,
+          title: row.title,
+          type: row.type,
+          amountCentavos: total,
+          paidCentavos: paid,
+          balanceCentavos: balance,
+          status: derivedStatus,
+          dueDate: row.due_date || null,
+          issuedAt: row.issued_at,
+          updatedAt: row.updated_at,
+          schoolId: s?.school_id,
+          studentName: s ? `${s.last_name}, ${s.first_name}` : undefined,
+        };
+      });
+    }
+
     const records = await FinanceRepository.getObligationsBySemester(semesterId, type);
     return records.map(this.mapObligationRecordToItem);
   }
@@ -221,6 +691,20 @@ export class FinanceService {
     actorUserId: string
   ): Promise<void> {
     await OperationPolicyService.assertPermitted('FINANCE_ASSESSMENTS_AND_RULES');
+    if (DataModeService.isDirectSupabase()) {
+      const now = new Date().toISOString();
+      const { error } = await supabase
+        .from('student_obligations')
+        .update({
+          status: 'VOID',
+          updated_at: now,
+        })
+        .eq('id', obligationId);
+      if (error) {
+        throw new Error(`Failed to void obligation on Supabase: ${error.message}`);
+      }
+      return;
+    }
     return FinanceRepository.voidObligation(obligationId, reason, actorUserId);
   }
 
@@ -253,6 +737,25 @@ export class FinanceService {
     const totalAlloc = params.allocations.reduce((sum, a) => sum + a.amountCentavos, 0);
     if (totalAlloc !== params.amountCentavos) {
       throw new Error(`Total allocations (${totalAlloc}) must match payment amount (${params.amountCentavos}).`);
+    }
+
+    const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    for (const alloc of params.allocations) {
+      if (!alloc.obligationId || !UUID_REGEX.test(alloc.obligationId)) {
+        throw new Error(
+          `Invalid obligation ID in payment allocations: "${alloc.obligationId}". Obligation IDs must be valid RFC 4122 UUIDs.`
+        );
+      }
+      if (alloc.amountCentavos <= 0) {
+        throw new Error('Each allocation amount must be a positive integer in centavos.');
+      }
+    }
+
+    // Ensure any locally assessed obligations are pushed to server before RPC row-level locking
+    try {
+      await PushSyncService.pushPendingOperations();
+    } catch (pushErr) {
+      console.warn('Pre-payment push sync skipped or failed:', pushErr);
     }
 
     // Source normalization & strict validation (reject unsupported/retired sources)
@@ -300,6 +803,10 @@ export class FinanceService {
 
     const confirmedPaymentId = rpcRes.payment_id || paymentId;
     const confirmedReferenceNumber = rpcRes.reference_number || referenceNumber;
+
+    if (DataModeService.isDirectSupabase()) {
+      return { paymentId: confirmedPaymentId, referenceNumber: confirmedReferenceNumber };
+    }
 
     // 2. Mirror server-confirmed payment into local SQLite (NO outbox item created)
     await FinanceRepository.recordServerConfirmedPayment(
@@ -352,11 +859,74 @@ export class FinanceService {
       throw new Error(`Payment reversal rejected by server: ${revRes?.error || revRes?.message || 'Server did not confirm reversal.'}`);
     }
 
+    if (DataModeService.isDirectSupabase()) {
+      return;
+    }
+
     // Mirror server-confirmed reversal into local SQLite (NO outbox item created)
     await FinanceRepository.recordServerConfirmedReversal(paymentId, reason.trim(), actorUserId);
   }
 
   async getAllPayments(semesterId?: string): Promise<PaymentItem[]> {
+    if (DataModeService.isDirectSupabase()) {
+      let query = supabase.from('payments').select('*').order('processed_at', { ascending: false });
+      if (semesterId && semesterId !== 'sem_default') {
+        query = query.eq('semester_id', semesterId);
+      }
+      const { data: payments, error } = await query;
+      if (error) throw new Error(`Failed to load payments from Supabase: ${error.message}`);
+
+      const payIds = (payments || []).map((p: any) => p.id);
+      let allocs: any[] = [];
+      if (payIds.length > 0) {
+        const { data: allocData } = await supabase.from('payment_allocations').select('*').in('payment_id', payIds);
+        allocs = allocData || [];
+      }
+      const allocsByPayId = new Map<string, any[]>();
+      for (const a of allocs) {
+        const list = allocsByPayId.get(a.payment_id) || [];
+        list.push(a);
+        allocsByPayId.set(a.payment_id, list);
+      }
+
+      const studentIds = Array.from(new Set((payments || []).map((p: any) => p.student_id).filter(Boolean)));
+      const studentMap = new Map<string, any>();
+      if (studentIds.length > 0) {
+        const { data: stuData } = await supabase.from('students').select('id, school_id, first_name, last_name').in('id', studentIds);
+        for (const s of (stuData || [])) studentMap.set(s.id, s);
+      }
+
+      return (payments || []).map((p: any) => {
+        const s = studentMap.get(p.student_id);
+        const pAllocs = allocsByPayId.get(p.id) || [];
+        return {
+          id: p.id,
+          studentId: p.student_id,
+          semesterId: p.semester_id,
+          referenceNumber: p.reference_number,
+          idempotencyKey: p.idempotency_key,
+          amountCentavos: Number(p.amount_centavos),
+          source: p.source as PaymentMethod,
+          channel: p.channel as PaymentChannel,
+          status: p.status as 'POSTED' | 'REVERSED',
+          processedByUserId: p.processed_by_user_id,
+          processedAt: p.processed_at,
+          reversedAt: p.reversed_at,
+          reversedByUserId: p.reversed_by_user_id,
+          reversalReason: p.reversal_reason,
+          notes: p.notes,
+          studentSchoolId: s?.school_id,
+          studentName: s ? `${s.last_name}, ${s.first_name}` : undefined,
+          allocations: pAllocs.map((a: any) => ({
+            id: a.id,
+            paymentId: p.id,
+            obligationId: a.obligation_id,
+            amountCentavos: Number(a.amount_centavos),
+          })),
+        };
+      });
+    }
+
     const records = await FinanceRepository.getAllPayments(semesterId);
     return records.map((p) => ({
       id: p.id,
@@ -514,6 +1084,89 @@ export class FinanceService {
   // ==========================================================================
 
   async getFinanceSummary(semesterId?: string): Promise<FinanceSummary> {
+    if (DataModeService.isDirectSupabase()) {
+      let semId = semesterId;
+      if (!semId || semId === 'sem_default') {
+        const { data: activeSem } = await supabase
+          .from('semesters')
+          .select('id')
+          .eq('status', 'ACTIVE')
+          .limit(1)
+          .maybeSingle();
+        semId = activeSem?.id;
+      }
+
+      if (!semId) {
+        return {
+          totalOutstandingCentavos: 0,
+          totalPaymentsCollectedCentavos: 0,
+          totalAssessedCentavos: 0,
+          unpaidFinesCount: 0,
+          unpaidContributionsCount: 0,
+          activeFinesCount: 0,
+          activeContributionsCount: 0,
+          totalSimulatedWalletCreditsCentavos: 0,
+          unpaidChargesCount: 0,
+          activeWalletsCount: 0,
+        };
+      }
+
+      const obligations = await this.getObligationsBySemester(semId);
+
+      let totalAssessed = 0;
+      let totalOutstanding = 0;
+      let unpaidFines = 0;
+      let unpaidContribs = 0;
+      let activeFines = 0;
+      let activeContribs = 0;
+
+      for (const ob of obligations) {
+        totalAssessed += ob.amountCentavos;
+        totalOutstanding += ob.balanceCentavos;
+
+        if (ob.type === 'FINE') {
+          activeFines++;
+          if (ob.balanceCentavos > 0) unpaidFines++;
+        } else {
+          activeContribs++;
+          if (ob.balanceCentavos > 0) unpaidContribs++;
+        }
+      }
+
+      const { data: payRows } = await supabase
+        .from('payments')
+        .select('amount_centavos')
+        .eq('semester_id', semId)
+        .eq('status', 'POSTED');
+
+      const totalCollected = (payRows || []).reduce(
+        (sum: number, p: any) => sum + Number(p.amount_centavos || 0),
+        0
+      );
+
+      const summary: FinanceSummary = {
+        totalOutstandingCentavos: Math.max(0, totalOutstanding),
+        totalPaymentsCollectedCentavos: totalCollected,
+        totalAssessedCentavos: totalAssessed,
+        unpaidFinesCount: unpaidFines,
+        unpaidContributionsCount: unpaidContribs,
+        activeFinesCount: activeFines,
+        activeContributionsCount: activeContribs,
+        totalSimulatedWalletCreditsCentavos: 0,
+        unpaidChargesCount: unpaidFines + unpaidContribs,
+        activeWalletsCount: 0,
+      };
+
+      logDataSource({
+        page: 'FinanceService',
+        source: 'Supabase',
+        operation: 'SELECT finance_summary',
+        result: obligations.length,
+      });
+
+      return summary;
+    }
+
     const db = await getDatabase();
 
     let semId = semesterId;

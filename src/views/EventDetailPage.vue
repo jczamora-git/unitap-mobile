@@ -38,6 +38,9 @@ import {
   UniInput, 
   UniSelect 
 } from '@/components/ui';
+import { useToast } from '@/composables/useToast';
+
+const { showToast } = useToast();
 
 const statusOptions = [
   { value: 'PRESENT', label: 'PRESENT' },
@@ -132,9 +135,10 @@ onIonViewWillEnter(loadData);
 async function handleOpenOccurrence(occ: EventOccurrence) {
   try {
     await eventService.openOccurrence(occ.id);
+    await showToast(`Attendance session "${occ.title}" is now open for scanning`, 'success');
     await loadData();
   } catch (err: unknown) {
-    alert(err instanceof Error ? err.message : 'Error opening session');
+    await showToast(err instanceof Error ? err.message : 'Error opening session', 'error');
   }
 }
 
@@ -143,6 +147,7 @@ function confirmCloseOccurrence(occ: EventOccurrence) {
   alertMessage.value = `Closing "${occ.title}" will finalize attendance and convert any remaining unscanned students from PENDING to ABSENT. New scans will be blocked.`;
   alertAction.value = async () => {
     await eventService.closeOccurrence(occ.id);
+    await showToast(`Attendance session "${occ.title}" closed and finalized`, 'info');
     await loadData();
   };
   showAlert.value = true;
@@ -170,12 +175,13 @@ async function saveCorrection() {
       correctionReason.value || 'Manual operator adjustment'
     );
     showCorrectionModal.value = false;
+    await showToast('Participant status updated successfully', 'success');
     if (selectedOccurrence.value) {
       participants.value = await eventService.getParticipants(selectedOccurrence.value.id);
     }
     await loadData();
   } catch (err: unknown) {
-    alert(err instanceof Error ? err.message : 'Error updating participant status');
+    await showToast(err instanceof Error ? err.message : 'Error updating participant status', 'error');
   }
 }
 
@@ -190,9 +196,10 @@ async function handleAddSession() {
       gracePeriodMinutes: Number(newGrace.value) || 15
     });
     showAddSessionModal.value = false;
+    await showToast('Attendance session created successfully', 'success');
     await loadData();
   } catch (err: unknown) {
-    alert(err instanceof Error ? err.message : 'Error creating session');
+    await showToast(err instanceof Error ? err.message : 'Error creating session', 'error');
   }
 }
 </script>

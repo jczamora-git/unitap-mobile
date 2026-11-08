@@ -117,6 +117,19 @@ export function useSyncPreferences() {
     }
   }
 
+  const pushProgress = computed(() => SyncStatusService.pushProgress.value);
+  const pullProgress = computed(() => SyncStatusService.pullProgress.value);
+  const syncSummary = computed(() => SyncStatusService.syncSummary.value);
+  const confirmedUploadsCount = computed(() => SyncStatusService.confirmedUploadsCount.value);
+  const failedOpsCount = computed(() => SyncStatusService.failedOpsCount.value);
+  const blockedOpsCount = computed(() => SyncStatusService.blockedOpsCount.value);
+  const pendingPullCount = computed(() => SyncStatusService.pendingPullCount.value);
+  const totalLocalRecords = computed(() => SyncStatusService.totalLocalRecordsCount.value);
+
+  function dismissSummary() {
+    SyncStatusService.setSyncSummary(null);
+  }
+
   return {
     syncMode,
     syncStatus,
@@ -126,6 +139,15 @@ export function useSyncPreferences() {
     isSyncing,
     isRefreshing,
     syncError,
+    pushProgress,
+    pullProgress,
+    syncSummary,
+    confirmedUploadsCount,
+    failedOpsCount,
+    blockedOpsCount,
+    pendingPullCount,
+    totalLocalRecords,
+    dismissSummary,
     isPreviewOpen,
     isPreviewLoading,
     previewPlan,

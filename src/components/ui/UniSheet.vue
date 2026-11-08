@@ -1,8 +1,11 @@
 <script setup lang="ts">
-import { computed, watch, onBeforeUnmount } from 'vue';
+import { ref, computed, watch, onBeforeUnmount } from 'vue';
 import { IonIcon, useBackButton } from '@ionic/vue';
 import { closeOutline } from 'ionicons/icons';
 import { haptics } from '@/utilities/haptics';
+
+// Global stack of currently active sheet IDs for dynamic stacking & back button priority
+const activeSheetStack = ref<string[]>([]);
 
 interface Props {
   isOpen?: boolean;
@@ -30,9 +33,20 @@ const props = withDefaults(defineProps<Props>(), {
   beforeClose: undefined,
 });
 
+const instanceId = `uni_sheet_${Math.random().toString(36).slice(2, 9)}`;
+
 const isEffectiveOpen = computed(() => {
   if (props.open !== undefined) return props.open;
   return props.isOpen;
+});
+
+const sheetDepth = computed(() => {
+  const idx = activeSheetStack.value.indexOf(instanceId);
+  return idx >= 0 ? idx : 0;
+});
+
+const sheetZIndex = computed(() => {
+  return 10000 + sheetDepth.value * 100;
 });
 
 const effectiveSubtitle = computed(() => {
@@ -69,32 +83,47 @@ function handleBackdropClick() {
 
 function handleKeydown(e: KeyboardEvent) {
   if (e.key === 'Escape' && isEffectiveOpen.value) {
-    dismiss();
+    const topId = activeSheetStack.value[activeSheetStack.value.length - 1];
+    if (topId === instanceId) {
+      dismiss();
+    }
   }
 }
 
-// Lock / unlock body scroll
+// Lock / unlock body scroll & maintain sheet stack
 watch(isEffectiveOpen, (open) => {
   if (open) {
+    if (!activeSheetStack.value.includes(instanceId)) {
+      activeSheetStack.value.push(instanceId);
+    }
     document.body.style.overflow = 'hidden';
     window.addEventListener('keydown', handleKeydown);
   } else {
-    document.body.style.overflow = '';
+    activeSheetStack.value = activeSheetStack.value.filter((id) => id !== instanceId);
+    if (activeSheetStack.value.length === 0) {
+      document.body.style.overflow = '';
+    }
     window.removeEventListener('keydown', handleKeydown);
   }
 }, { immediate: true });
 
 onBeforeUnmount(() => {
-  document.body.style.overflow = '';
+  activeSheetStack.value = activeSheetStack.value.filter((id) => id !== instanceId);
+  if (activeSheetStack.value.length === 0) {
+    document.body.style.overflow = '';
+  }
   window.removeEventListener('keydown', handleKeydown);
 });
 
 useBackButton(100, (processNextHandler) => {
   if (isEffectiveOpen.value) {
-    dismiss();
-  } else {
-    processNextHandler();
+    const topId = activeSheetStack.value[activeSheetStack.value.length - 1];
+    if (topId === instanceId) {
+      dismiss();
+      return;
+    }
   }
+  processNextHandler();
 });
 </script>
 
@@ -104,6 +133,8 @@ useBackButton(100, (processNextHandler) => {
       <div 
         v-if="isEffectiveOpen" 
         class="uni-sheet-overlay" 
+        :class="{ 'is-nested-sheet': sheetDepth > 0 }"
+        :style="{ zIndex: sheetZIndex }"
         role="dialog" 
         aria-modal="true"
         @click.self="handleBackdropClick"
@@ -162,13 +193,17 @@ useBackButton(100, (processNextHandler) => {
   right: 0;
   bottom: 0;
   background: rgba(0, 0, 0, 0.48);
-  z-index: 9999;
   display: flex;
   flex-direction: column;
   justify-content: flex-end;
   align-items: center;
   backdrop-filter: blur(4px);
   -webkit-backdrop-filter: blur(4px);
+  transition: background-color 0.2s ease;
+}
+
+.uni-sheet-overlay.is-nested-sheet {
+  background: rgba(0, 0, 0, 0.42);
 }
 
 .uni-sheet-container {

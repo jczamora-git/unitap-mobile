@@ -4,6 +4,7 @@ import { RealtimeSyncService } from './realtime-sync.service';
 import { SyncStatusService } from './sync-status.service';
 import { SyncPreferenceService } from './sync-preference.service';
 import { NetworkService } from '../network.service';
+import { DataModeService } from '../data-mode.service';
 import { getDatabase } from '@/database/database';
 import { supabase } from '@/integrations/supabase/client';
 
@@ -23,6 +24,12 @@ export class SyncManager {
   private static unsubResume: (() => void) | null = null;
 
   public static async start(userId: string = 'default'): Promise<void> {
+    if (DataModeService.isDirectSupabase()) {
+      console.log('[SyncManager] Direct Supabase Mode active: background SQLite sync loops suspended.');
+      SyncStatusService.setState('DIRECT_MODE');
+      return;
+    }
+
     await SyncPreferenceService.init(userId);
     await NetworkService.init();
 
@@ -81,13 +88,60 @@ export class SyncManager {
     try {
       const db = await getDatabase();
       const outboxRow = await db.queryOne<{ count: number }>(
-        'SELECT count(*) as count FROM sync_outbox'
+        'SELECT count(*) as count FROM sync_outbox WHERE synced_at IS NULL'
+      );
+      const failedRow = await db.queryOne<{ count: number }>(
+        'SELECT count(*) as count FROM sync_outbox WHERE (last_error IS NOT NULL OR retry_count > 0) AND synced_at IS NULL'
       );
       const conflictRow = await db.queryOne<{ count: number }>(
         "SELECT count(*) as count FROM sync_conflicts WHERE status = 'OPEN'"
       );
+      const confirmedRow = await db.queryOne<{ count: number }>(
+        "SELECT count(*) as count FROM sync_audit_logs WHERE direction = 'PUSH' AND status = 'SUCCESS'"
+      );
+      const checkpointRow = await db.queryOne<{ count: number }>(
+        "SELECT count(*) as count FROM entity_sync_checkpoints WHERE last_sync_status != 'SUCCESS' OR records_pulled = 0"
+      );
+
       SyncStatusService.setPendingCount(outboxRow?.count || 0);
+      SyncStatusService.setFailedOpsCount(failedRow?.count || 0);
       SyncStatusService.setConflictCount(conflictRow?.count || 0);
+      SyncStatusService.setConfirmedUploadsCount(confirmedRow?.count || 0);
+      SyncStatusService.setPendingPullCount(checkpointRow?.count || 0);
+
+      // Total local domain records (indexed fast query)
+      try {
+        const localCounts = await db.queryOne<{ total: number }>(`
+          SELECT (
+            (SELECT COUNT(*) FROM students) +
+            (SELECT COUNT(*) FROM student_enrollments) +
+            (SELECT COUNT(*) FROM attendance_records) +
+            (SELECT COUNT(*) FROM student_obligations) +
+            (SELECT COUNT(*) FROM obligation_rules) +
+            (SELECT COUNT(*) FROM payments) +
+            (SELECT COUNT(*) FROM payment_allocations) +
+            (SELECT COUNT(*) FROM events) +
+            (SELECT COUNT(*) FROM event_occurrences) +
+            (SELECT COUNT(*) FROM nfc_cards) +
+            (SELECT COUNT(*) FROM academic_years) +
+            (SELECT COUNT(*) FROM semesters)
+          ) as total
+        `);
+        SyncStatusService.setTotalLocalRecordsCount(localCounts?.total ?? 0);
+      } catch {
+        SyncStatusService.setTotalLocalRecordsCount(null);
+      }
+
+      // Hydrate last successful sync timestamp and readiness state from SQLite
+      const stateRow = await db.queryOne<{ last_success_at: string | null }>(
+        'SELECT last_success_at FROM sync_state WHERE last_success_at IS NOT NULL ORDER BY last_success_at DESC LIMIT 1'
+      );
+      if (stateRow?.last_success_at) {
+        SyncStatusService.setLastSync(stateRow.last_success_at);
+        if (SyncStatusService.hydration.value === 'NOT_INITIALIZED') {
+          SyncStatusService.setHydration('READY');
+        }
+      }
     } catch (err) {
       console.warn('[SyncManager] Could not refresh counts from SQLite:', err);
     }
@@ -153,6 +207,10 @@ export class SyncManager {
    * Duplicate calls within delayMs are coalesced into a single execution.
    */
   public static triggerDebouncedSync(delayMs: number = 1000): void {
+    if (DataModeService.isDirectSupabase()) {
+      return;
+    }
+
     if (!SyncPreferenceService.isAutomatic()) {
       return;
     }
@@ -178,6 +236,12 @@ export class SyncManager {
    * Single-flight worker with duplicate-trigger coalescing and exponential backoff retry.
    */
   public static async syncNow(): Promise<{ pushedCount: number; errorCount: number; pulledCount: number }> {
+    if (DataModeService.isDirectSupabase()) {
+      console.log('[SyncManager] Direct Supabase Mode active: syncNow bypassed.');
+      SyncStatusService.setState('DIRECT_MODE');
+      return { pushedCount: 0, errorCount: 0, pulledCount: 0 };
+    }
+
     // Single-flight lock: if already running, queue exactly one subsequent run
     if (this.isRunning) {
       this.hasQueuedRun = true;
@@ -202,11 +266,20 @@ export class SyncManager {
         const { data: sessionData } = await supabase.auth.getSession();
         if (!sessionData?.session) {
           await this.refreshCountsFromDatabase();
-          SyncStatusService.setState('OFFLINE_READY');
+          if (NetworkService.isOnline.value) {
+            SyncStatusService.setState('AUTH_REQUIRED');
+          } else {
+            SyncStatusService.setState('OFFLINE_READY');
+          }
           return { pushedCount: 0, errorCount: 0, pulledCount: 0 };
         }
       } catch {
-        SyncStatusService.setState('OFFLINE_READY');
+        await this.refreshCountsFromDatabase();
+        if (NetworkService.isOnline.value) {
+          SyncStatusService.setState('AUTH_REQUIRED');
+        } else {
+          SyncStatusService.setState('OFFLINE_READY');
+        }
         return { pushedCount: 0, errorCount: 0, pulledCount: 0 };
       }
     }
@@ -221,15 +294,55 @@ export class SyncManager {
     try {
       // 1. Push uncommitted local operations from sync_outbox
       const pushRes = await PushSyncService.pushPendingOperations();
-      pushedCount = pushRes.pushedCount;
-      errorCount = pushRes.errorCount;
+      pushedCount = pushRes.confirmedCount;
+      errorCount = pushRes.failedCount + pushRes.blockedCount;
 
       // 2. Pull latest server deltas
-      const pullRes = await PullSyncService.pullRemoteChanges();
+      SyncStatusService.updatePullProgress({
+        isActive: true,
+        currentEntity: 'Starting...',
+        entitiesCompleted: 0,
+        totalEntities: 18,
+        recordsPulled: 0,
+        percent: 0,
+      });
+
+      const pullRes = await PullSyncService.pullRemoteChanges({
+        onProgress: (entity, current, total, pulled) => {
+          SyncStatusService.updatePullProgress({
+            isActive: true,
+            currentEntity: entity,
+            entitiesCompleted: current,
+            totalEntities: total,
+            recordsPulled: pulled,
+            percent: total > 0 ? Math.round((current / total) * 100) : 0,
+          });
+        },
+      });
       pulledCount = pullRes.appliedCount;
+      SyncStatusService.updatePullProgress({ isActive: false });
 
       // 3. Refresh SQLite counts
       await this.refreshCountsFromDatabase();
+
+      // 4. Construct authoritative Sync Summary Report
+      const isPushNothing = pushRes.attemptedCount === 0 && pushRes.blockedCount === 0 && pushRes.failedCount === 0;
+      const isCleanSuccess = pushRes.failedCount === 0 && pushRes.blockedCount === 0 && pullRes.isComplete;
+      const summaryStatus = isCleanSuccess
+        ? (isPushNothing && pullRes.appliedCount === 0 ? 'NOTHING_TO_SYNC' : 'SUCCESS')
+        : (pushedCount > 0 || pulledCount > 0 ? 'PARTIAL' : 'FAILED');
+
+      SyncStatusService.setSyncSummary({
+        timestamp: new Date().toISOString(),
+        totalAttempted: pushRes.attemptedCount,
+        confirmed: pushRes.confirmedCount,
+        failed: pushRes.failedCount,
+        stillPending: SyncStatusService.pendingCount.value,
+        conflicts: pushRes.conflictCount,
+        blocked: pushRes.blockedCount,
+        pulledCount: pullRes.appliedCount,
+        status: summaryStatus,
+      });
 
       if (errorCount === 0) {
         this.retryAttempt = 0;
@@ -246,6 +359,7 @@ export class SyncManager {
       SyncStatusService.setLastError(errMsg);
       SyncStatusService.setState('SYNC_ERROR');
       errorCount++;
+      SyncStatusService.updatePullProgress({ isActive: false });
       await this.refreshCountsFromDatabase();
       this.scheduleExponentialBackoff();
     } finally {

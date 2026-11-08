@@ -16,8 +16,13 @@ import {
 import { UniPageHeader, UniButton, UniSelect, UniSheet } from '@/components/ui';
 
 import { SystemSetupService } from '@/services/system-setup.service';
+import { DataModeService } from '@/services/data-mode.service';
+import { SupabaseAuthService } from '@/integrations/supabase/auth.service';
 import type { YearLevel } from '@/types/database';
 import { haptics } from '@/utilities/haptics';
+import { useToast } from '@/composables/useToast';
+
+const { showToast } = useToast();
 
 const yearLevels = ref<YearLevel[]>([]);
 const sectionCounts = ref<Record<string, number>>({});
@@ -45,6 +50,15 @@ const statusOptions = [
 async function loadData() {
   isLoading.value = true;
   try {
+    if (DataModeService.isDirectSupabase()) {
+      const valid = await SupabaseAuthService.hasValidCloudSession();
+      if (!valid || SupabaseAuthService.role.value !== 'DEVADMIN') {
+        isLoading.value = false;
+        await showToast('Direct Supabase Mode requires an authenticated cloud DevAdmin session. Please sign in.', 'error');
+        return;
+      }
+    }
+
     const list = await SystemSetupService.getYearLevels(true);
     yearLevels.value = list;
 
@@ -114,6 +128,7 @@ async function handleSave(isEdit: boolean) {
       showAddModal.value = false;
     }
     haptics.success();
+    await showToast(isEdit ? 'Year level updated successfully' : 'Year level created successfully', 'success');
     await loadData();
   } catch (err: unknown) {
     errorMessage.value = err instanceof Error ? err.message : 'Failed to save year level.';
@@ -127,6 +142,7 @@ async function handleToggleStatus(yl: YearLevel) {
   haptics.medium();
   try {
     await SystemSetupService.toggleYearLevelStatus(yl.id);
+    await showToast(`Year level ${yl.display_name} ${yl.status === 'ACTIVE' ? 'deactivated' : 'activated'}`, 'info');
     await loadData();
   } catch (err) {
     console.error('Failed to toggle status:', err);

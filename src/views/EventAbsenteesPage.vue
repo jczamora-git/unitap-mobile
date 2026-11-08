@@ -31,6 +31,7 @@ import type {
 } from '@/types/finance';
 import { formatPeso, centavosToPeso, pesoToCentavos } from '@/utilities/finance-formatters';
 import { formatSemesterName } from '@/utilities/presentation-formatters';
+import { useToast } from '@/composables/useToast';
 import {
   UniPageHeader,
   UniButton,
@@ -45,6 +46,7 @@ import {
 import { useOperationPolicy } from '@/composables/useOperationPolicy';
 import { haptics } from '@/utilities/haptics';
 
+const { showToast } = useToast();
 const route = useRoute();
 const { isPermitted, getDisabledReason } = useOperationPolicy();
 const canAssessFines = isPermitted('FINANCE_ASSESSMENTS_AND_RULES');
@@ -75,7 +77,6 @@ const selectedSection = ref<string>('ALL');
 // Bulk Assessment Sheet State
 const isModalOpen = ref<boolean>(false);
 const isAssessing = ref<boolean>(false);
-const assessmentSuccess = ref<string | null>(null);
 const assessmentError = ref<string | null>(null);
 
 const selectedRuleId = ref<string>('');
@@ -315,7 +316,6 @@ async function loadOccurrenceAbsentees() {
   if (!selectedOccurrenceId.value) return;
   isLoading.value = true;
   assessmentError.value = null;
-  assessmentSuccess.value = null;
 
   try {
     const result = await financeService.getAbsenteeCandidates(
@@ -408,9 +408,10 @@ async function confirmBulkAssessment() {
     });
 
     haptics.success();
-    assessmentSuccess.value = `Successfully assessed ${result.assessedCount} fines totaling ${formatPeso(
-      result.totalAssessedCentavos
-    )}. (${result.skippedCount} skipped, ${result.invalidCount} invalid).`;
+    await showToast(
+      `Assessed ${result.assessedCount} fines totaling ${formatPeso(result.totalAssessedCentavos)}.`,
+      'success'
+    );
 
     isModalOpen.value = false;
     // Reload absentee list to update already-fined indicators
@@ -496,15 +497,6 @@ onIonViewWillEnter(initializeData);
               <p>
                 Absence fines can only be assessed on officially CLOSED sessions. Please finalize attendance in the Event Manager first.
               </p>
-            </div>
-          </div>
-
-          <!-- Success Alert -->
-          <div v-if="assessmentSuccess" class="alert-box success-box">
-            <ion-icon :icon="checkmarkCircle" class="alert-icon text-success" />
-            <div class="alert-text">
-              <strong>Fines Assessed Successfully</strong>
-              <p>{{ assessmentSuccess }}</p>
             </div>
           </div>
 

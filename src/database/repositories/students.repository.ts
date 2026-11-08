@@ -2,6 +2,8 @@ import { getDatabase } from '../database';
 import type { DatabaseAdapter } from '../adapters/database-adapter.interface';
 import type { StudentRecord, ProfileConfirmation } from '../../types/database';
 import { getSchoolIdVariants, normalizeSchoolId } from '@/utilities/school-id-normalizer';
+import { DataModeService } from '@/services/data-mode.service';
+import { supabase } from '@/integrations/supabase/client';
 
 export interface StudentWithEnrollment extends StudentRecord {
   enrollment_id?: string;
@@ -84,15 +86,49 @@ export class StudentsRepository {
   }
 
   public static async getStudentById(id: string, adapter?: DatabaseAdapter): Promise<StudentRecord | null> {
+    if (!id) return null;
+    if (!adapter && DataModeService.isDirectSupabase()) {
+      const { data, error } = await supabase.from('students').select('*').eq('id', id).maybeSingle();
+      if (error || !data) return null;
+      return {
+        id: data.id,
+        school_id: data.school_id,
+        first_name: data.first_name,
+        middle_name: data.middle_name,
+        last_name: data.last_name,
+        photo_local_uri: data.photo_storage_path || null,
+        photo_content_hash: null,
+        status: data.status || 'ACTIVE',
+        created_at: data.created_at,
+        updated_at: data.updated_at,
+      };
+    }
     const db = await this.getDb(adapter);
     return db.queryOne<StudentRecord>('SELECT * FROM students WHERE id = ?', [id]);
   }
 
   public static async getStudentBySchoolId(schoolId: string, adapter?: DatabaseAdapter): Promise<StudentRecord | null> {
-    const db = await this.getDb(adapter);
     const clean = (schoolId || '').trim();
     if (!clean) return null;
 
+    if (!adapter && DataModeService.isDirectSupabase()) {
+      const { data, error } = await supabase.from('students').select('*').ilike('school_id', clean).maybeSingle();
+      if (error || !data) return null;
+      return {
+        id: data.id,
+        school_id: data.school_id,
+        first_name: data.first_name,
+        middle_name: data.middle_name,
+        last_name: data.last_name,
+        photo_local_uri: data.photo_storage_path || null,
+        photo_content_hash: null,
+        status: data.status || 'ACTIVE',
+        created_at: data.created_at,
+        updated_at: data.updated_at,
+      };
+    }
+
+    const db = await this.getDb(adapter);
     const variants = getSchoolIdVariants(clean);
     const placeholders = variants.map(() => '?').join(', ');
     return db.queryOne<StudentRecord>(
@@ -127,6 +163,69 @@ export class StudentsRepository {
     },
     adapter?: DatabaseAdapter
   ): Promise<StudentWithEnrollment[]> {
+    if (!adapter && DataModeService.isDirectSupabase()) {
+      let stuQuery = supabase.from('students').select('*').order('last_name', { ascending: true });
+      if (filters?.query) {
+        stuQuery = stuQuery.or(`school_id.ilike.%${filters.query}%,first_name.ilike.%${filters.query}%,last_name.ilike.%${filters.query}%`);
+      }
+      let enrQuery = supabase.from('student_enrollments').select('*');
+      if (filters?.semesterId) enrQuery = enrQuery.eq('semester_id', filters.semesterId);
+      if (filters?.programId) enrQuery = enrQuery.eq('program_id', filters.programId);
+      if (filters?.yearLevel !== undefined && filters?.yearLevel !== null) enrQuery = enrQuery.eq('year_level', filters.yearLevel);
+      if (filters?.section) enrQuery = enrQuery.ilike('section', filters.section.trim());
+
+      const [studentsRes, enrollmentsRes, cardsRes] = await Promise.all([
+        stuQuery,
+        enrQuery,
+        supabase.from('nfc_cards').select('*').eq('status', 'ACTIVE'),
+      ]);
+
+      if (studentsRes.error) throw new Error(`Failed to query students from Supabase: ${studentsRes.error.message}`);
+
+      const enrollmentsByStudent = new Map<string, any>();
+      for (const enr of enrollmentsRes.data || []) {
+        if (!enrollmentsByStudent.has(enr.student_id) || enr.enrollment_status === 'ENROLLED') {
+          enrollmentsByStudent.set(enr.student_id, enr);
+        }
+      }
+
+      const activeCardByStudent = new Map<string, any>();
+      for (const c of cardsRes.data || []) {
+        activeCardByStudent.set(c.student_id, c);
+      }
+
+      const results: StudentWithEnrollment[] = [];
+      for (const s of studentsRes.data || []) {
+        const enr = enrollmentsByStudent.get(s.id);
+        if (filters?.semesterId && !enr) continue;
+        if (filters?.yearLevel && enr?.year_level !== filters.yearLevel) continue;
+        if (filters?.section && enr?.section?.toLowerCase() !== filters.section.toLowerCase()) continue;
+
+        const card = activeCardByStudent.get(s.id);
+        results.push({
+          id: s.id,
+          school_id: s.school_id,
+          first_name: s.first_name,
+          middle_name: s.middle_name,
+          last_name: s.last_name,
+          photo_local_uri: s.photo_storage_path || null,
+          photo_content_hash: null,
+          status: s.status || 'ACTIVE',
+          created_at: s.created_at,
+          updated_at: s.updated_at,
+          enrollment_id: enr?.id,
+          semester_id: enr?.semester_id,
+          program_id: enr?.program_id,
+          year_level: enr?.year_level,
+          section: enr?.section,
+          enrollment_status: enr?.enrollment_status,
+          card_uid: card?.uid_normalized || null,
+          card_status: card?.status || null,
+        });
+      }
+      return results;
+    }
+
     const db = await this.getDb(adapter);
     let sql = `
       SELECT s.*,
