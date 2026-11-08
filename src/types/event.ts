@@ -33,6 +33,18 @@ export interface Event {
 
 export type OccurrenceStatus = 'SCHEDULED' | 'OPEN' | 'CLOSED' | 'CANCELLED';
 
+export type CheckpointType = 'IN' | 'OUT';
+
+export interface AttendanceCheckpoint {
+  id: string; // e.g. "chk_morning_in" or raw UUID
+  label: string; // e.g. "Morning IN"
+  type: CheckpointType; // 'IN' | 'OUT'
+  startTime?: string; // "08:00"
+  endTime?: string; // "10:00"
+  graceMinutes?: number;
+  orderIndex?: number;
+}
+
 export interface EventOccurrence {
   id: string;
   eventId: string;
@@ -42,6 +54,8 @@ export interface EventOccurrence {
   endTime: string; // "12:00"
   gracePeriodMinutes: number; // default 15
   status: OccurrenceStatus;
+  checkpoints?: AttendanceCheckpoint[];
+  activeCheckpointId?: string | null;
   openedAt?: string;
   closedAt?: string;
   createdAt: string;
@@ -56,6 +70,9 @@ export interface OccurrenceParticipant {
   occurrenceId: string;
   eventId: string;
   studentId: string;
+  checkpointId?: string;
+  checkpointLabel?: string;
+  checkpointType?: CheckpointType;
   attendanceStatus: AttendanceStatus;
   attendanceTime?: string; // ISO
   attendanceMethod?: AttendanceMethod;

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, watch, onMounted } from 'vue';
+import { ref, computed, watch } from 'vue';
 import { useRouter } from 'vue-router';
 import { 
   IonPage, 
@@ -12,7 +12,9 @@ import {
   personAddOutline, 
   searchOutline,
   closeCircleOutline,
-  schoolOutline
+  schoolOutline,
+  alertCircleOutline,
+  refreshOutline
 } from 'ionicons/icons';
 import { useStudents } from '@/composables/useStudents';
 import StudentCard from '@/components/StudentCard.vue';
@@ -31,6 +33,7 @@ const {
   searchQuery, 
   filterYear, 
   isLoading, 
+  error,
   loadStudents 
 } = useStudents();
 
@@ -45,14 +48,21 @@ watch([searchQuery, filterYear], () => {
   currentPage.value = 1;
 });
 
-
-onMounted(async () => {
-  await loadStudents();
-});
-
 onIonViewWillEnter(async () => {
-  await loadStudents();
+  try {
+    await loadStudents();
+  } catch {
+    // Handled via error reactive state
+  }
 });
+
+async function handleRetry() {
+  try {
+    await loadStudents(true);
+  } catch {
+    // Handled via error reactive state
+  }
+}
 
 function handleOpenRegister() {
   router.push('/register-student');
@@ -147,6 +157,17 @@ function toggleYearFilter(year: YearLevel) {
           <ion-spinner name="crescent" color="primary" />
           <p class="metadata-text">Loading student records...</p>
         </div>
+
+        <!-- Error State: Remote Supabase Query Failed -->
+        <UniEmptyState
+          v-else-if="error"
+          :icon="alertCircleOutline"
+          title="Failed to load students"
+          :description="error"
+          action-text="Retry"
+          :action-icon="refreshOutline"
+          @action="handleRetry"
+        />
 
         <!-- Empty State: No Students in Database -->
         <UniEmptyState

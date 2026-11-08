@@ -29,7 +29,13 @@ function onRowClick() {
 <template>
   <div class="student-directory-row tactile-press" @click="onRowClick">
     <div class="avatar-circle">
-      {{ initials }}
+      <img
+        v-if="student.photoUrl || student.photoLocalUri"
+        :src="(student.photoUrl || student.photoLocalUri) || undefined"
+        alt="Avatar"
+        class="avatar-img"
+      />
+      <span v-else>{{ initials }}</span>
     </div>
 
     <div class="student-info-col">
@@ -97,6 +103,13 @@ function onRowClick() {
   font-weight: 700;
   letter-spacing: 0.02em;
   flex-shrink: 0;
+  overflow: hidden;
+}
+
+.avatar-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
 }
 
 .student-info-col {

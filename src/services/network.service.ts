@@ -122,26 +122,39 @@ export class NetworkService {
 
   /**
    * Fast asynchronous reachability probe to determine if Supabase endpoint is reachable.
-   * Does NOT block the UI thread.
+   * Uses the properly configured Supabase client with authenticated credentials and get_current_user_role helper.
+   * Does NOT block the UI thread and avoids raw unauthenticated HEAD probes to /rest/v1/.
    */
   public static async checkServerReachability(timeoutMs: number = 3000): Promise<boolean> {
     if (!this.onlineStatus.value) return false;
 
     try {
+      const { supabase } = await import('@/integrations/supabase/client');
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), timeoutMs);
 
-      // Lightweight HEAD/OPTIONS request or fetch to Supabase URL
-      const supabaseUrl = import.meta.env.VITE_SUPABASE_URL || 'https://snqcbmroefhxkhcadidr.supabase.co';
-      const response = await fetch(`${supabaseUrl}/rest/v1/`, {
-        method: 'HEAD',
-        signal: controller.signal,
-        headers: {
-          apikey: import.meta.env.VITE_SUPABASE_ANON_KEY || '',
-        },
+      const rpcCall = supabase.rpc('get_current_user_role');
+      const rpcPromise = typeof (rpcCall as any)?.abortSignal === 'function'
+        ? (rpcCall as any).abortSignal(controller.signal)
+        : rpcCall;
+
+      const timeoutPromise = new Promise<{ error: any; status: number }>((resolve) => {
+        setTimeout(() => resolve({ error: new Error('Probe timed out'), status: 0 }), timeoutMs);
       });
+
+      const res = await Promise.race([rpcPromise, timeoutPromise]);
       clearTimeout(timer);
-      return response.status >= 200 && response.status < 500;
+
+      if (controller.signal.aborted || res?.status === 0) {
+        return false;
+      }
+
+      // If status is present, verify it is a valid non-error server response (< 500)
+      if (typeof res?.status === 'number') {
+        return res.status >= 200 && res.status < 500;
+      }
+
+      return true;
     } catch {
       return false;
     }

@@ -14,6 +14,7 @@ import {
   closeCircleOutline,
   gridOutline,
   filterOutline,
+  trashOutline,
 } from 'ionicons/icons';
 
 import {
@@ -24,17 +25,20 @@ import {
   UniFilterChip,
   UniFilterSheet,
   UniSheet,
+  UniDialog,
 } from '@/components/ui';
 
 import { SystemSetupService } from '@/services/system-setup.service';
 import { AcademicRepository } from '@/database/repositories/academic.repository';
 import { DataModeService } from '@/services/data-mode.service';
 import { SupabaseAuthService } from '@/integrations/supabase/auth.service';
+import { useAuth } from '@/composables/useAuth';
 import type { SectionRecord, YearLevel, AcademicYear, Program } from '@/types/database';
 import { haptics } from '@/utilities/haptics';
 import { useToast } from '@/composables/useToast';
 
 const { showToast } = useToast();
+const { isDevAdmin } = useAuth();
 
 const sections = ref<(SectionRecord & { year_display?: string; program_code?: string })[]>([]);
 const yearLevels = ref<YearLevel[]>([]);
@@ -320,6 +324,35 @@ async function handleToggleStatus(sec: SectionRecord) {
   }
 }
 
+const showDeleteConfirm = ref(false);
+const sectionToDelete = ref<SectionRecord | null>(null);
+const isDeleting = ref(false);
+
+function promptDelete(sec: SectionRecord) {
+  haptics.light();
+  sectionToDelete.value = sec;
+  showDeleteConfirm.value = true;
+}
+
+async function confirmDelete() {
+  if (!sectionToDelete.value) return;
+  isDeleting.value = true;
+  try {
+    await SystemSetupService.deleteSection(sectionToDelete.value.id);
+    showDeleteConfirm.value = false;
+    sectionToDelete.value = null;
+    haptics.success();
+    await showToast('Section deleted successfully', 'success');
+    await loadData();
+  } catch (err: unknown) {
+    showDeleteConfirm.value = false;
+    await showToast(err instanceof Error ? err.message : 'Cannot delete section.', 'error');
+    haptics.error();
+  } finally {
+    isDeleting.value = false;
+  }
+}
+
 onMounted(loadData);
 </script>
 
@@ -421,6 +454,15 @@ onMounted(loadData);
                   @click.stop="handleToggleStatus(child.rawSection)"
                 >
                   <ion-icon :icon="child.rawSection.status === 'ACTIVE' ? closeCircleOutline : checkmarkCircle" />
+                </button>
+                <button
+                  v-if="isDevAdmin"
+                  type="button"
+                  class="icon-action-btn delete"
+                  title="Delete Section"
+                  @click.stop="promptDelete(child.rawSection)"
+                >
+                  <ion-icon :icon="trashOutline" />
                 </button>
               </div>
             </template>
@@ -575,6 +617,17 @@ onMounted(loadData);
         </div>
       </div>
     </UniFilterSheet>
+    <!-- Delete Confirmation Dialog -->
+    <UniDialog
+      :is-open="showDeleteConfirm"
+      title="Delete Section"
+      :description="`Are you sure you want to permanently delete section '${sectionToDelete?.section_name}'? If students are enrolled in this section, deletion will be blocked.`"
+      :confirm-text="isDeleting ? 'Deleting...' : 'Delete Section'"
+      cancel-text="Cancel"
+      confirm-variant="danger"
+      @confirm="confirmDelete"
+      @cancel="showDeleteConfirm = false"
+    />
   </ion-page>
 </template>
 
@@ -830,6 +883,14 @@ onMounted(loadData);
   color: var(--uni-text, #0f172a);
   font-size: 16px;
   cursor: pointer;
+}
+
+.icon-action-btn.delete {
+  color: var(--ion-color-danger, #ef4444);
+}
+
+.icon-action-btn.delete:hover {
+  background: rgba(239, 68, 68, 0.08);
 }
 
 .dialog-form-fields,

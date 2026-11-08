@@ -27,11 +27,13 @@ import {
 import { SystemSetupService } from '@/services/system-setup.service';
 import { DataModeService } from '@/services/data-mode.service';
 import { SupabaseAuthService } from '@/integrations/supabase/auth.service';
+import { useAuth } from '@/composables/useAuth';
 import type { EventCategory } from '@/types/database';
 import { haptics } from '@/utilities/haptics';
 import { useToast } from '@/composables/useToast';
 
 const { showToast } = useToast();
+const { isDevAdmin } = useAuth();
 
 const categories = ref<EventCategory[]>([]);
 const usageCounts = ref<Record<string, number>>({});
@@ -178,6 +180,8 @@ async function handleToggleStatus(cat: EventCategory) {
   }
 }
 
+const isDeleting = ref(false);
+
 function promptDelete(cat: EventCategory) {
   haptics.light();
   activeCategoryForDelete.value = cat;
@@ -186,6 +190,7 @@ function promptDelete(cat: EventCategory) {
 
 async function confirmDelete() {
   if (!activeCategoryForDelete.value) return;
+  isDeleting.value = true;
   try {
     await SystemSetupService.deleteCategory(activeCategoryForDelete.value.id);
     showDeleteConfirm.value = false;
@@ -197,6 +202,8 @@ async function confirmDelete() {
     showDeleteConfirm.value = false;
     await showToast(err instanceof Error ? err.message : 'Cannot delete category.', 'error');
     haptics.error();
+  } finally {
+    isDeleting.value = false;
   }
 }
 
@@ -290,7 +297,7 @@ onMounted(loadData);
                   {{ cat.status === 'ACTIVE' ? 'Deactivate' : 'Activate' }}
                 </UniButton>
                 <UniButton
-                  v-if="(usageCounts[cat.id] || 0) === 0"
+                  v-if="isDevAdmin && (usageCounts[cat.id] || 0) === 0"
                   variant="destructive"
                   size="sm"
                   :icon="trashOutline"
@@ -411,7 +418,7 @@ onMounted(loadData);
         :is-open="showDeleteConfirm"
         title="Delete Event Category"
         :description="`Are you sure you want to permanently delete category '${activeCategoryForDelete?.name}'? This action cannot be undone.`"
-        confirm-text="Delete Category"
+        :confirm-text="isDeleting ? 'Deleting...' : 'Delete Category'"
         cancel-text="Keep Category"
         confirm-variant="danger"
         @confirm="confirmDelete"

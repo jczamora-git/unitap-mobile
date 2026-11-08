@@ -47,11 +47,152 @@ export function maskRfidUid(uid: string): string {
   }).join(':');
 }
 
+export const STUDENT_PHOTOS_BUCKET = 'student-profile-photos';
+
 export class StudentService {
+  private static photoUrlCache = new Map<string, string>();
+
   constructor(private repo: IStudentRepository = localStudentRepository) {}
 
   clearCache(): void {
     this.repo.clearCache();
+    StudentService.photoUrlCache.clear();
+  }
+
+  clearPhotoUrlCache(): void {
+    StudentService.photoUrlCache.clear();
+  }
+
+  // ============================================================================
+  // STUDENT PROFILE PHOTO OPERATIONS (Supabase Storage & Local Caching)
+  // ============================================================================
+
+  getStudentPhotoUrl(student?: Partial<Student> | any | null): string | null {
+    if (!student) return null;
+    if (student.photoUrl) return student.photoUrl;
+
+    const storagePath = student.photoStoragePath || student.photo_storage_path;
+    if (storagePath) {
+      if (StudentService.photoUrlCache.has(storagePath)) {
+        return StudentService.photoUrlCache.get(storagePath)!;
+      }
+      try {
+        const { data } = supabase.storage.from(STUDENT_PHOTOS_BUCKET).getPublicUrl(storagePath);
+        if (data?.publicUrl) {
+          StudentService.photoUrlCache.set(storagePath, data.publicUrl);
+          return data.publicUrl;
+        }
+      } catch (err) {
+        console.warn('[StudentService] Failed to resolve public photo URL:', err);
+      }
+    }
+
+    if (student.photoLocalUri || student.photo_local_uri) {
+      return student.photoLocalUri || student.photo_local_uri;
+    }
+
+    return null;
+  }
+
+  async uploadStudentPhoto(
+    studentId: string,
+    file: File | Blob
+  ): Promise<{ photoStoragePath: string; photoUrl: string }> {
+    await OperationPolicyService.assertPermitted('STUDENTS_CREATE_UPDATE_DEACTIVATE');
+    if (!studentId) throw new Error('Student ID is required for photo upload.');
+
+    if (file.size > 5 * 1024 * 1024) {
+      throw new Error('Photo file size exceeds the 5MB maximum limit.');
+    }
+
+    const mime = file.type || 'image/jpeg';
+    const validTypes = ['image/jpeg', 'image/png', 'image/webp', 'image/gif', 'image/jpg'];
+    if (!validTypes.includes(mime.toLowerCase())) {
+      throw new Error('Unsupported image format. Please upload a JPEG, PNG, or WEBP image.');
+    }
+
+    const ext = mime.split('/')[1]?.replace('jpeg', 'jpg') || 'jpg';
+    const storagePath = `${studentId}/profile_${Date.now()}.${ext}`;
+
+    if (DataModeService.isDirectSupabase()) {
+      const { error: uploadErr } = await supabase.storage
+        .from(STUDENT_PHOTOS_BUCKET)
+        .upload(storagePath, file, {
+          upsert: true,
+          contentType: mime,
+        });
+
+      if (uploadErr) {
+        throw new Error(`Failed to upload photo to Supabase Storage: ${uploadErr.message}`);
+      }
+
+      const { error: updateErr } = await supabase
+        .from('students')
+        .update({
+          photo_storage_path: storagePath,
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', studentId);
+
+      if (updateErr) {
+        throw new Error(`Failed to save student photo path: ${updateErr.message}`);
+      }
+
+      const photoUrl = this.getStudentPhotoUrl({ photoStoragePath: storagePath }) || '';
+      StudentService.photoUrlCache.set(storagePath, photoUrl);
+      return { photoStoragePath: storagePath, photoUrl };
+    }
+
+    // Offline / SQLite mode
+    const base64Url = await new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result as string);
+      reader.onerror = reject;
+      reader.readAsDataURL(file);
+    });
+
+    const db = await getDatabase();
+    await db.execute(
+      'UPDATE students SET photo_local_uri = ?, photo_storage_path = ?, updated_at = ? WHERE id = ?',
+      [base64Url, storagePath, new Date().toISOString(), studentId]
+    );
+
+    StudentService.photoUrlCache.set(storagePath, base64Url);
+    return { photoStoragePath: storagePath, photoUrl: base64Url };
+  }
+
+  async deleteStudentPhoto(studentId: string): Promise<void> {
+    await OperationPolicyService.assertPermitted('STUDENTS_CREATE_UPDATE_DEACTIVATE');
+    if (DataModeService.isDirectSupabase()) {
+      const { data: s } = await supabase
+        .from('students')
+        .select('photo_storage_path')
+        .eq('id', studentId)
+        .maybeSingle();
+
+      if (s?.photo_storage_path) {
+        try {
+          await supabase.storage.from(STUDENT_PHOTOS_BUCKET).remove([s.photo_storage_path]);
+          StudentService.photoUrlCache.delete(s.photo_storage_path);
+        } catch (e) {
+          console.warn('[StudentService] Remote storage delete warning:', e);
+        }
+      }
+
+      const { error } = await supabase
+        .from('students')
+        .update({ photo_storage_path: null, updated_at: new Date().toISOString() })
+        .eq('id', studentId);
+
+      if (error) throw new Error(`Failed to remove photo on Supabase: ${error.message}`);
+      return;
+    }
+
+    const db = await getDatabase();
+    await db.execute(
+      'UPDATE students SET photo_local_uri = NULL, photo_storage_path = NULL, updated_at = ? WHERE id = ?',
+      [new Date().toISOString(), studentId]
+    );
   }
 
   // ============================================================================
@@ -78,6 +219,9 @@ export class StudentService {
       note: c.note || undefined,
     }));
     const activeCard = cardRecords.find((c) => c.status === 'ACTIVE');
+    const photoStoragePath = s.photo_storage_path || null;
+    const photoLocalUri = s.photo_local_uri || null;
+    const photoUrl = this.getStudentPhotoUrl(s);
 
     return {
       id: s.id,
@@ -91,6 +235,9 @@ export class StudentService {
       rfidUid: activeCard?.rfidUid || '',
       rfidUidCompact: activeCard?.rfidUidCompact || '',
       cards: cardRecords,
+      photoStoragePath,
+      photoLocalUri,
+      photoUrl,
       status: s.status || 'ACTIVE',
       createdAt: s.created_at,
       updatedAt: s.updated_at,
@@ -107,6 +254,15 @@ export class StudentService {
 
     if (studentsRes.error) {
       throw new Error(`Failed to query students from Supabase: ${studentsRes.error.message}`);
+    }
+    if (enrollmentsRes.error) {
+      throw new Error(`Failed to query student enrollments from Supabase: ${enrollmentsRes.error.message}`);
+    }
+    if (programsRes.error) {
+      throw new Error(`Failed to query programs from Supabase: ${programsRes.error.message}`);
+    }
+    if (cardsRes.error) {
+      throw new Error(`Failed to query NFC cards from Supabase: ${cardsRes.error.message}`);
     }
 
     const programsMap = new Map<string, { code: string; name: string }>();
@@ -157,6 +313,16 @@ export class StudentService {
       supabase.from('programs').select('id, code, name'),
       supabase.from('nfc_cards').select('*').eq('student_id', id),
     ]);
+
+    if (enrollmentsRes.error) {
+      throw new Error(`Failed to query student enrollments from Supabase: ${enrollmentsRes.error.message}`);
+    }
+    if (programsRes.error) {
+      throw new Error(`Failed to query programs from Supabase: ${programsRes.error.message}`);
+    }
+    if (cardsRes.error) {
+      throw new Error(`Failed to query NFC cards from Supabase: ${cardsRes.error.message}`);
+    }
 
     const programsMap = new Map<string, { code: string; name: string }>();
     for (const prog of programsRes.data || []) {
@@ -292,6 +458,73 @@ export class StudentService {
       result: students.length,
     });
     return students;
+  }
+
+  async getStudentsByIds(ids: string[]): Promise<Student[]> {
+    if (!ids || ids.length === 0) return [];
+
+    if (DataModeService.isDirectSupabase()) {
+      const [studentsRes, enrollmentsRes, programsRes, cardsRes] = await Promise.all([
+        supabase.from('students').select('*').in('id', ids).order('last_name', { ascending: true }),
+        supabase.from('student_enrollments').select('*').in('student_id', ids),
+        supabase.from('programs').select('id, code, name'),
+        supabase.from('nfc_cards').select('*').in('student_id', ids),
+      ]);
+
+      if (studentsRes.error) {
+        throw new Error(`Failed to query students by IDs from Supabase: ${studentsRes.error.message}`);
+      }
+
+      const programsMap = new Map<string, { code: string; name: string }>();
+      for (const prog of programsRes.data || []) {
+        if (prog.id) programsMap.set(prog.id, prog);
+      }
+
+      const enrollmentsByStudent = new Map<string, any[]>();
+      for (const enr of enrollmentsRes.data || []) {
+        if (!enr.student_id) continue;
+        const list = enrollmentsByStudent.get(enr.student_id) || [];
+        list.push(enr);
+        enrollmentsByStudent.set(enr.student_id, list);
+      }
+
+      const cardsByStudent = new Map<string, any[]>();
+      for (const card of cardsRes.data || []) {
+        if (!card.student_id) continue;
+        const list = cardsByStudent.get(card.student_id) || [];
+        list.push(card);
+        cardsByStudent.set(card.student_id, list);
+      }
+
+      const mapped = (studentsRes.data || []).map((s: any) =>
+        this.assembleStudentFromParts(
+          s,
+          enrollmentsByStudent.get(s.id) || [],
+          cardsByStudent.get(s.id) || [],
+          programsMap
+        )
+      );
+
+      logDataSource({
+        page: 'StudentService',
+        source: 'Supabase',
+        operation: 'SELECT students BY IDS',
+        result: mapped.length,
+      });
+
+      return mapped;
+    }
+
+    const all = await this.repo.getAll();
+    const idSet = new Set(ids);
+    const filtered = all.filter((s) => idSet.has(s.id));
+    logDataSource({
+      page: 'StudentService',
+      source: 'SQLite',
+      operation: 'SELECT students BY IDS',
+      result: filtered.length,
+    });
+    return filtered;
   }
 
   async getStudent(id: string): Promise<Student | null> {
@@ -880,9 +1113,21 @@ export class StudentService {
       throw new Error('Student record not found.');
     }
 
+    if (DataModeService.isDirectSupabase()) {
+      const { error: delErr } = await supabase
+        .from('students')
+        .delete()
+        .eq('id', id);
+      if (delErr) {
+        throw new Error(delErr.message || 'Server failed to delete student.');
+      }
+      this.clearCache();
+      return;
+    }
+
     const now = new Date().toISOString();
 
-    // 1. Authoritative Server-side Soft-delete on Supabase
+    // 1. Authoritative Server-side Soft-delete on Supabase in hybrid/offline sync mode
     const { error: delErr } = await supabase
       .from('students')
       .update({ status: 'INACTIVE', updated_at: now })
@@ -899,10 +1144,20 @@ export class StudentService {
       .eq('status', 'ACTIVE');
 
     // 2. Commit locally
+    return this.repo.delete(id);
+  }
+
+  async deleteNfcCard(cardId: string): Promise<void> {
+    await OperationPolicyService.assertPermitted('NFC_CARD_ASSIGNMENT_REASSIGNMENT');
     if (DataModeService.isDirectSupabase()) {
+      const { error } = await supabase.from('nfc_cards').delete().eq('id', cardId);
+      if (error) throw new Error(error.message || 'Failed to delete NFC card.');
+      this.clearCache();
       return;
     }
-    return this.repo.delete(id);
+    const db = await getDatabase();
+    await db.execute('DELETE FROM nfc_cards WHERE id = ?', [cardId]);
+    this.clearCache();
   }
 
   async updateStudentEnrollment(

@@ -60,6 +60,7 @@ function navigateToAttendance() {
 }
 
 const totalStudents = ref(0);
+const studentsError = ref(false);
 const activeEventsCount = ref(0);
 const totalCheckIns = ref(0);
 const totalOutstandingCentavos = ref(0);
@@ -82,6 +83,7 @@ async function loadDashboardData() {
 
   // 1. Students KPI
   try {
+    studentsError.value = false;
     const students = await studentService.getStudents();
     totalStudents.value = students.length;
     logDataSource({
@@ -92,6 +94,7 @@ async function loadDashboardData() {
     });
   } catch (stuErr) {
     console.error('Error loading students KPI:', stuErr);
+    studentsError.value = true;
   }
 
   // 2. Events & Active Occurrence KPI
@@ -189,8 +192,9 @@ onIonViewWillEnter(loadDashboardData);
         <section class="metrics-grid">
           <UniStatCard
             label="Students"
-            :value="totalStudents"
-            meta="Registered"
+            :value="studentsError ? 'Unavailable' : totalStudents"
+            :meta="studentsError ? 'Failed to load' : 'Registered'"
+            :value-color="studentsError ? 'danger' : 'default'"
             :icon="peopleOutline"
             icon-color="mint"
             @click="navigateWithHaptic('/tabs/students')"

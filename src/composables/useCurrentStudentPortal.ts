@@ -9,6 +9,7 @@ import { studentService } from '@/services/student.service';
 import { eventService } from '@/services/event.service';
 import { AttendanceRepository } from '@/database/repositories/attendance.repository';
 import { FinanceRepository } from '@/database/repositories/finance.repository';
+import { supabase } from '@/integrations/supabase/client';
 import { formatStudentAcademicSummary, formatFullName } from '@/utilities/student-formatters';
 
 export interface StudentPortalEventItem {
@@ -51,7 +52,7 @@ export function useCurrentStudentPortal() {
   });
 
   const studentName = computed(() => {
-    if (!currentStudent.value) return 'Student';
+    if (!currentStudent.value) return '';
     return formatFullName(
       currentStudent.value.firstName,
       currentStudent.value.middleName,
@@ -103,20 +104,89 @@ export function useCurrentStudentPortal() {
 
     let candidate: Student | null = null;
 
-    if (authStudent?.id) {
+    // 1. Direct active student in auth state (never substitute auth UUID for student UUID)
+    if (authStudent?.id && (!authUser?.id || authStudent.id !== authUser.id)) {
       candidate = await studentService.getStudent(authStudent.id);
     }
 
-    if (!candidate && authUser?.student_id) {
+    // 2. Auth user record with linked student_id
+    if (!candidate && authUser?.student_id && (!authUser.id || authUser.student_id !== authUser.id)) {
       candidate = await studentService.getStudent(authUser.student_id);
     }
 
-    if (!candidate && authUser?.username) {
-      candidate = await studentService.findStudentByStudentNumber(authUser.username);
+    // 3. Direct Supabase Mode or Cloud Session Resolution
+    if (!candidate) {
+      try {
+        const { data: authData } = await supabase.auth.getUser();
+        const authUserObj = authData?.user;
+        const authUid = authUserObj?.id || authUser?.id;
+
+        if (authUid) {
+          const { data: userRow } = await supabase
+            .from('users')
+            .select('student_id, username')
+            .eq('id', authUid)
+            .maybeSingle();
+
+          // 3.1. If public.users has a linked student_id (protect against auth UUID substitution)
+          if (userRow?.student_id && userRow.student_id !== authUid) {
+            candidate = await studentService.getStudent(userRow.student_id);
+          }
+
+          // 3.2. If public.users.student_id is NULL, resolve using authenticated user's exact user_metadata.school_id
+          if (!candidate) {
+            const rawSchoolId =
+              authUserObj?.user_metadata?.school_id ||
+              (authUser as any)?.user_metadata?.school_id;
+            const metadataSchoolId =
+              typeof rawSchoolId === 'string' && !rawSchoolId.includes('@')
+                ? rawSchoolId.trim()
+                : null;
+
+            if (metadataSchoolId) {
+              const matchedStudent = await studentService.findStudentByStudentNumber(metadataSchoolId);
+              // Verify exact match against students.school_id
+              if (
+                matchedStudent &&
+                matchedStudent.studentNumber &&
+                matchedStudent.studentNumber.trim().toUpperCase() === metadataSchoolId.toUpperCase()
+              ) {
+                candidate = matchedStudent;
+
+                // Repair the missing public.users.student_id link only after an exact verified match
+                // Ensure candidate.id (student UUID) is saved, NEVER authUid
+                if (candidate.id && candidate.id !== authUid) {
+                  try {
+                    const { error: repairErr } = await supabase
+                      .from('users')
+                      .update({ student_id: candidate.id })
+                      .eq('id', authUid);
+                    if (repairErr) {
+                      console.warn('[useCurrentStudentPortal] Failed to repair student_id in public.users:', repairErr);
+                    } else {
+                      console.log(
+                        `[useCurrentStudentPortal] Repaired missing student_id link for auth user ${authUid} -> student ${candidate.id}`
+                      );
+                    }
+                  } catch (repairErr) {
+                    console.warn('[useCurrentStudentPortal] Failed to repair student_id in public.users:', repairErr);
+                  }
+                }
+              }
+            }
+          }
+        }
+      } catch (cloudErr) {
+        console.warn('[useCurrentStudentPortal] Cloud user resolution failed:', cloudErr);
+      }
     }
 
     if (candidate) {
       currentStudent.value = candidate;
+      error.value = null;
+    } else {
+      currentStudent.value = null;
+      error.value = 'No student profile is linked to this authenticated account. Please contact an officer to link your student record.';
     }
     return candidate;
   }

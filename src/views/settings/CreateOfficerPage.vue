@@ -35,6 +35,7 @@ import {
   OfficerManagementService,
   OFFICER_PERMISSIONS,
 } from '@/services/officer-management.service';
+import { StudentActivationService } from '@/services/student-activation.service';
 import type { OfficerPermissionPreset, OfficerScopeType } from '@/types/database';
 import { SystemSetupService } from '@/services/system-setup.service';
 import { authService } from '@/services/auth.service';
@@ -155,13 +156,30 @@ async function handleSearchFocus() {
   }
 }
 
-function selectStudent(st: any) {
+async function selectStudent(st: any) {
   haptics.light();
   selectedStudent.value = st;
   fullName.value = `${st.first_name} ${st.last_name}`.trim();
   email.value = st.username ? `${st.username}@univ.edu` : `${st.school_id?.toLowerCase() || 'student'}@univ.edu`;
   searchResults.value = [];
   studentSearchQuery.value = '';
+
+  // Hydrate user_id and registration status from student activation status if not already set
+  if (!st.user_id) {
+    try {
+      const details = await StudentActivationService.getStudentActivationStatus(st.student_id, st.school_id);
+      if (details.linkedUserId) {
+        selectedStudent.value.user_id = details.linkedUserId;
+        selectedStudent.value.is_registered = 1;
+        if (details.linkedUsername) {
+          selectedStudent.value.username = details.linkedUsername;
+          email.value = `${details.linkedUsername}@univ.edu`;
+        }
+      }
+    } catch (statusErr) {
+      console.warn('Could not hydrate student user account:', statusErr);
+    }
+  }
 }
 
 async function clearSelectedStudent() {
@@ -186,19 +204,20 @@ function toggleCustomPermission(perm: string) {
   }
 }
 
+const isAlreadyActiveOfficer = computed(() => {
+  return candidateType.value === 'STUDENT' && Boolean(selectedStudent.value?.is_officer);
+});
+
 const isFormValid = computed(() => {
   if (candidateType.value === 'STUDENT') {
-    return selectedStudent.value && fullName.value.trim().length > 0;
+    return selectedStudent.value && fullName.value.trim().length > 0 && !isAlreadyActiveOfficer.value;
   }
   return fullName.value.trim().length > 2 && email.value.includes('@');
 });
 
 const submitButtonLabel = computed(() => {
   if (candidateType.value === 'STUDENT') {
-    if (selectedStudent.value?.user_id && selectedStudent.value?.is_registered) {
-      return 'Confirm Officer Promotion';
-    }
-    return 'Issue Officer Activation Code';
+    return 'Promote to Officer';
   }
   return 'Send Officer Invitation';
 });
@@ -215,57 +234,29 @@ async function handleSubmit() {
 
   try {
     if (candidateType.value === 'STUDENT') {
-      const isRegistered = selectedStudent.value.user_id && selectedStudent.value.is_registered;
+      // Student-to-Officer Promotion: promotes existing authenticated student account directly
+      const res = await OfficerManagementService.promoteStudentToOfficer({
+        studentId: selectedStudent.value.student_id,
+        userId: selectedStudent.value.user_id || undefined,
+        fullName: fullName.value.trim(),
+        email: email.value.trim(),
+        permissionPreset: permissionPreset.value,
+        customPermissions: permissionPreset.value === 'CUSTOM' ? customPermissions.value : undefined,
+        academicYearId: selectedAcademicYearId.value,
+        semesterId: selectedSemesterId.value,
+        startDate: appointmentStart.value,
+        endDate: appointmentEnd.value,
+        scopeType: scopeType.value,
+        devAdminUserId,
+      });
 
-      if (isRegistered) {
-        // Registered Student: promote directly
-        const res = await OfficerManagementService.assignExistingStudentAsOfficer({
-          studentId: selectedStudent.value.student_id,
-          userId: selectedStudent.value.user_id,
-          fullName: fullName.value.trim(),
-          email: email.value.trim(),
-          permissionPreset: permissionPreset.value,
-          customPermissions: permissionPreset.value === 'CUSTOM' ? customPermissions.value : undefined,
-          academicYearId: selectedAcademicYearId.value,
-          semesterId: selectedSemesterId.value,
-          startDate: appointmentStart.value,
-          endDate: appointmentEnd.value,
-          scopeType: scopeType.value,
-          devAdminUserId,
-        });
-
-        if (!res.success) throw new Error(res.error || 'Failed to assign officer.');
-        haptics.success();
-        createdResult.value = {
-          success: true,
-          officerName: fullName.value,
-        };
-        isSuccessDialogOpen.value = true;
-      } else {
-        // Unregistered Roster Student: issue activation claim code
-        const res = await OfficerManagementService.prepareImportedStudentOfficerActivation({
-          studentId: selectedStudent.value.student_id,
-          fullName: fullName.value.trim(),
-          email: email.value.trim(),
-          permissionPreset: permissionPreset.value,
-          customPermissions: permissionPreset.value === 'CUSTOM' ? customPermissions.value : undefined,
-          academicYearId: selectedAcademicYearId.value,
-          semesterId: selectedSemesterId.value,
-          startDate: appointmentStart.value,
-          endDate: appointmentEnd.value,
-          scopeType: scopeType.value,
-          devAdminUserId,
-        });
-
-        if (!res.success) throw new Error(res.error || 'Failed to prepare officer activation.');
-        haptics.success();
-        createdResult.value = {
-          success: true,
-          officerName: fullName.value,
-          activationCode: res.rawActivationCode,
-        };
-        isSuccessDialogOpen.value = true;
-      }
+      if (!res.success) throw new Error(res.error || 'Failed to promote student to officer.');
+      haptics.success();
+      createdResult.value = {
+        success: true,
+        officerName: fullName.value,
+      };
+      isSuccessDialogOpen.value = true;
     } else {
       // External Non-Student Invite
       const res = await OfficerManagementService.inviteNewOfficer({
@@ -368,13 +359,22 @@ function handleDone() {
               <div class="selected-meta font-mono">{{ selectedStudent.school_id }}</div>
             </div>
             <div class="selected-badge">
-              <UniStatusBadge :variant="selectedStudent.is_registered ? 'success' : 'neutral'">
+              <UniStatusBadge v-if="selectedStudent.is_officer" variant="danger">
+                Active Officer
+              </UniStatusBadge>
+              <UniStatusBadge v-else :variant="selectedStudent.is_registered ? 'success' : 'neutral'">
                 {{ selectedStudent.is_registered ? 'Registered Account' : 'Roster (Awaiting Signup)' }}
               </UniStatusBadge>
             </div>
             <button type="button" class="btn-clear" title="Change Student" @click="clearSelectedStudent">
               <ion-icon :icon="closeOutline" />
             </button>
+          </div>
+
+          <!-- Duplicate Officer Warning Banner -->
+          <div v-if="selectedStudent?.is_officer" class="duplicate-officer-banner">
+            <ion-icon :icon="alertCircleOutline" />
+            <span>This student already holds an active officer appointment. Multiple active appointments are not permitted.</span>
           </div>
 
           <!-- Search Input with Auto-Suggestions -->
@@ -421,7 +421,8 @@ function handleDone() {
                   <span class="sugg-id font-mono">{{ st.school_id }}</span>
                 </div>
                 <div class="sugg-tag">
-                  <span v-if="st.is_registered" class="tag-registered">Registered</span>
+                  <span v-if="st.is_officer" class="tag-officer">Active Officer</span>
+                  <span v-else-if="st.is_registered" class="tag-registered">Registered</span>
                   <span v-else class="tag-roster">Roster</span>
                 </div>
               </div>
@@ -623,20 +624,20 @@ function handleDone() {
       </div>
     </ion-content>
 
-    <!-- Success Dialog with Activation/Invitation Code -->
+    <!-- Success Dialog: Promoted directly or External Invitation Code -->
     <UniDialog
       :is-open="isSuccessDialogOpen"
-      :title="createdResult?.activationCode ? 'Officer Code Issued' : 'Officer Assigned'"
+      :title="createdResult?.activationCode ? 'Officer Invitation Issued' : 'Officer Promoted'"
       :description="
         createdResult?.activationCode
           ? `Provide this single-use code to ${createdResult?.officerName} to complete officer enrollment.`
-          : `${createdResult?.officerName} has been assigned officer privileges.`
+          : `${createdResult?.officerName} has been successfully promoted to Officer.`
       "
       type="info"
       confirm-text="Done"
       cancel-text=""
       @confirm="handleDone"
-      @close="isSuccessDialogOpen = false"
+      @close="handleDone"
     >
       <div v-if="createdResult?.activationCode" class="dialog-code-box">
         <span class="code-label">Single-Use Activation Code</span>
@@ -798,6 +799,25 @@ function handleDone() {
   color: #ef4444;
 }
 
+.duplicate-officer-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  background: rgba(239, 68, 68, 0.12);
+  border: 1px solid rgba(239, 68, 68, 0.3);
+  border-radius: 8px;
+  color: #ef4444;
+  font-size: 0.85rem;
+  font-weight: 500;
+  margin-top: 8px;
+}
+
+.duplicate-officer-banner ion-icon {
+  font-size: 1.25rem;
+  flex-shrink: 0;
+}
+
 /* Search Input & Dropdown */
 .search-input-wrap {
   position: relative;
@@ -940,6 +960,15 @@ function handleDone() {
   border-radius: 6px;
   background: rgba(16, 185, 129, 0.15);
   color: #10b981;
+}
+
+.tag-officer {
+  font-size: 0.72rem;
+  font-weight: 700;
+  padding: 3px 7px;
+  border-radius: 6px;
+  background: rgba(245, 158, 11, 0.15);
+  color: #f59e0b;
 }
 
 .tag-roster {

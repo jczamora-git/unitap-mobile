@@ -25,6 +25,7 @@ import {
 } from 'ionicons/icons';
 import { useStudents } from '@/composables/useStudents';
 import { useToast } from '@/composables/useToast';
+import { studentService } from '@/services/student.service';
 import { financeService } from '@/services/finance.service';
 import { attendanceService } from '@/services/attendance.service';
 import { StudentActivationService, type StudentActivationDetails } from '@/services/student-activation.service';
@@ -64,6 +65,11 @@ const isStudent = computed(() => {
   return role === 'STUDENT';
 });
 
+const isDevAdmin = computed(() => {
+  const role = authService.role.value || SupabaseAuthService.role.value;
+  return role === 'DEVADMIN';
+});
+
 const isEditModalOpen = ref(false);
 const isReplaceModalOpen = ref(false);
 const activeTab = ref<'OVERVIEW' | 'ATTENDANCE' | 'FINANCE'>('OVERVIEW');
@@ -74,6 +80,60 @@ const showCodeSheet = ref(false);
 const newlyIssuedCode = ref('');
 const isIssuingCode = ref(false);
 const showAuditHistory = ref(false);
+
+// Profile photo upload state
+const isUploadingPhoto = ref(false);
+
+async function handlePhotoUpload(e: Event) {
+  const target = e.target as HTMLInputElement;
+  const file = target.files?.[0];
+  if (!file || !currentStudent.value) return;
+
+  if (!file.type.startsWith('image/')) {
+    await showToast('Please select a valid image file (JPEG, PNG, or WebP).', 'warning');
+    return;
+  }
+
+  if (file.size > 5 * 1024 * 1024) {
+    await showToast('Image file size must be less than 5MB.', 'warning');
+    return;
+  }
+
+  isUploadingPhoto.value = true;
+  try {
+    const res = await studentService.uploadStudentPhoto(currentStudent.value.id, file);
+    await showToast('Student photo updated successfully!', 'success');
+    if (currentStudent.value) {
+      currentStudent.value.photoUrl = res.photoUrl;
+      currentStudent.value.photoStoragePath = res.photoStoragePath;
+    }
+    await loadProfile();
+  } catch (err: any) {
+    await showToast(err?.message || 'Failed to upload photo', 'error');
+  } finally {
+    isUploadingPhoto.value = false;
+    target.value = '';
+  }
+}
+
+async function handleRemovePhoto() {
+  if (!currentStudent.value) return;
+  const confirmed = window.confirm('Are you sure you want to remove this student photo?');
+  if (!confirmed) return;
+
+  try {
+    await studentService.deleteStudentPhoto(currentStudent.value.id);
+    await showToast('Student photo removed', 'info');
+    if (currentStudent.value) {
+      currentStudent.value.photoUrl = undefined;
+      currentStudent.value.photoStoragePath = undefined;
+      currentStudent.value.photoLocalUri = undefined;
+    }
+    await loadProfile();
+  } catch (err: any) {
+    await showToast(err?.message || 'Failed to remove photo', 'error');
+  }
+}
 
 // Financial context
 const totalBalanceCentavos = computed(() => {
@@ -207,6 +267,10 @@ function handleCopyUid() {
 
 const showRemoveRfidDialog = ref(false);
 const showDeleteDialog = ref(false);
+const isDeletingStudent = ref(false);
+const showDeleteCardDialog = ref(false);
+const cardToDelete = ref<any>(null);
+const isDeletingCard = ref(false);
 
 async function handleDeactivateRfid() {
   if (currentStudent.value) {
@@ -218,9 +282,39 @@ async function handleDeactivateRfid() {
 
 async function handleDeleteStudent() {
   if (currentStudent.value) {
-    await deleteStudent(currentStudent.value.id);
-    await showToast('Student deleted', 'error');
-    router.replace('/tabs/students');
+    isDeletingStudent.value = true;
+    try {
+      await deleteStudent(currentStudent.value.id);
+      await showToast('Student deleted successfully', 'success');
+      showDeleteDialog.value = false;
+      router.replace('/tabs/students');
+    } catch (err: any) {
+      await showToast(err?.message || 'Cannot delete student because financial payments or allocations exist. Deactivate the student record instead.', 'error');
+    } finally {
+      isDeletingStudent.value = false;
+    }
+  }
+}
+
+function promptDeleteCard(card: any) {
+  cardToDelete.value = card;
+  showDeleteCardDialog.value = true;
+}
+
+async function confirmDeleteCard() {
+  if (!cardToDelete.value) return;
+  isDeletingCard.value = true;
+  try {
+    const { studentService } = await import('@/services/student.service');
+    await studentService.deleteNfcCard(cardToDelete.value.id);
+    await showToast('NFC card record deleted', 'success');
+    showDeleteCardDialog.value = false;
+    cardToDelete.value = null;
+    await loadProfile();
+  } catch (err: any) {
+    await showToast(err?.message || 'Failed to delete card.', 'error');
+  } finally {
+    isDeletingCard.value = false;
   }
 }
 </script>
@@ -234,7 +328,7 @@ async function handleDeleteStudent() {
       default-back-href="/tabs/students"
       variant="detail"
     >
-      <template #trailing>
+      <template #trailing v-if="isDevAdmin">
         <button class="uni-header-action-btn action-btn-danger" aria-label="Delete Student" @click="showDeleteDialog = true">
           <ion-icon :icon="trashOutline" />
         </button>
@@ -262,8 +356,36 @@ async function handleDeleteStudent() {
         <div v-else class="profile-layout">
           <!-- Hero Header Card -->
           <div class="minimal-card profile-hero-card">
-            <div class="profile-avatar-circle">
-              {{ initials }}
+            <div class="avatar-manage-wrap">
+              <div class="profile-avatar-circle">
+                <img
+                  v-if="currentStudent.photoUrl || currentStudent.photoLocalUri"
+                  :src="(currentStudent.photoUrl || currentStudent.photoLocalUri) || undefined"
+                  alt="Student Photo"
+                  class="profile-avatar-img"
+                />
+                <span v-else>{{ initials }}</span>
+              </div>
+              <div v-if="!isStudent" class="avatar-actions-bar">
+                <label class="photo-upload-label" :class="{ 'is-loading': isUploadingPhoto }">
+                  <input
+                    type="file"
+                    accept="image/jpeg,image/png,image/webp"
+                    class="hidden-file-input"
+                    @change="handlePhotoUpload"
+                  />
+                  <span>{{ isUploadingPhoto ? 'Uploading...' : (currentStudent.photoUrl || currentStudent.photoStoragePath ? 'Change Photo' : 'Upload Photo') }}</span>
+                </label>
+                <button
+                  v-if="currentStudent.photoUrl || currentStudent.photoStoragePath"
+                  type="button"
+                  class="photo-delete-icon-btn"
+                  @click="handleRemovePhoto"
+                  title="Remove Photo"
+                >
+                  <ion-icon :icon="trashOutline" />
+                </button>
+              </div>
             </div>
             <h2 class="profile-fullname">
               {{ formatFullName(currentStudent.firstName, currentStudent.middleName, currentStudent.lastName) }}
@@ -369,6 +491,15 @@ async function handleDeleteStudent() {
                     <span class="status-badge" :class="c.status === 'ACTIVE' ? 'badge-success' : 'badge-neutral'">
                       {{ c.status }}
                     </span>
+                    <button
+                      v-if="isDevAdmin"
+                      type="button"
+                      class="delete-chip-btn"
+                      title="Permanently Delete Card"
+                      @click.stop="promptDeleteCard(c)"
+                    >
+                      <ion-icon :icon="trashOutline" />
+                    </button>
                   </div>
                 </div>
               </div>
@@ -717,13 +848,26 @@ async function handleDeleteStudent() {
     <UniDialog
       v-model:is-open="showDeleteDialog"
       title="Delete Student Record?"
-      :description="`Are you sure you want to remove ${currentStudent?.firstName} ${currentStudent?.lastName}? This action cannot be undone.`"
-      confirm-text="Delete"
+      :description="`Are you sure you want to permanently delete student ${currentStudent?.firstName} ${currentStudent?.lastName} (${currentStudent?.studentNumber})? This will remove all enrollments and unassigned cards.`"
+      :confirm-text="isDeletingStudent ? 'Deleting...' : 'Delete'"
       cancel-text="Cancel"
       :destructive="true"
       type="destructive"
       @confirm="handleDeleteStudent"
       @cancel="showDeleteDialog = false"
+    />
+
+    <!-- Delete RFID Card Dialog -->
+    <UniDialog
+      v-model:is-open="showDeleteCardDialog"
+      title="Delete NFC Card Record?"
+      :description="`Are you sure you want to permanently delete card ${cardToDelete?.rfidUid || ''}? This action cannot be undone.`"
+      :confirm-text="isDeletingCard ? 'Deleting...' : 'Delete Card'"
+      cancel-text="Cancel"
+      :destructive="true"
+      type="destructive"
+      @confirm="confirmDeleteCard"
+      @cancel="showDeleteCardDialog = false"
     />
 
     <!-- Deactivate RFID Dialog -->
@@ -791,6 +935,22 @@ async function handleDeleteStudent() {
   cursor: pointer;
 }
 
+.delete-chip-btn {
+  background: transparent;
+  border: none;
+  color: var(--ion-color-danger, #ef4444);
+  padding: 2px 4px;
+  display: inline-flex;
+  align-items: center;
+  cursor: pointer;
+  border-radius: 4px;
+  margin-left: 4px;
+}
+
+.delete-chip-btn:hover {
+  background: rgba(239, 68, 68, 0.1);
+}
+
 .profile-layout {
   display: flex;
   flex-direction: column;
@@ -807,19 +967,84 @@ async function handleDeleteStudent() {
 }
 
 .profile-avatar-circle {
-  width: 52px;
-  height: 52px;
+  width: 64px;
+  height: 64px;
   border-radius: 50%;
   background: var(--app-accent-soft);
   color: var(--ion-color-primary);
-  border: 1px solid var(--app-border);
+  border: 2px solid var(--app-border);
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 17px;
+  font-size: 20px;
   font-weight: 700;
   letter-spacing: 0.02em;
-  margin-bottom: 4px;
+  overflow: hidden;
+}
+
+.avatar-manage-wrap {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.profile-avatar-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.avatar-actions-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.photo-upload-label {
+  display: inline-flex;
+  align-items: center;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 4px 10px;
+  border-radius: 9999px;
+  background: var(--app-surface-subtle);
+  border: 1px solid var(--app-border);
+  color: var(--ion-color-primary);
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.photo-upload-label:hover {
+  background: rgba(15, 118, 110, 0.1);
+  border-color: var(--ion-color-primary);
+}
+
+.photo-upload-label.is-loading {
+  opacity: 0.6;
+  pointer-events: none;
+}
+
+.hidden-file-input {
+  display: none;
+}
+
+.photo-delete-icon-btn {
+  background: none;
+  border: 1px solid var(--app-border);
+  border-radius: 50%;
+  width: 24px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #ef4444;
+  cursor: pointer;
+}
+
+.photo-delete-icon-btn:hover {
+  background: rgba(239, 68, 68, 0.1);
 }
 
 .profile-fullname {

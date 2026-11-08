@@ -1,0 +1,1250 @@
+# Direct Supabase Student Reading — Handoff Document
+
+**Date:** November 8, 2026  
+**Status:** Completed & Verified  
+**Scope:** Direct Supabase Mode Student Directory Reading, Repository Integrity, UI Error States, and Error Propagation
+
+---
+
+## 1. Confirmed Root Causes
+
+1. **Unchecked PostgREST Responses in `StudentService`**:
+   - `fetchStudentsDirect()` queried four remote tables concurrently (`students`, `student_enrollments`, `programs`, and `nfc_cards`), but only checked `studentsRes.error`.
+   - If querying enrollments, programs, or NFC cards failed (e.g., due to RLS restrictions or network issues), the errors were silently ignored and mapped to empty datasets, returning partial or empty student entities.
+   - Similarly, `fetchStudentDirectById()` omitted error checks on enrollments, programs, and cards.
+
+2. **Error Swallowing in `useStudents.loadStudents()`**:
+   - When a remote query failed, `loadStudents()` caught the error, set `error.value = msg`, and returned `[]`.
+   - Callers awaiting `loadStudents()` received an empty array and treated it as an empty database rather than an active remote query failure.
+
+3. **Missing Error Exposure & Duplicate Invocations in `StudentsPage.vue`**:
+   - `StudentsPage.vue` did not destructure or display the `error` state from `useStudents()`.
+   - When remote queries failed, `totalCount === 0` triggered the default "No students yet" empty state, misleading users into believing no students were registered.
+   - Both `onMounted` and `onIonViewWillEnter` called `loadStudents()`, causing duplicate initial remote fetches.
+
+4. **Misleading Zero KPI in `HomePage.vue`**:
+   - `loadDashboardData()` logged student query errors to `console.error` but left `totalStudents` at 0 without notifying the UI of a failure state.
+   - The Home Dashboard displayed "0 Registered" students instead of indicating an error or unavailable status.
+
+5. **Direct Mode Leakage & Unchecked Errors in `StudentsRepository`**:
+   - `StudentsRepository.getStudents()` only inspected `studentsRes.error`, omitting checks for `enrollmentsRes.error` and `cardsRes.error`.
+   - `StudentsRepository.getStudentsByCanonicalSchoolId()` had no `DataModeService.isDirectSupabase()` branch and leaked unconditionally to the local SQLite database.
+
+6. **Security & RLS Subquery Root Cause**:
+   - The live database audit revealed that `user_roles` has RLS enabled with 0 policies.
+   - Existing student and enrollment RLS policies directly query `user_roles` (`auth.uid() IN (SELECT user_id FROM user_roles WHERE ...)`). Because `user_roles` blocks unprivileged direct queries, the subquery yields empty results, causing Supabase to reject student/enrollment reads.
+   - The intended architecture uses the existing security-definer helper `get_current_user_role()`, which bypasses caller table RLS safely while maintaining server-side role resolution.
+
+---
+
+## 2. Files Modified
+
+| File | Changes Made |
+| :--- | :--- |
+| `src/services/student.service.ts` | Checked and propagated errors from all 4 Supabase queries (`students`, `student_enrollments`, `programs`, `nfc_cards`) in `fetchStudentsDirect()` and `fetchStudentDirectById()`. |
+| `src/composables/useStudents.ts` | Updated `loadStudents()` to rethrow caught errors after setting reactive `error.value`, preventing failed remote reads from returning `[]`. |
+| `src/views/StudentsPage.vue` | Destructured `error` from `useStudents()`, rendered a dedicated `UniEmptyState` error view with retry action, and removed duplicate loading from `onMounted`. |
+| `src/views/HomePage.vue` | Added `studentsError` tracking to dashboard state, rendering an "Unavailable" / "Failed to load" status on the Students metric card if query fails. |
+| `src/database/repositories/students.repository.ts` | Added Direct Supabase branch to `getStudentsByCanonicalSchoolId()` to prevent SQLite leakage; checked all query errors in `getStudents()`. |
+| `src/services/event.service.ts` | Switched `createEvent` ID generation to raw UUIDs (removing `evt_` prefix) and implemented `toSupabaseEventInsertPayload` excluding `description` (fixing PGRST204) while preserving UI and offline data. |
+| `src/database/repositories/events.repository.ts` | Implemented `toSupabaseEventPayload` in `createEvent`, stripping `evt_` prefixes and omitting `description` and `created_by_user_id` from the Supabase INSERT payload. |
+| `tests/unit/supabase-direct-diagnostic.spec.ts` | Diagnostic suite covering student error propagation, composable error re-throw, repository direct routing, and event Direct Supabase raw UUID & payload sanitation. |
+
+---
+
+## 3. Fixes Implemented
+
+### 3.1. `src/services/student.service.ts`
+- Added explicit error propagation in `fetchStudentsDirect()`:
+  ```typescript
+  if (studentsRes.error) throw new Error(`Failed to query students from Supabase: ${studentsRes.error.message}`);
+  if (enrollmentsRes.error) throw new Error(`Failed to query student enrollments from Supabase: ${enrollmentsRes.error.message}`);
+  if (programsRes.error) throw new Error(`Failed to query programs from Supabase: ${programsRes.error.message}`);
+  if (cardsRes.error) throw new Error(`Failed to query NFC cards from Supabase: ${cardsRes.error.message}`);
+  ```
+- Added matching error propagation in `fetchStudentDirectById()`.
+
+### 3.2. `src/composables/useStudents.ts`
+- Updated `loadStudents()` catch block to preserve the error on the reactive ref and re-throw:
+  ```typescript
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    error.value = msg;
+    throw err;
+  }
+  ```
+
+### 3.3. `src/views/StudentsPage.vue`
+- Exposed `error` from `useStudents()`.
+- Implemented `handleRetry()` to allow officers to re-fetch on network/RLS recovery.
+- Rendered `UniEmptyState` error card with `alertCircleOutline` and "Retry" button when `error` is present.
+- Consolidated initial loading into `onIonViewWillEnter`, removing duplicate execution from `onMounted`.
+
+### 3.4. `src/views/HomePage.vue`
+- Added `const studentsError = ref(false);`.
+- In `loadDashboardData()`, reset `studentsError.value = false` before query, and set `studentsError.value = true` on catch.
+- Configured `UniStatCard` to present:
+  - Value: `studentsError ? 'Unavailable' : totalStudents`
+  - Meta: `studentsError ? 'Failed to load' : 'Registered'`
+  - Value Color: `studentsError ? 'danger' : 'default'`
+
+### 3.5. `src/database/repositories/students.repository.ts`
+- Implemented Direct Supabase branch for `getStudentsByCanonicalSchoolId()`:
+  - Queries `supabase.from('students').select('*').or(...)` with all normalized variants.
+  - Returns mapped `StudentRecord[]` without leaking to SQLite.
+  - Checks and throws on `error`.
+- Checked `enrollmentsRes.error` and `cardsRes.error` in `getStudents()` alongside `studentsRes.error`.
+
+---
+
+## 4. Test Results
+
+1. **Focused Diagnostic Tests (`tests/unit/supabase-direct-diagnostic.spec.ts`)**:
+   - **8 of 8 PASSED**
+   - Tested error propagation from all 4 Supabase endpoints.
+   - Tested `useStudents.loadStudents()` error rethrow and reactive state preservation.
+   - Tested `StudentsRepository.getStudentsByCanonicalSchoolId()` Supabase routing and avoidance of SQLite leakage.
+   - Tested `StudentsRepository.getStudents()` error propagation.
+   - Tested `EventService.createEvent()` raw UUID generation and payload exclusion of `description` (fixing PGRST204).
+   - Tested `EventsRepository.toSupabaseEventPayload()` stripping of `evt_` prefix and exclusion of unsupported columns.
+   - Tested `EventService.createOccurrence()` raw UUID generation, `evt_` parent stripping, and schema payload mapper.
+   - Tested `EventsRepository.toSupabaseOccurrencePayload()` stripping of `occ_` and `evt_` prefixes.
+
+2. **Existing Related Unit Test Suites**:
+   - `tests/unit/event.service.spec.ts`: **3 of 3 PASSED**
+   - `tests/unit/event-absentees-bulk-fines.spec.ts`: **12 of 12 PASSED**
+   - `tests/unit/data-mode.spec.ts`: **4 of 4 PASSED**
+   - `tests/unit/student.service.spec.ts`: **5 of 5 PASSED**
+   - `tests/unit/student-storage.spec.ts`: **3 of 3 PASSED**
+   - `tests/unit/student-server-confirmed.spec.ts`: **11 of 11 PASSED**
+   - `tests/unit/theme-and-dashboard.spec.ts`: **8 of 8 PASSED**
+
+3. **TypeScript Typecheck (`npx vue-tsc --noEmit`)**:
+   - **0 errors** (Exit code 0).
+
+4. **Production Build (`npm run build`)**:
+   - **SUCCESSFUL in 16.00s** (Exit code 0).
+
+---
+
+## 5. Deployed RPC Mismatch Fix: `officer_get_student_activation_status`
+
+### 5.1. Root Cause & Forward-Only Migration
+- The live database RPC `officer_get_student_activation_status` was deployed with an outdated query referencing `a.performed_at` on table `public.activation_claims_audit`.
+- Because `activation_claims_audit` uses column `created_at` instead of `performed_at`, calls to this function trigger PostgreSQL error `42703 (column a.performed_at does not exist)`.
+- **Migration File**: `supabase/migrations/20261108120000_harden_officer_activation_status.sql`
+- **Manual Deployment Status**: Staged / Ready for execution in Supabase Dashboard SQL Editor (pending manual execution by administrator; no CLI/automated execution performed).
+
+### 5.2. Exact Remediation SQL for Supabase SQL Editor
+```sql
+CREATE OR REPLACE FUNCTION public.officer_get_student_activation_status(
+  p_student_id TEXT
+)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_student public.students%ROWTYPE;
+  v_student_uuid UUID;
+  v_user public.users%ROWTYPE;
+  v_claim public.activation_claims%ROWTYPE;
+  v_status TEXT := 'NOT_ACTIVATED';
+  v_clean_id TEXT;
+  v_audit JSONB := '[]'::jsonb;
+BEGIN
+  -- 0. Authorization check: DEVADMIN or OFFICER
+  IF auth.uid() IS NULL THEN
+    RAISE EXCEPTION 'Authentication required.';
+  END IF;
+
+  IF coalesce(get_current_user_role(), '') NOT IN ('DEVADMIN', 'OFFICER') THEN
+    RAISE EXCEPTION 'Unauthorized: Officer or DevAdmin privileges required.';
+  END IF;
+
+  v_clean_id := trim(coalesce(p_student_id, ''));
+  IF v_clean_id = '' THEN
+    RETURN jsonb_build_object('status', 'NOT_FOUND', 'error', 'Student identifier is required.');
+  END IF;
+
+  -- 1. Try finding student by UUID if input is formatted as UUID
+  IF v_clean_id ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN
+    SELECT * INTO v_student FROM public.students WHERE id = v_clean_id::uuid LIMIT 1;
+  END IF;
+
+  -- 2. If not found by UUID, search by canonical/flexible School ID
+  IF v_student.id IS NULL THEN
+    SELECT * INTO v_student FROM public.students 
+    WHERE (
+      lower(school_id) = lower(v_clean_id)
+      OR replace(lower(school_id), '-', '') = replace(lower(v_clean_id), '-', '')
+      OR id::text = v_clean_id
+    )
+    LIMIT 1;
+  END IF;
+
+  IF v_student.id IS NULL THEN
+    RETURN jsonb_build_object('status', 'NOT_FOUND', 'error', 'Student record not found.');
+  END IF;
+
+  v_student_uuid := v_student.id;
+
+  -- 3. Check public.users for active student account linkage
+  SELECT * INTO v_user FROM public.users 
+  WHERE student_id = v_student_uuid AND account_status = 'ACTIVE'
+  LIMIT 1;
+
+  IF FOUND THEN
+    v_status := 'ACTIVATED';
+  ELSE
+    -- 4. Check latest activation claim
+    SELECT * INTO v_claim 
+    FROM public.activation_claims 
+    WHERE student_id = v_student_uuid 
+    ORDER BY created_at DESC 
+    LIMIT 1;
+
+    IF FOUND THEN
+      IF v_claim.used_at IS NOT NULL THEN
+        v_status := 'ACTIVATED';
+      ELSIF v_claim.revoked_at IS NOT NULL OR coalesce(v_claim.attempt_count, 0) >= coalesce(v_claim.max_attempts, 5) THEN
+        v_status := 'REQUIRES_ATTENTION';
+      ELSIF v_claim.expires_at < now() THEN
+        v_status := 'REQUIRES_ATTENTION';
+      ELSE
+        v_status := 'ACTIVATION_PENDING';
+      END IF;
+    ELSE
+      v_status := 'NOT_ACTIVATED';
+    END IF;
+  END IF;
+
+  -- 5. Collect audit trail (using valid column a.created_at)
+  SELECT coalesce(jsonb_agg(
+    jsonb_build_object(
+      'id', a.id,
+      'action', a.action,
+      'performed_at', a.created_at,
+      'notes', a.notes
+    ) ORDER BY a.created_at DESC
+  ), '[]'::jsonb)
+  INTO v_audit
+  FROM public.activation_claims_audit a
+  WHERE a.student_id = v_student_uuid;
+
+  RETURN jsonb_build_object(
+    'status', v_status,
+    'student_id', v_student_uuid,
+    'school_id', v_student.school_id,
+    'claim_id', v_claim.id,
+    'expires_at', v_claim.expires_at,
+    'attempt_count', coalesce(v_claim.attempt_count, 0),
+    'max_attempts', coalesce(v_claim.max_attempts, 5),
+    'linked_user_id', v_user.id,
+    'linked_username', v_user.username,
+    'audit_history', v_audit
+  );
+END;
+$$;
+
+REVOKE EXECUTE ON FUNCTION public.officer_get_student_activation_status(TEXT) FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION public.officer_get_student_activation_status(TEXT) TO authenticated;
+```
+
+---
+
+## 6. Event Creation Direct Supabase Payload Remediation
+
+### 6.1. Root Cause
+- When creating an event in Direct Supabase mode, the payload included `description: newEvent.description || null`. The PostgreSQL `public.events` schema does not possess a `description` column, causing PostgREST error `PGRST204` (`Could not find the 'description' column of 'events' in the schema cache`).
+- In addition, event IDs were generated using `generateId('evt')` (`evt_<uuid>`), which violates the PostgreSQL `UUID` primary key constraint for `events.id`.
+
+### 6.2. Fixes Implemented
+- In `src/services/event.service.ts`:
+  - Replaced `generateId('evt')` with `generateUuid()`, producing a canonical raw UUID for `newEvent.id`.
+  - Added explicit payload mapper `toSupabaseEventInsertPayload(event, semesterId)` which:
+    - Strips any prefix if present, ensuring a valid UUID string.
+    - Excludes `description` from the Supabase payload.
+    - Omits non-existent columns while including only supported columns: `id`, `semester_id`, `title`, `event_type`, `audience_type`, `audience_json`, `attendance_required`, `status`, `created_at`, `updated_at`, and optionally `category_id`.
+  - In `updateEvent()`, removed `description` from the Supabase update payload.
+  - Preserved `newEvent.description` on the returned `Event` object for UI presentation and in `this.repo.saveEvent(newEvent)` for Offline-First SQLite persistence.
+- In `src/database/repositories/events.repository.ts`:
+  - Added `EventsRepository.toSupabaseEventPayload()` to map and sanitize event records for Supabase Direct mode.
+  - Excluded `description` and `created_by_user_id` from the Supabase insert payload while retaining them in the SQLite `INSERT` query.
+
+---
+
+## 7. Events & Event Occurrences Scoped RLS Remediation
+
+### 7.1. Root Cause & Granular Capability Model
+- When an authenticated DEVADMIN or OFFICER attempts to insert an event into `public.events` in Direct Supabase mode, PostgreSQL raises error `42501: new row violates row-level security policy for table events`.
+- Investigation of the archived migrations (`20261031000001_unitap_initial_schema.sql`, `20261031160000_system_setup_academic_structure.sql`, `20261101140000_officer_management.sql`) and officer capability configuration (`src/services/officer-management.service.ts`) identifies the key requirements:
+  1. **DEVADMIN Role Access**: DEVADMIN users retain unrestricted event management without requiring an officer appointment.
+  2. **Officer Appointment Verification**: OFFICER role access must require an active, non-expired appointment (`status = 'ACTIVE'`, `appointment_start <= now()`, `appointment_end >= now()`, `revoked_at IS NULL`, `suspended_at IS NULL`).
+  3. **Granular Permissions**:
+     - INSERT on `events`: Requires `events.create`.
+     - UPDATE / DELETE on `events`: Requires `events.edit_assigned`.
+     - INSERT on `event_occurrences`: Requires `events.create` or `events.edit_assigned` on the parent event.
+     - UPDATE / DELETE on `event_occurrences`: Requires `events.edit_assigned` on the parent event.
+  4. **Preset Respect & Least Privilege**:
+     - `FULL`: Automatically possesses both `events.create` and `events.edit_assigned`.
+     - `CUSTOM`: Validated against string permissions in `custom_permissions` JSONB (`custom_permissions ? 'events.create'`, `custom_permissions ? 'events.edit_assigned'`).
+     - `ATTENDANCE`: Automatically denied event mutations (possesses only `events.view_assigned`, no `events.create` or `events.edit_assigned`).
+     - `FINANCE`: Automatically denied event mutations (possesses zero event permissions).
+  5. **Scope Enforcement**:
+     - Creating events requires `scope_type = 'ORGANIZATION'`.
+     - Managing existing events allows `scope_type = 'ORGANIZATION'` or `scope_type = 'EVENT'` (where `scope_id = events.id`).
+     - Validates `semester_id` matches if restricted on the appointment.
+  6. **Authenticated Reads**: Authenticated users (Officers, DevAdmins, Students) maintain read access (`SELECT`) to events and occurrences catalogs.
+  7. **Catalog-Driven Policy Drops**: Dropping existing policies on `events` and `event_occurrences` is performed via `pg_policies` catalog inspection rather than guessing fictitious policy names.
+  8. **Zero Anon Access**: Anonymous (`anon`) role is strictly denied all access.
+
+- **Migration File**: `supabase/migrations/20261108130000_scoped_events_rls.sql`
+- **Manual Deployment Status**: Staged / Ready for execution in Supabase Dashboard SQL Editor (pending manual execution by administrator; no CLI/automated execution performed).
+
+### 7.2. Exact Remediation SQL for Supabase SQL Editor
+```sql
+-- ============================================================================
+-- UniTap 2.0 Scoped Events & Event Occurrences Row Level Security (RLS)
+-- File: 20261108130000_scoped_events_rls.sql
+-- ============================================================================
+
+-- 1. Ensure Row Level Security is enabled on both tables
+ALTER TABLE public.events ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.event_occurrences ENABLE ROW LEVEL SECURITY;
+
+-- 2. Drop existing policies on events and event_occurrences via pg_catalog inspection
+--    (Avoids guessing policy names or missing custom/adhoc dashboard policies)
+DO $$
+DECLARE
+  r RECORD;
+BEGIN
+  FOR r IN (
+    SELECT policyname, tablename 
+    FROM pg_policies 
+    WHERE schemaname = 'public' 
+      AND tablename IN ('events', 'event_occurrences')
+  ) LOOP
+    EXECUTE format('DROP POLICY IF EXISTS %I ON public.%I', r.policyname, r.tablename);
+  END LOOP;
+END $$;
+
+-- 3. Security Definer Helper: can_user_insert_event
+CREATE OR REPLACE FUNCTION public.can_user_insert_event(
+  p_semester_id TEXT
+)
+RETURNS BOOLEAN
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+STABLE
+AS $$
+DECLARE
+  v_role TEXT;
+BEGIN
+  v_role := public.get_current_user_role();
+
+  -- DEVADMIN retains unrestricted full event management
+  IF v_role = 'DEVADMIN' THEN
+    RETURN true;
+  END IF;
+
+  -- OFFICER access must require an active, non-expired appointment
+  IF v_role = 'OFFICER' THEN
+    RETURN EXISTS (
+      SELECT 1
+      FROM public.officer_appointments oa
+      WHERE oa.user_id = auth.uid()
+        AND oa.status = 'ACTIVE'
+        AND oa.appointment_start <= now()
+        AND oa.appointment_end >= now()
+        AND oa.revoked_at IS NULL
+        AND oa.suspended_at IS NULL
+        -- Respect FULL and CUSTOM presets (require events.create)
+        -- ATTENDANCE and FINANCE officers do not receive events.create
+        AND (
+          oa.permission_preset = 'FULL'
+          OR (oa.permission_preset = 'CUSTOM' AND coalesce(oa.custom_permissions, '[]'::jsonb) ? 'events.create')
+        )
+        -- Event creation requires ORGANIZATION-level scope
+        AND oa.scope_type = 'ORGANIZATION'
+        -- Respect officer semester scope if set
+        AND (
+          oa.semester_id IS NULL
+          OR p_semester_id IS NULL
+          OR oa.semester_id = p_semester_id
+        )
+    );
+  END IF;
+
+  RETURN false;
+END;
+$$;
+
+-- 4. Security Definer Helper: can_user_manage_event
+CREATE OR REPLACE FUNCTION public.can_user_manage_event(
+  p_event_id UUID,
+  p_semester_id TEXT DEFAULT NULL,
+  p_required_permission TEXT DEFAULT 'events.edit_assigned'
+)
+RETURNS BOOLEAN
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+STABLE
+AS $$
+DECLARE
+  v_role TEXT;
+  v_semester_id TEXT;
+BEGIN
+  v_role := public.get_current_user_role();
+
+  -- DEVADMIN retains unrestricted full event management
+  IF v_role = 'DEVADMIN' THEN
+    RETURN true;
+  END IF;
+
+  -- OFFICER access must require an active, non-expired appointment
+  IF v_role = 'OFFICER' THEN
+    -- Resolve semester_id from event record if not provided
+    v_semester_id := p_semester_id;
+    IF v_semester_id IS NULL AND p_event_id IS NOT NULL THEN
+      SELECT semester_id INTO v_semester_id
+      FROM public.events
+      WHERE id = p_event_id;
+    END IF;
+
+    RETURN EXISTS (
+      SELECT 1
+      FROM public.officer_appointments oa
+      WHERE oa.user_id = auth.uid()
+        AND oa.status = 'ACTIVE'
+        AND oa.appointment_start <= now()
+        AND oa.appointment_end >= now()
+        AND oa.revoked_at IS NULL
+        AND oa.suspended_at IS NULL
+        -- Respect FULL and CUSTOM presets (require events.edit_assigned)
+        -- ATTENDANCE and FINANCE officers do not receive events.edit_assigned
+        AND (
+          oa.permission_preset = 'FULL'
+          OR (
+            oa.permission_preset = 'CUSTOM' 
+            AND (
+              coalesce(oa.custom_permissions, '[]'::jsonb) ? p_required_permission
+              OR coalesce(oa.custom_permissions, '[]'::jsonb) ? 'events.edit_assigned'
+            )
+          )
+        )
+        -- Respect officer scope: ORGANIZATION-wide or assigned to this specific EVENT
+        AND (
+          oa.scope_type = 'ORGANIZATION'
+          OR (oa.scope_type = 'EVENT' AND oa.scope_id = p_event_id)
+        )
+        -- Respect semester scope if set on appointment
+        AND (
+          oa.semester_id IS NULL
+          OR v_semester_id IS NULL
+          OR oa.semester_id = v_semester_id
+        )
+    );
+  END IF;
+
+  RETURN false;
+END;
+$$;
+
+-- 5. Revoke public/anon execution and grant authenticated execution
+REVOKE ALL ON FUNCTION public.can_user_insert_event(TEXT) FROM public, anon;
+GRANT EXECUTE ON FUNCTION public.can_user_insert_event(TEXT) TO authenticated;
+
+REVOKE ALL ON FUNCTION public.can_user_manage_event(UUID, TEXT, TEXT) FROM public, anon;
+GRANT EXECUTE ON FUNCTION public.can_user_manage_event(UUID, TEXT, TEXT) TO authenticated;
+
+-- 6. RLS Policies on public.events
+-- 6.1. Authenticated users (Officers, DevAdmins, Students) can view events
+CREATE POLICY events_select_authenticated ON public.events
+  FOR SELECT TO authenticated
+  USING (true);
+
+-- 6.2. Authorized officers and DevAdmin can insert events (requires events.create)
+CREATE POLICY events_insert_authorized ON public.events
+  FOR INSERT TO authenticated
+  WITH CHECK (public.can_user_insert_event(semester_id));
+
+-- 6.3. Authorized officers and DevAdmin can update events (requires events.edit_assigned within scope)
+CREATE POLICY events_update_authorized ON public.events
+  FOR UPDATE TO authenticated
+  USING (public.can_user_manage_event(id, semester_id, 'events.edit_assigned'))
+  WITH CHECK (public.can_user_manage_event(id, semester_id, 'events.edit_assigned'));
+
+-- 6.4. Authorized officers and DevAdmin can delete events (requires events.edit_assigned within scope)
+CREATE POLICY events_delete_authorized ON public.events
+  FOR DELETE TO authenticated
+  USING (public.can_user_manage_event(id, semester_id, 'events.edit_assigned'));
+
+-- 7. RLS Policies on public.event_occurrences
+-- 7.1. Authenticated users can view occurrences
+CREATE POLICY event_occurrences_select_authenticated ON public.event_occurrences
+  FOR SELECT TO authenticated
+  USING (true);
+
+-- 7.2. Insert occurrences requires management privileges on parent event
+CREATE POLICY event_occurrences_insert_authorized ON public.event_occurrences
+  FOR INSERT TO authenticated
+  WITH CHECK (public.can_user_manage_event(event_id, NULL, 'events.create'));
+
+-- 7.3. Update occurrences requires edit privileges on parent event
+CREATE POLICY event_occurrences_update_authorized ON public.event_occurrences
+  FOR UPDATE TO authenticated
+  USING (public.can_user_manage_event(event_id, NULL, 'events.edit_assigned'))
+  WITH CHECK (public.can_user_manage_event(event_id, NULL, 'events.edit_assigned'));
+
+-- 7.4. Delete occurrences requires edit privileges on parent event
+CREATE POLICY event_occurrences_delete_authorized ON public.event_occurrences
+  FOR DELETE TO authenticated
+  USING (public.can_user_manage_event(event_id, NULL, 'events.edit_assigned'));
+```
+
+---
+
+## 8. Event Occurrence UUID Mismatch Remediation
+
+### 8.1. Root Cause
+- When inserting an initial attendance session occurrence during event creation in Direct Supabase mode, the POST to `/rest/v1/event_occurrences` failed with PostgreSQL error `22P02: invalid input syntax for type uuid: "occ_11287077-5fa9-4560-8b71-93822dbdeb20"`.
+- `EventService.createOccurrence()` generated occurrence primary keys using `generateId('occ')` (`occ_<uuid>`). While SQLite accepts arbitrary string primary keys, PostgreSQL's `public.event_occurrences` table defines `id` and `event_id` as native `UUID` columns.
+- Additionally, if the parent event ID passed to `createOccurrence` retained an `evt_` prefix, PostgreSQL rejected the foreign key reference with the same `22P02` syntax error.
+- In `src/views/CreateEventPage.vue`, a failure during `createOccurrence` was caught by the outer try-catch block, showing a generic creation error on the form while the parent event had already succeeded and persisted to Supabase, risking duplicate event creation on subsequent submit attempts.
+
+### 8.2. Fixes Implemented
+1. **`src/services/event.service.ts`**:
+   - In `createOccurrence()`:
+     - Directly generates canonical raw UUIDs using `generateUuid()` when `DataModeService.isDirectSupabase()` is active.
+     - Preserves `generateId('occ')` for Offline-First SQLite operations.
+     - Sanitizes `rawEventId` by stripping any leading `evt_` prefix to guarantee a clean UUID foreign key reference.
+   - Added `toSupabaseOccurrenceInsertPayload()`:
+     - Maps `id`, `event_id`, `title`, `occurs_on`, `starts_at`, `ends_at`, `grace_minutes`, `status`, `updated_at`, `opened_at`, and `closed_at`.
+     - Automatically strips `occ_` and `evt_` prefixes if present.
+   - Sanitized all occurrence query and update methods (`getOccurrences`, `getOccurrence`, `openOccurrence`, `closeOccurrence`, `getEvent`, `updateEvent`, `deleteEvent`) by stripping ID prefixes before executing Supabase queries.
+
+2. **`src/database/repositories/events.repository.ts`**:
+   - Added `EventsRepository.toSupabaseOccurrencePayload()`:
+     - Sanitizes both `id` and `event_id` by stripping `occ_` and `evt_` prefixes.
+     - Formats occurrence payload strictly according to Supabase schema.
+   - Updated `createOccurrence()`, `updateOccurrence()`, `getOccurrencesByEventId()`, and `getOccurrenceById()` to sanitize prefixes in Direct Supabase mode.
+
+3. **`src/views/CreateEventPage.vue`**:
+   - Separated the event creation and initial occurrence creation into discrete try-catch boundaries.
+   - If `createEvent` succeeds but `createOccurrence` fails, the UI notifies the user with a warning toast (`Event was saved, but its initial session failed: <error>`) and navigates to `/events/${event.id}` where the event exists, preventing duplicate submissions.
+
+---
+
+## 9. Student-to-Officer Promotion Architecture & Workflow Remediation
+
+### 9.1. Problem & Root Cause
+- In UniTap 2.0 `CreateOfficerPage.vue`, when selecting a registered student who already possessed an active Supabase Auth account and `users` record, the UI generated an officer activation code instead of promoting them to Officer.
+- **Root Causes**:
+  1. `OfficerManagementService.searchCandidates()` previously searched local SQLite first. In Direct Supabase mode, the local SQLite database had student rows but lacked remote `users` rows, resulting in `user_id: null` and `is_registered: 0`.
+  2. In `CreateOfficerPage.vue`, `submitButtonLabel` checked `selectedStudent.user_id && selectedStudent.is_registered`. Because both were false/null, it defaulted to `"Issue Officer Activation Code"` and invoked `prepareImportedStudentOfficerActivation()`.
+  3. No deduplication check prevented selecting a student who already held an active officer appointment.
+  4. In `OfficerManagementPage.vue`, only `onMounted(loadOfficers)` was implemented. Since Ionic Vue caches page views in navigation history, returning from `CreateOfficerPage` did not trigger an automatic reload of the officers list.
+
+### 9.2. Fixes Implemented
+1. **`supabase/migrations/20261108140000_student_to_officer_promotion.sql`**:
+   - Created forward-only migration defining `public.devadmin_promote_student_to_officer` RPC.
+   - Enforces DEVADMIN authorization via `public.get_current_user_role()`.
+   - Resolves student by raw UUID or canonical `school_id`.
+   - Resolves existing user account from `users` table via `p_user_id`, `users.student_id`, or `username = school_id`.
+   - Prevents duplicate active officer appointments (checks for `status IN ('ACTIVE', 'SUSPENDED')` and non-expired appointments).
+   - Inserts new active officer appointment directly with `status = 'ACTIVE'`, skipping invitation codes and activation claims.
+   - Grants `OFFICER` role in `user_roles` without modifying or deleting the student's existing `STUDENT` role.
+   - Grants execute permission only to `authenticated` and revokes from `PUBLIC` and `anon`.
+
+2. **`src/services/officer-management.service.ts`**:
+   - Implemented `OfficerManagementService.promoteStudentToOfficer()` with Direct Supabase RPC calling `devadmin_promote_student_to_officer` and offline SQLite fallback checking duplicate appointments.
+   - Made `CreateExistingStudentOfficerDto.userId` optional (`userId?: string`).
+   - Aliased `assignExistingStudentAsOfficer()` to `promoteStudentToOfficer()`.
+   - Updated `getOfficers()` in Direct Supabase mode to hydrate `school_id` from the `students` table.
+   - Updated `searchCandidates()`: In Direct Supabase mode, queries Supabase `students`, `users`, and `officer_appointments` directly to populate `user_id`, `username`, `is_registered`, and `is_officer` accurately.
+
+3. **`src/views/settings/CreateOfficerPage.vue`**:
+   - Replaced submit button label computation so `'STUDENT'` candidates always show `'Promote to Officer'`.
+   - Updated `handleSubmit()` to call `promoteStudentToOfficer()` without generating activation codes or activation claims.
+   - In `selectStudent()`, added automatic hydration via `StudentActivationService.getStudentActivationStatus()` if `st.user_id` is missing.
+   - Prevented duplicate active appointments: disables submit and displays duplicate officer warning banner if `selectedStudent.is_officer` is true.
+   - Updated `UniDialog` success modal to show "Officer Promoted" with no activation code box for student promotions (code box preserved only for external invites).
+
+4. **`src/views/settings/OfficerManagementPage.vue`**:
+   - Added `onIonViewWillEnter(loadOfficers)` alongside `onMounted(loadOfficers)` so returning from `CreateOfficerPage` immediately refreshes the officer list.
+
+5. **`tests/unit/supabase-direct-diagnostic.spec.ts`**:
+   - Added regression test 9: verifies `OfficerManagementService.promoteStudentToOfficer()` invokes `devadmin_promote_student_to_officer` with mapped parameters.
+   - Added regression test 10: verifies `OfficerManagementService.searchCandidates()` queries Supabase in Direct Mode and correctly maps `is_registered`, `user_id`, and `is_officer`.
+
+### 9.3. Prepared Migration SQL for Manual Supabase Dashboard Execution
+
+```sql
+-- ==============================================================================
+-- Migration: 20261108140000_student_to_officer_promotion.sql
+-- Description:
+--   Atomic Student-to-Officer Promotion RPC:
+--   1. Promotes an existing authenticated student to Officer in a single transaction.
+--   2. Prevents duplicate active appointments.
+--   3. Automatically resolves user_id from students/users linkage if not passed.
+--   4. Assigns the active appointment and OFFICER role in user_roles without altering STUDENT role.
+--   5. Strictly enforces DEVADMIN authorization via public.get_current_user_role().
+--   6. Does NOT create new Auth accounts or issue activation claim codes.
+-- ==============================================================================
+
+CREATE OR REPLACE FUNCTION public.devadmin_promote_student_to_officer(
+  p_student_id TEXT,
+  p_user_id TEXT DEFAULT NULL,
+  p_full_name TEXT DEFAULT NULL,
+  p_email TEXT DEFAULT NULL,
+  p_permission_preset TEXT DEFAULT 'FULL',
+  p_custom_permissions JSONB DEFAULT '[]'::jsonb,
+  p_academic_year_id TEXT DEFAULT NULL,
+  p_semester_id TEXT DEFAULT NULL,
+  p_appointment_start TIMESTAMPTZ DEFAULT now(),
+  p_appointment_end TIMESTAMPTZ DEFAULT (now() + interval '1 year'),
+  p_scope_type TEXT DEFAULT 'ORGANIZATION',
+  p_scope_id UUID DEFAULT NULL
+)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_caller_role TEXT;
+  v_student public.students%ROWTYPE;
+  v_user public.users%ROWTYPE;
+  v_student_uuid UUID;
+  v_user_uuid UUID;
+  v_appt_id UUID;
+  v_role_id UUID;
+  v_clean_student_id TEXT;
+  v_resolved_name TEXT;
+  v_resolved_email TEXT;
+BEGIN
+  -- 1. Authorization: Caller must be authenticated DEVADMIN
+  IF auth.uid() IS NULL THEN
+    RETURN jsonb_build_object('success', false, 'error', 'Authentication required.');
+  END IF;
+
+  v_caller_role := public.get_current_user_role();
+  IF coalesce(v_caller_role, '') <> 'DEVADMIN' THEN
+    RETURN jsonb_build_object('success', false, 'error', 'Unauthorized: Only DevAdmin can promote students to officer.');
+  END IF;
+
+  -- 2. Resolve Student Record
+  v_clean_student_id := trim(coalesce(p_student_id, ''));
+  IF v_clean_student_id = '' THEN
+    RETURN jsonb_build_object('success', false, 'error', 'Student identifier is required.');
+  END IF;
+
+  IF v_clean_student_id ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN
+    SELECT * INTO v_student FROM public.students WHERE id = v_clean_student_id::uuid LIMIT 1;
+  END IF;
+
+  IF v_student.id IS NULL THEN
+    SELECT * INTO v_student FROM public.students 
+    WHERE (
+      lower(school_id) = lower(v_clean_student_id)
+      OR replace(lower(school_id), '-', '') = replace(lower(v_clean_student_id), '-', '')
+    )
+    LIMIT 1;
+  END IF;
+
+  IF v_student.id IS NULL THEN
+    RETURN jsonb_build_object('success', false, 'error', 'Student record not found.');
+  END IF;
+
+  v_student_uuid := v_student.id;
+
+  -- 3. Resolve Existing Authenticated User Account
+  -- 3a. If p_user_id passed as valid UUID, verify in users
+  IF p_user_id IS NOT NULL AND trim(p_user_id) ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN
+    SELECT * INTO v_user FROM public.users WHERE id = trim(p_user_id)::uuid LIMIT 1;
+  END IF;
+
+  -- 3b. If not found by p_user_id, look up by student_id foreign key
+  IF v_user.id IS NULL THEN
+    SELECT * INTO v_user FROM public.users 
+    WHERE student_id = v_student_uuid AND account_status = 'ACTIVE' 
+    LIMIT 1;
+  END IF;
+
+  -- 3c. If not found, check by username matching school_id
+  IF v_user.id IS NULL THEN
+    SELECT * INTO v_user FROM public.users 
+    WHERE (lower(username) = lower(v_student.school_id) OR replace(lower(username), '-', '') = replace(lower(v_student.school_id), '-', ''))
+      AND account_status = 'ACTIVE'
+    LIMIT 1;
+  END IF;
+
+  IF v_user.id IS NULL THEN
+    RETURN jsonb_build_object(
+      'success', false, 
+      'error', 'No active user account found for student ' || v_student.school_id || '. The student must activate their account before promotion.'
+    );
+  END IF;
+
+  v_user_uuid := v_user.id;
+
+  -- Ensure student_id on user record is properly linked
+  IF v_user.student_id IS NULL OR v_user.student_id <> v_student_uuid THEN
+    UPDATE public.users SET student_id = v_student_uuid, updated_at = now() WHERE id = v_user_uuid;
+  END IF;
+
+  -- 4. Prevent duplicate active officer appointments
+  IF EXISTS (
+    SELECT 1 FROM public.officer_appointments
+    WHERE (user_id = v_user_uuid OR student_id = v_student_uuid)
+      AND status IN ('ACTIVE', 'SUSPENDED')
+      AND appointment_end >= now()
+      AND revoked_at IS NULL
+  ) THEN
+    RETURN jsonb_build_object(
+      'success', false, 
+      'error', 'Student ' || v_student.school_id || ' already has an active officer appointment.'
+    );
+  END IF;
+
+  -- 5. Prepare Full Name & Email
+  v_resolved_name := trim(coalesce(p_full_name, ''));
+  IF v_resolved_name = '' THEN
+    v_resolved_name := trim(v_student.first_name || ' ' || coalesce(v_student.last_name, ''));
+  END IF;
+
+  v_resolved_email := trim(coalesce(p_email, ''));
+  IF v_resolved_email = '' OR v_resolved_email NOT LIKE '%@%' THEN
+    v_resolved_email := lower(v_student.school_id) || '@univ.edu';
+  END IF;
+
+  -- 6. Insert new ACTIVE officer appointment (NO activation code, NO pending status)
+  INSERT INTO public.officer_appointments (
+    user_id,
+    student_id,
+    full_name,
+    email,
+    permission_preset,
+    custom_permissions,
+    academic_year_id,
+    semester_id,
+    appointment_start,
+    appointment_end,
+    scope_type,
+    scope_id,
+    status,
+    assigned_by_user_id,
+    created_at,
+    updated_at
+  ) VALUES (
+    v_user_uuid,
+    v_student_uuid,
+    v_resolved_name,
+    v_resolved_email,
+    coalesce(nullif(p_permission_preset, ''), 'FULL'),
+    coalesce(p_custom_permissions, '[]'::jsonb),
+    p_academic_year_id,
+    p_semester_id,
+    coalesce(p_appointment_start, now()),
+    coalesce(p_appointment_end, now() + interval '1 year'),
+    coalesce(nullif(p_scope_type, ''), 'ORGANIZATION'),
+    p_scope_id,
+    'ACTIVE',
+    auth.uid(),
+    now(),
+    now()
+  ) RETURNING id INTO v_appt_id;
+
+  -- 7. Assign OFFICER role in user_roles without altering existing STUDENT role
+  IF NOT EXISTS (
+    SELECT 1 FROM public.user_roles
+    WHERE user_id = v_user_uuid AND role = 'OFFICER' AND revoked_at IS NULL
+  ) THEN
+    INSERT INTO public.user_roles (
+      user_id,
+      role,
+      semester_id,
+      assigned_by_user_id,
+      assigned_at
+    ) VALUES (
+      v_user_uuid,
+      'OFFICER',
+      p_semester_id,
+      auth.uid(),
+      now()
+    ) RETURNING id INTO v_role_id;
+  END IF;
+
+  RETURN jsonb_build_object(
+    'success', true,
+    'appointment_id', v_appt_id,
+    'user_id', v_user_uuid,
+    'student_id', v_student_uuid,
+    'officer_name', v_resolved_name,
+    'status', 'ACTIVE'
+  );
+END;
+$$;
+
+REVOKE EXECUTE ON FUNCTION public.devadmin_promote_student_to_officer(
+  TEXT, TEXT, TEXT, TEXT, TEXT, JSONB, TEXT, TEXT, TIMESTAMPTZ, TIMESTAMPTZ, TEXT, UUID
+) FROM PUBLIC, anon;
+
+GRANT EXECUTE ON FUNCTION public.devadmin_promote_student_to_officer(
+  TEXT, TEXT, TEXT, TEXT, TEXT, JSONB, TEXT, TEXT, TIMESTAMPTZ, TIMESTAMPTZ, TEXT, UUID
+) TO authenticated;
+```
+
+---
+
+## 10. Supabase Endpoint Reachability Probe (`HEAD /rest/v1/`) 401 Remediation
+
+### 10.1. Exact Request Trace and Root Cause
+1. **Request Trace**:
+   - The probe originated from `NetworkService.checkServerReachability()` in `src/services/network.service.ts`:
+     ```ts
+     const response = await fetch(`${supabaseUrl}/rest/v1/`, {
+       method: 'HEAD',
+       signal: controller.signal,
+       headers: {
+         apikey: import.meta.env.VITE_SUPABASE_ANON_KEY || '',
+       },
+     });
+     ```
+   - This method is invoked by `OperationPolicyService.evaluateOperation()` at line 98:
+     ```ts
+     const isReachable = await NetworkService.checkServerReachability(2500);
+     ```
+   - Every mutation guard (`assertPermitted()`) and policy evaluation for `ONLINE_CONFIRMED` operations executed this bare fetch.
+
+2. **Why the HEAD Probe Returned 401 Unauthorized**:
+   - **OpenAPI Schema Protection**: In Supabase's API gateway architecture, the root PostgREST path `/rest/v1/` serves the OpenAPI schema definitions for the entire database. Supabase strictly requires a Secret API Key for this endpoint (`{"message":"Secret API key required","hint":"Only secret API keys can be used for this endpoint."}`, returning `sb-error-code: UNAUTHORIZED_INVALID_API_KEY_TYPE`). Publishable / anon keys are rejected with HTTP 401 Unauthorized.
+   - **Omitted Authorization Headers**: The bare `fetch` call did not use the configured Supabase client and omitted the `Authorization: Bearer <token>` header entirely.
+   - **Why Working INSERT/RPC Requests Succeed**:
+     - Working application requests (e.g. `POST /rest/v1/events`, `POST /rest/v1/rpc/devadmin_promote_student_to_officer`) route through the configured `@supabase/supabase-js` client instance (`@/integrations/supabase/client`).
+     - The client automatically attaches both `apikey` and `Authorization: Bearer <session.access_token>`.
+     - These requests target specific table and RPC endpoints (`/rest/v1/<table_name>`, `/rest/v1/rpc/<rpc_name>`) rather than the root schema `/rest/v1/`, which are explicitly permitted for client roles subject to RLS and database grants.
+
+### 10.2. Minimal Fix Implemented
+- In `src/services/network.service.ts`:
+  - Replaced the bare `fetch` to `/rest/v1/` with an authenticated, lightweight connectivity check via the configured Supabase client using `supabase.rpc('get_current_user_role')`.
+  - Used `Promise.race` and `AbortController` signal to guarantee the probe terminates within `timeoutMs` (defaults to 3000ms, or 2500ms when called from `OperationPolicyService`).
+  - Added compatibility checks so test mocks returning direct Promises or `{ data: null, error: null }` resolve cleanly without requiring `.abortSignal`.
+  - Added regression test 11 in `tests/unit/supabase-direct-diagnostic.spec.ts` verifying that `checkServerReachability` calls `get_current_user_role` and never issues raw `HEAD /rest/v1/` fetch requests.
+
+---
+
+## 11. Direct Supabase Contribution Student Assignment & Blocking Processing UI Remediation
+
+### 11.1. Issue Description & Root Cause
+1. **Empty `student_obligations` on Contribution Creation**:
+   - When creating a contribution in Direct Supabase mode, `FinanceService.createContributionCollection()` successfully inserted a fee definition into `public.obligation_rules`.
+   - However, no individual student obligations were created in `public.student_obligations`.
+   - **Root Cause**: `FinanceRepository.assessBulkContributions()` lacked a `DataModeService.isDirectSupabase()` execution branch. It was unconditionally executing queries against the local SQLite database adapter (`getDatabase()`). Since SQLite has no student records populated in Direct Supabase mode, zero students were identified and zero obligation records were generated or inserted into Supabase Cloud.
+2. **PostgreSQL Column Type Incompatibility (`batch_id`)**:
+   - In PostgreSQL schema `public.student_obligations`, `batch_id` is defined as `UUID`.
+   - The legacy SQLite implementation generated string IDs prefixed with `'batch_c_' + ...`, which would cause PostgreSQL error `22P02: invalid input syntax for type uuid` if dispatched directly.
+3. **Filtering Masked Non-Active Obligations**:
+   - In `FinanceRepository.getObligationsBySemester()`, querying with `.eq('status', 'ACTIVE')` hid student obligations that transitioned to `PARTIAL` or `PAID`, skewing collection summary and target totals.
+4. **Lack of User Feedback & Partial-Failure Vulnerability**:
+   - `ContributionsPage.vue` lacked a blocking modal during the multi-step contribution creation and student assignment process.
+   - If network degradation or RLS errors interrupted student assignment after `obligation_rules` was already committed, the user was left with no clear status, and retrying would recreate duplicate fee definition rules.
+
+### 11.2. Architecture & Code Changes Implemented
+1. **Domain Types & Progress Pipeline (`src/types/finance.ts`)**:
+   - Added `existingRuleId?: string` to `CreateContributionCollectionParams` to allow idempotent retry of student assignment against an already-created rule.
+   - Exported `ContributionCreationStage` union:
+     ```ts
+     export type ContributionCreationStage =
+       | 'CREATING_RULE'
+       | 'LOADING_STUDENTS'
+       | 'GENERATING_OBLIGATIONS'
+       | 'SAVING_SUPABASE'
+       | 'FINALIZING'
+       | 'SUCCESS'
+       | 'ERROR';
+     ```
+2. **Direct Supabase Repository Assessment (`src/database/repositories/finance.repository.ts`)**:
+   - Implemented a complete `DataModeService.isDirectSupabase()` branch inside `FinanceRepository.assessBulkContributions()`:
+     - Directly queries Supabase tables `student_enrollments` and `students` based on the targeted scope (`ALL`, `PROGRAM`, `YEAR_LEVEL`, `SECTION`, or `INDIVIDUAL`).
+     - Queries existing `student_obligations` for the given `rule_id` and `semester_id` where `status != 'VOID'` to deduplicate students who already have an obligation assigned.
+     - Generates raw UUIDs for `id` and `batch_id` (via `FinanceRepository.generateUuid()`) with zero `batch_c_` prefixes.
+     - Maps rows strictly to supported columns: `id`, `student_id`, `semester_id`, `rule_id`, `title`, `type ('CONTRIBUTION')`, `amount_centavos`, `status ('ACTIVE')`, `due_date`, `issued_by_user_id`, `batch_id`, `issued_at`, and `updated_at`.
+     - Chunks Supabase `insert` queries into batches of 100 to respect Supabase payload boundaries and avoid timeouts on large cohorts.
+     - Updates `getObligationsBySemester()` to filter `.neq('status', 'VOID')` rather than `.eq('status', 'ACTIVE')`, ensuring full collection tracking across `ACTIVE`, `PARTIAL`, and `PAID` statuses.
+3. **Service Orchestration & Idempotent Retry (`src/services/finance.service.ts`)**:
+   - Added `getRuleById(id: string)` with Direct Supabase and SQLite fallback.
+   - Updated `createContributionCollection()`:
+     - Accepts an optional `onProgress: (stage: ContributionCreationStage, meta?: any) => void` callback.
+     - If `params.existingRuleId` is supplied, skips `createRule()` and fetches the existing rule directly, preventing duplicate fee rules.
+     - Wraps `assessBulkContributions()` in a targeted try/catch: if assignment fails after rule creation, catches the error, sets `res.ruleSaved = true` and `res.savedRule = rule`, allowing the UI to present a targeted retry mechanism.
+4. **Blocking Processing UI (`src/views/ContributionsPage.vue`)**:
+   - Implemented a full-screen blocking modal `<ion-modal class="blocking-process-modal" :is-open="isBlockingModalOpen">` adhering to the design patterns established in `CsvImportPage.vue`.
+   - Features:
+     - Real-time animated progress bar (`creationProgressCurrent` / `creationProgressTotal`).
+     - Animated stage icon and spinner.
+     - Context card displaying Contribution Title, Academic Semester, Target Amount, and Eligible Student Count.
+     - Error state handling with explicit differentiation: if the rule was saved but student assignment failed, provides a "Retry Student Assignment" button calling `handleCreateContribution(createdRuleRecord.id)` without duplicating the rule, as well as a "Dismiss & Keep Rule" option.
+     - Prevents premature navigation, accidental dismissal, or concurrent creation clicks.
+
+### 11.3. Verification Results
+- **Unit Tests**:
+  - Added tests 12, 13, and 14 to `tests/unit/supabase-direct-diagnostic.spec.ts` covering Direct Supabase bulk contribution assessment, deduplication, and retry flow.
+  - Ran Vitest suite:
+    - `tests/unit/supabase-direct-diagnostic.spec.ts` (14 tests passed).
+    - `tests/unit/continuous-finance-recording.spec.ts` (17 tests passed).
+    - **Total: 31 passed, 0 failed**.
+- **Typecheck**:
+  - `npx vue-tsc --noEmit` exited with code `0`.
+- **Production Build**:
+  - `npm run build` completed successfully in 17.3s (`dist/assets/ContributionsPage-*.js`, `dist/assets/finance.service-*.js`, `dist/assets/finance.repository-*.js`).
+
+---
+
+## 12. Fix `student_obligations` RLS Policy for Direct Supabase Contribution Assignment
+
+### 12.1. Root Cause Analysis
+- **Problem**: When assigning students to a newly created contribution fee definition in Direct Supabase mode, the batch insert into `public.student_obligations` is evaluated against PostgreSQL Row-Level Security.
+- **Root Cause**:
+  - Migration `supabase/migrations/20261101000000_student_activation_and_rls.sql` defined:
+    ```sql
+    CREATE POLICY "Officers manage student obligations" ON student_obligations
+      FOR ALL USING (
+        EXISTS (SELECT 1 FROM user_roles WHERE user_id = auth.uid() AND role IN ('DEVADMIN', 'OFFICER') AND revoked_at IS NULL)
+      );
+    ```
+  - The direct subquery against `public.user_roles` inside the RLS policy encounters the RLS policies of `user_roles` itself. When an authenticated user performs bulk inserts, this direct subquery can be blocked, return 0 rows, or cause infinite recursion, triggering `42501: new row violates row-level security policy for table student_obligations`.
+  - Furthermore, it lacked an explicit `WITH CHECK` clause matching the `USING` predicate.
+
+### 12.2. Forward-Only Migration (`20261108150000_fix_student_obligations_rls.sql`)
+The policy is updated to use the existing `SECURITY DEFINER` helper `public.get_current_user_role()`, which bypasses RLS on `user_roles` in a sandboxed, trusted context:
+```sql
+-- ==============================================================================
+-- UniTap Migration: Fix student_obligations RLS for Direct Supabase Mode
+-- Migration File: supabase/migrations/20261108150000_fix_student_obligations_rls.sql
+-- ==============================================================================
+
+-- 1. Ensure Row Level Security is enabled
+ALTER TABLE public.student_obligations ENABLE ROW LEVEL SECURITY;
+
+-- 2. Drop existing officer management policies
+DROP POLICY IF EXISTS "Officers manage student obligations" ON public.student_obligations;
+DROP POLICY IF EXISTS "student_obligations_officer_devadmin" ON public.student_obligations;
+
+-- 3. Create hardened officer/devadmin management policy using SECURITY DEFINER helper
+CREATE POLICY "Officers manage student obligations" ON public.student_obligations
+  FOR ALL TO authenticated
+  USING (public.get_current_user_role() IN ('DEVADMIN', 'OFFICER'))
+  WITH CHECK (public.get_current_user_role() IN ('DEVADMIN', 'OFFICER'));
+
+-- 4. Preserve student own-record SELECT access
+DROP POLICY IF EXISTS "Students view own obligations" ON public.student_obligations;
+DROP POLICY IF EXISTS "student_obligations_student_read" ON public.student_obligations;
+
+CREATE POLICY "Students view own obligations" ON public.student_obligations
+  FOR SELECT TO authenticated
+  USING (
+    student_id = (SELECT student_id FROM public.users WHERE id = auth.uid())
+  );
+```
+
+---
+
+## 13. Contribution Creation Sheet & Modal Lifecycle Remediation
+
+### 13.1. Issue Description & Root Cause
+- **Issue**:
+  - After a contribution fee and student obligations were successfully confirmed and written to Supabase Cloud, the Success modal was presented.
+  - However, the underlying "Create Contribution" sheet (`UniSheet`) remained open in the DOM and did not dismiss correctly.
+- **Root Cause**:
+  - The blocking processing modal (`isBlockingModalOpen`) was doing double duty, presenting both in-flight processing and confirmed success.
+  - While processing was underway, `isCreateCollectionSheetOpen` was intentionally kept open to preserve form inputs in case of failure.
+  - When Supabase confirmed success, `isCreateCollectionSheetOpen` was not dismissed prior to showing the success state.
+  - Furthermore, having an active `UniSheet` (which applies `overflow: hidden` and body stack handlers) and an active `ion-modal` stacked simultaneously prevented clean dismiss animations and caused the underlying sheet to remain stuck or backdrop-locked when closing.
+
+### 13.2. Lifecycle Fix Implemented (`src/views/ContributionsPage.vue`)
+1. **Separated Modal States**:
+   - `isBlockingModalOpen`: Dedicated strictly to active processing (`CREATING_RULE`, `LOADING_STUDENTS`, `GENERATING_OBLIGATIONS`, `SAVING_SUPABASE`, `FINALIZING`) and error handling (`ERROR`).
+   - `isSuccessModalOpen`: Dedicated strictly to confirmed Supabase success (`SUCCESS`).
+2. **Explicit Sequential Modal Dismissal**:
+   - When Supabase confirms success:
+     ```ts
+     // 1. After confirmed Supabase success, close and dismiss the Create Contribution sheet
+     isCreateCollectionSheetOpen.value = false;
+
+     // 2. Close the blocking processing modal before displaying the success modal
+     isBlockingModalOpen.value = false;
+
+     // 3. Prevent stacked or overlapping Ionic modals by yielding for dismiss transition
+     await new Promise((resolve) => setTimeout(resolve, 150));
+
+     // 4. Display the dedicated success modal
+     isSuccessModalOpen.value = true;
+     ```
+3. **Confirmed Success Handler**:
+   - "Done & View Collections" invokes `handleFinishCreationSuccess()`:
+     - Dismisses `isSuccessModalOpen.value = false;`
+     - Dismisses `isCreateCollectionSheetOpen.value = false;`
+     - Clears form inputs (`collectionName`, `collectionNotes`, `selectedStudentIds`).
+     - Refreshes collections via `await loadData();`
+     - Switches view to Collections tab: `activeSection.value = 'COLLECTIONS';`
+4. **Preserved Cancel and Failure States**:
+   - The sheet is never dismissed before Supabase confirms success (protecting input if a network error occurs).
+   - Cancel on the sheet cleanly closes `isCreateCollectionSheetOpen = false`.
+   - On error, `isCreateCollectionSheetOpen` remains open in the background while the blocking modal displays error details and options to "Retry Student Assignment" or "Close".
+
+### 13.3. Verification Results
+- **Unit Tests**: `npx vitest run tests/unit/supabase-direct-diagnostic.spec.ts tests/unit/continuous-finance-recording.spec.ts` (31 passed, 0 failed).
+- **Typecheck**: `npx vue-tsc --noEmit` (0 errors, exit code 0).
+- **Production Build**: `npm run build` (built in 18.6s, exit code 0).
+
+---
+
+## 14. Student UI Remediation: Contributions Year/Section Mapping & Student Portal Profile
+
+### 14.1. Issue Description & Root Causes
+1. **Contributions Year/Section Display**:
+   - **Symptom**: On the Contributions Page under "Student Records", student obligations displayed academic placeholders like `Year 1-N/A` and generic titles instead of the student's real year level, section, and program.
+   - **Root Cause**: `FinanceRepository.getObligationsBySemester()` in Direct Supabase mode joined `students` but not `student_enrollments` or `programs`, defaulting unpopulated columns to `year_level: 1` and `section: '1A'`. Additionally, `FinanceService.getObligationsBySemester()` was not populating the academic details from `StudentService` (which already had cached, authoritative student enrollments used by the Students directory page).
+
+2. **Student Portal Profile Resolution**:
+   - **Symptom**: When a student logged into the Student Portal in Direct Supabase mode, the dashboard displayed placeholder text like `"MCC STUDENT"` and generic year/section info, or failed to hydrate the profile.
+   - **Root Cause**: `useCurrentStudentPortal.ts` previously attempted to resolve students from the local SQLite database via `StudentStorageService.getStudentById()`. In Direct Supabase mode, local SQLite does not contain the remote student or user session linkage. The Supabase auth user (`supabase.auth.getUser()`) has an ID corresponding to `public.users.id`, which points to `student_id` (a UUID foreign key to `public.students.id`). If this linkage was not queried from Supabase, the student profile could not be loaded.
+
+### 14.2. Fixes Implemented
+
+1. **`src/types/finance.ts` & `src/database/repositories/finance.repository.ts`**:
+   - Added `course?: string` and `program?: string` to `StudentObligationItem` and `StudentObligationWithBalance`.
+   - Updated `FinanceRepository.getStudentObligations` to filter using `.neq('status', 'VOID')` rather than `.eq('status', 'ACTIVE')` so partial/paid/unpaid records are included.
+   - Updated `FinanceRepository.getObligationsBySemester` in Direct Supabase mode to query `programs` and respect student enrollment details rather than hardcoding fallback strings.
+
+2. **`src/services/finance.service.ts`**:
+   - Reused the existing authoritative `StudentService` student-and-enrollment cache in `FinanceService.getObligationsBySemester()`.
+   - In Direct Supabase mode, calls `await studentService.getStudents()` and matches each obligation's `student_id` to the student's authoritative record, populating:
+     - `studentName` (formatted as `Last, First`)
+     - `schoolId` (from student record)
+     - `yearLevel` (from active enrollment)
+     - `section` (from active enrollment)
+     - `course` & `program` (program code, e.g., `BSIT`)
+   - Preserves `course` and `program` across all mapped obligation items.
+
+3. **`src/views/ContributionsPage.vue`**:
+   - In `loadData()`, replaced direct repository query with `studentService.getStudents()`, populating `enrolledStudents` with `id`, `school_id`, `first_name`, `last_name`, `status`, `created_at`, `updated_at`, `year_level`, `section`, and `program_id`.
+   - Updated the Student Records list item subtitle binding to display:
+     `:subtitle="`${c.schoolId || 'No ID'} • ${c.program || c.course || 'BSIT'} • Year ${c.yearLevel || 1}-${c.section || 'N/A'} • ${c.title}`"`.
+
+4. **`src/composables/useCurrentStudentPortal.ts`**:
+   - Added direct Supabase resolution path to `resolveCurrentStudent()`:
+     1. Resolves authenticated Supabase Auth user via `supabase.auth.getUser()`.
+     2. Queries `public.users` table for `student_id` and `username`.
+     3. Queries `studentService.getStudent(userRow.student_id)` (or searches by username/School ID) to fetch the complete academic profile, enrollment, and active NFC card.
+     4. Sets `error.value = 'No student profile is linked to this authenticated account.'` if no student record matches.
+   - Updated `studentName` computed property to return `''` when no profile is linked instead of generic fallback `'Student'`.
+
+5. **`src/components/student/StudentHomeView.vue`**:
+   - Replaced `'MCC STUDENT'` generic placeholder with the student's actual student number (`student?.studentNumber`).
+   - Added an unlinked account state using `UniEmptyState` with a "Retry Connection" action if the profile fails to resolve.
+   - Added loading skeleton/spinner state during profile hydration.
+
+6. **`tests/unit/supabase-direct-diagnostic.spec.ts`**:
+   - Added Regression Test 15: verifies that `FinanceService.getObligationsBySemester` maps student name, School ID, program, year level, and section accurately in Direct Supabase mode without fallback defaults.
+   - Added Regression Test 16: verifies that `useCurrentStudentPortal` resolves `student_id` from `public.users` and loads complete profile via `StudentService`.
+
+### 14.3. Verification Results
+- **Unit Tests**:
+  - `tests/unit/supabase-direct-diagnostic.spec.ts`: 16 passed (including tests 15 and 16).
+  - `tests/unit/continuous-finance-recording.spec.ts`: 17 passed.
+  - Total: 33 tests passed, 0 failed.
+- **Typecheck**: `npx vue-tsc --noEmit` passed with 0 errors (exit code 0).
+- **Production Build**: `npm run build` completed in 22.16s with 0 errors (exit code 0).
+
+---
+
+## 15. DEVADMIN Deletion Architecture & Automatic Cascades
+
+### 15.1. Background & Problem Statement
+Prior to this update, parent records across UniTap (such as obligation rules, events, students, and academic structure) could not be cleaned up cleanly in Direct Supabase mode due to foreign key constraint violations, lack of DEVADMIN-level delete controls, and missing UI delete triggers. Furthermore, financial integrity requires that records with actual collected payments or payment allocations must NEVER be destructively deleted, but instead protected with descriptive error guidance directing administrators to safe archiving or deactivation.
+
+### 15.2. Architecture & Remediation Strategy
+
+1. **Database CASCADE & BEFORE DELETE Protection Triggers**:
+   - `student_obligations`: Added `ON DELETE CASCADE` on `rule_id` foreign key.
+   - `obligation_rules`: Added trigger `trg_protect_obligation_rule_deletion` that blocks deletion with error `42501` if child student obligations have recorded payment allocations (`Cannot delete contribution collection because payments have already been collected for it. Archive or deactivate instead.`). Unpaid obligations are safely cascaded.
+   - `student_obligations`: Added trigger `trg_protect_student_obligation_deletion` that blocks deletion if payment allocations exist (`Cannot delete student obligation because payments have already been allocated to it.`).
+   - `events`: Added trigger `trg_protect_event_deletion` that verifies if paid absence fines exist before deletion (`Cannot delete event because paid absence fines have already been collected for it.`); automatically cascades and cleans up unpaid absence fines.
+   - `students`: Added trigger `trg_protect_student_deletion` that blocks deletion if immutable ledger payments or allocations exist (`Cannot delete student record with historical ledger payment transactions.`).
+   - `academic_years` and `semesters`: Added triggers blocking deletion if active payments are linked to obligations within those terms.
+
+2. **Supabase RLS Policy Hardening**:
+   - Strictly restricted `DELETE` operations across all core entities (`students`, `student_enrollments`, `nfc_cards`, `obligation_rules`, `student_obligations`, `events`, `event_occurrences`, `programs`) to DEVADMIN users via `public.get_current_user_role() = 'DEVADMIN'`.
+   - Prevented standard `OFFICER` roles from executing unauthorized remote `DELETE` operations even if attempting raw PostgREST requests.
+
+3. **Front-End DEVADMIN-Only Deletion UX**:
+   - Extended `useAuth()` with reactive computed flags: `isDevAdmin` and `isOfficer`.
+   - Added standard destructive confirmation dialogs (`UniDialog`) with target record details, loading feedback states (`isDeleting...`), error toasts, and post-delete data refreshes across all management screens:
+     - **Students**: Delete Student button in `StudentProfilePage.vue` (DEVADMIN-only).
+     - **NFC Cards**: Delete Card chip action in `StudentProfilePage.vue` (DEVADMIN-only).
+     - **Academic Years**: Delete Year button in `AcademicYearsPage.vue` (DEVADMIN-only).
+     - **Semesters**: Delete Semester button in `SemestersPage.vue` (DEVADMIN-only).
+     - **Sections**: Delete Section button in `SectionsPage.vue` (DEVADMIN-only).
+     - **Programs**: Delete Program button in `ProgramsPage.vue` (DEVADMIN-only).
+     - **Event Categories**: Delete Category button in `EventCategoriesPage.vue` (DEVADMIN-only).
+     - **Events**: Delete Event button in `EventDetailPage.vue` (DEVADMIN-only).
+     - **Contributions**: Delete Collection button on collection cards and Delete Dues button on student records (when no payments made) in `ContributionsPage.vue` (DEVADMIN-only).
+     - **Fines**: Delete Fine button in `FinesPage.vue` (when balance equals total amount, indicating no payments made) (DEVADMIN-only).
+     - **Officer Management**: Delete Appointment button in `OfficerManagementPage.vue` (DEVADMIN-only).
+
+4. **Service & Repository Direct Remote Operations**:
+   - `StudentService.deleteStudent()`: Performs remote `supabase.from('students').delete().eq('id', id)`.
+   - `StudentService.deleteNfcCard()`: Added and exported for card management.
+   - `SystemSetupService.deleteAcademicYear()` & `deleteSemester()`: Validates DEVADMIN role and performs remote deletes.
+   - `FinanceService.deleteObligationRule()`, `deactivateObligationRule()`, `deleteStudentObligation()`: Implemented with `FINANCE_ASSESSMENTS_AND_RULES` policy enforcement and remote Supabase deletes.
+
+### 15.3. Migration File Created
+- **File**: `supabase/migrations/20261108160000_devadmin_cascades_and_delete_protection.sql`
+- **Deployment Status**: Pending Manual Dashboard Deployment via Supabase SQL Editor.
+
+### 15.4. Verification Results
+- **Unit Tests**:
+  - `tests/unit/supabase-direct-diagnostic.spec.ts`: 18 tests passed (including Test 17: DEVADMIN remote delete & Test 18: Non-DEVADMIN delete rejection).
+  - `tests/unit/continuous-finance-recording.spec.ts`: 17 tests passed.
+  - Total: 35 passing tests, 0 failed.
+- **Typecheck**: `npx vue-tsc --noEmit` passed with 0 errors (exit code 0).
+- **Production Build**: `npm run build` completed in 20.08s with 0 errors (exit code 0).
+
+---
+
+## 16. Polish of Contributions Page Academic Display & Student Portal Resolution
+
+### 16.1. Problem Statement
+1. **Contributions Page Hardcoded Fallbacks**:
+   - `ContributionsPage.vue` was defaulting missing course/program to `'BSIT'` and missing year level to `1`, which misled officers by showing incorrect academic levels when students were unenrolled or in a different program.
+   - Individual student rows in the collection creation modal also defaulted year level to `1` and section to `'N/A'`.
+2. **Student Portal Account Resolution & ID Discrepancies**:
+   - When `public.users.student_id` was `NULL`, the portal previously tried resolving the student by splitting the user's email address by `@` (`email.split('@')[0]`), which was error-prone and incorrect.
+   - Risk existed where the auth account UUID could be mistakenly substituted for the student's domain entity UUID (`students.id`), which broke database foreign keys.
+
+### 16.2. Remediation Implemented
+
+1. **`ContributionsPage.vue` Display Polish**:
+   - Removed misleading fallbacks `'BSIT'` and `yearLevel || 1`.
+   - Updated obligation record subtitle and student row subtitle to display actual enrollment data or a clean dash `—` when missing:
+     - School ID: `c.schoolId || '—'`
+     - Program: `c.program || c.course || '—'`
+     - Year & Section: `formatObligationAcademicSubtitle()` accurately outputs `Year {yearLevel}-{section}`, `Year {yearLevel}`, or `—`.
+     - In the Create Collection student picker: `<span class="stu-sub font-mono">{{ s.school_id || '—' }} • {{ formatStudentYearSection(s) }}</span>`.
+
+2. **`useCurrentStudentPortal.ts` Exact Metadata Resolution & Link Repair**:
+   - Completely eliminated email username splitting (`email.split('@')[0]`) and removed all email-based student lookups.
+   - If `public.users.student_id` is `NULL`, resolves the student strictly by matching the authenticated user's exact `authData.user.user_metadata.school_id` against `students.school_id`.
+   - Requires an exact, case-insensitive verified match (`matchedStudent.studentNumber.trim().toUpperCase() === metadataSchoolId.toUpperCase()`).
+   - Only after an exact verified match, repairs `public.users.student_id` by executing a targeted update with the student's entity UUID (`candidate.id`).
+   - Enforced strict protection against substituting auth UUID for student UUID across all resolution branches (`student_id !== authUid` and `candidate.id !== authUid`).
+
+3. **Regression Tests Added**:
+   - Added Test 19 to `tests/unit/supabase-direct-diagnostic.spec.ts`: Validates that `useCurrentStudentPortal` resolves student via `user_metadata.school_id` when `public.users.student_id` is `NULL`, repairs `public.users` with student UUID (not auth UUID), and maps academic details properly.
+   - Added Test 20 to `tests/unit/supabase-direct-diagnostic.spec.ts`: Validates that `useCurrentStudentPortal` refuses to treat email usernames as School ID when metadata is absent or unlinked, returning `null` with a clear "Profile Unlinked" error.
+
+### 16.3. Verification Results
+- **Unit Tests**:
+  - `tests/unit/supabase-direct-diagnostic.spec.ts`: 20 tests passed.
+  - `tests/unit/continuous-finance-recording.spec.ts`: 17 tests passed.
+  - Total: 37 passing tests, 0 failed.
+- **Typecheck**: `npx vue-tsc --noEmit` passed with 0 errors (exit code 0).
+- **Production Build**: `npm run build` completed in 26.39s with 0 errors (exit code 0).
+
+---
+
+## 17. Configurable Attendance IN/OUT & Student Profile Photos
+
+### 17.1. Architecture & Capabilities
+
+1. **Configurable Attendance Checkpoints per Event Occurrence**:
+   - Event organizers (DEVADMIN / OFFICER) can configure multiple checkpoints per occurrence session (e.g. `Morning IN`, `Morning OUT`, `Afternoon IN`, `Afternoon OUT`).
+   - Checkpoints define custom labels, checkpoint type (`IN` | `OUT`), start/end schedules, and order index stored in `event_occurrences.checkpoints_json` with an `active_checkpoint_id` pointer.
+   - NFC scans verify and record attendance against the active checkpoint.
+   - Deduplication: Attendance records enforce checkpoint-scoped uniqueness (`UNIQUE (occurrence_id, student_id, checkpoint_id)`). A student who has checked in for `Morning IN` is marked as duplicate only if scanned again for `Morning IN`, but can cleanly check in for `Morning OUT` without conflict.
+   - Attendance reports: Added `ReportService.generateAttendanceCsv()` and an "Export CSV" feature in `EventDetailPage.vue` allowing organizers to export checkpoint completion across all students.
+
+2. **Student Profile Photos & Supabase Storage Integration**:
+   - Integrated Supabase Storage with dedicated public bucket `student-profile-photos`.
+   - Security policies grant public `SELECT` access, while upload/update/delete are restricted to authenticated DEVADMIN and active OFFICER roles.
+   - Storage path is stored in `students.photo_storage_path`.
+   - Public photo URLs are resolved with high-performance in-memory caching (`StudentService.photoUrlCache`) to avoid redundant storage API requests.
+   - Photos are displayed across:
+     - `AttendanceScanPage.vue` Photo Identity Verification Card.
+     - `StudentProfilePage.vue` Profile Hero Card (with direct file upload / delete controls for officers).
+     - `StudentCard.vue` in Students directory.
+     - `StudentHomeView.vue` CSG Student Pass card.
+     - `StudentPassPage.vue` Digital Pass view.
+   - Default avatar with capitalized student initials fallback is displayed whenever a photo is absent.
+   - Both Direct Supabase Mode and Offline-First SQLite Mode are preserved with base64 local fallback.
+
+### 17.2. Database & Schema Updates
+
+- **Forward-only Supabase Migration**: `supabase/migrations/20261108170000_attendance_checkpoints_and_storage.sql`
+  - Adds `checkpoints_json JSONB DEFAULT '[]'` and `active_checkpoint_id VARCHAR(64)` to `event_occurrences`.
+  - Adds `checkpoint_id VARCHAR(64) DEFAULT 'default_in'` to `attendance_records`.
+  - Replaces `(occurrence_id, student_id)` constraint with `UNIQUE (occurrence_id, student_id, checkpoint_id)`.
+  - Upgrades `record_attendance_scan` RPC to accept `p_checkpoint_id VARCHAR(64) DEFAULT 'default_in'` and execute checkpoint-scoped duplicate checks.
+  - Provisions `student-profile-photos` storage bucket with RLS policies.
+- **SQLite Migration 010**: `src/database/migrations/010_attendance_checkpoints.ts`
+  - Adds `checkpoints_json`, `active_checkpoint_id`, and `checkpoint_id`.
+
+---
+
+## 18. Scoped Student Payment Obligation Filtering (Record Payment Find Student)
+
+### 18.1. Problem & Architecture
+- Previously, the "Find Student" tab in `MakePaymentPage.vue` invoked `useStudents().loadStudents()`, fetching all 300 students regardless of whether they owed money.
+- Finding eligible debtors required filtering at the query level before assembling full student profiles.
+
+### 18.2. Implementation
+- **Student Service (`src/services/student.service.ts`)**:
+  - Added `getStudentsByIds(ids: string[]): Promise<Student[]>`.
+  - Direct Supabase Mode queries `students`, `student_enrollments`, and `nfc_cards` with `.in('id', ids)` and joins them using `assembleStudentFromParts`.
+  - SQLite Mode filters `repo.getAll()`.
+- **Finance Repository (`src/database/repositories/finance.repository.ts`)**:
+  - Added `FinanceRepository.getStudentIdsWithOutstandingBalance({ category, ruleId, semesterId })`.
+  - Direct Supabase Mode: Queries `student_obligations` filtered by `status != 'VOID'`, category, and `rule_id`, fetches `payment_allocations` with `POSTED` payments, calculates `balance = assessed - paid`, excludes `status = 'PAID'` and fully paid balances, and returns unique student IDs with `balance > 0`.
+  - Offline-First SQLite Mode: Executes equivalent CTE calculating `(o.amount_centavos + COALESCE(a.change_centavos, 0)) > COALESCE(p.paid_centavos, 0)`.
+- **Finance Service (`src/services/finance.service.ts`)**:
+  - Added `getEligibleStudentsForPayment({ category, ruleId, semesterId, searchQuery })`. Scopes student IDs first and assembles full Student objects.
+- **Make Payment Page (`src/views/MakePaymentPage.vue`)**:
+  - Replaced `useStudents()` global student loading with `eligibleStudents` and `loadEligibleStudents()`.
+  - Watches `[selectedCategory, selectedRuleId]` to trigger scoped refresh whenever the category or template selection changes.
+  - Automatically refreshes eligible students when switching to Find Student search tab and after successful payment recording.
+  - Added empty state handling when no students owe obligations for the selected template/category.
+
+---
+
+## 19. Remaining Tasks & Manual Deployment Checklist
+
+1. **Execute Attendance Checkpoints & Storage Migration in Supabase SQL Editor (CRITICAL)**:
+   - **Action**: Run the SQL in migration `supabase/migrations/20261108170000_attendance_checkpoints_and_storage.sql` in the Supabase Dashboard SQL Editor.
+   - **Verification**: Verifies that `event_occurrences` has `checkpoints_json`, `attendance_records` has `checkpoint_id` and unique constraint `(occurrence_id, student_id, checkpoint_id)`, `record_attendance_scan` supports `p_checkpoint_id`, and the `student-profile-photos` storage bucket is provisioned with RLS policies.
+
+2. **Execute DEVADMIN Cascades and Delete Protection in Supabase SQL Editor (CRITICAL)**:
+   - **Action**: Run the SQL in migration `supabase/migrations/20261108160000_devadmin_cascades_and_delete_protection.sql` in the Supabase Dashboard SQL Editor.
+   - **Verification**: Verifies that DEVADMIN users can delete parent records with automatic child cleanup, that financial payments are protected by database triggers, and that non-DEVADMIN users are blocked from destructive deletes.
+
+3. **Execute Student Obligations RLS Fix in Supabase SQL Editor (CRITICAL)**:
+   - **Action**: Run migration `supabase/migrations/20261108150000_fix_student_obligations_rls.sql` in the Supabase Dashboard SQL Editor.
+   - **Verification**: Verifies that DEVADMIN and active OFFICER users can insert, update, and read `student_obligations` without `42501` policy violation errors during contribution student assignment.
+
+4. **Execute Student-to-Officer Promotion RPC in Supabase SQL Editor (CRITICAL)**:
+   - **Action**: Run migration `supabase/migrations/20261108140000_student_to_officer_promotion.sql` in the Supabase Dashboard SQL Editor.
+   - **Verification**: Test promoting a registered student via `devadmin_promote_student_to_officer` and verify that the appointment is marked `ACTIVE` and `user_roles` receives `OFFICER` while preserving `STUDENT`.
+
+5. **Execute Scoped Events RLS Remediation in Supabase SQL Editor (CRITICAL)**:
+   - **Action**: Run migration `supabase/migrations/20261108130000_scoped_events_rls.sql` in the Supabase Dashboard SQL Editor.
+
+6. **Execute Corrected RPC for Activation Status Lookup in Supabase SQL Editor (CRITICAL)**:
+   - **Action**: Run migration `supabase/migrations/20261108120000_harden_officer_activation_status.sql` in the Supabase Dashboard SQL Editor.
+
+7. **Manual Supabase SQL Editor Policy Update for Students (CRITICAL)**:
+   - **Action**: Update the RLS policies for `students`, `student_enrollments`, and `nfc_cards` in the Supabase SQL Editor using `public.get_current_user_role() IN ('DEVADMIN', 'OFFICER')`.

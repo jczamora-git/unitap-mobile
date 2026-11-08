@@ -1,6 +1,7 @@
 import { OfficerRepository, type OfficerListRecord } from '@/database/repositories/officer.repository';
 import { AuthRepository } from '@/database/repositories/auth.repository';
 import { StudentsRepository } from '@/database/repositories/students.repository';
+import { getDatabase } from '@/database/database';
 import { StudentActivationService } from './student-activation.service';
 import { OperationPolicyService } from './operation-policy.service';
 import { DataModeService } from './data-mode.service';
@@ -86,7 +87,7 @@ export const PRESET_DEFINITIONS: Record<OfficerPermissionPreset, string[]> = {
 
 export interface CreateExistingStudentOfficerDto {
   studentId: string;
-  userId: string;
+  userId?: string;
   fullName: string;
   email: string;
   permissionPreset: OfficerPermissionPreset;
@@ -131,45 +132,104 @@ export interface InviteNewOfficerDto {
 
 export class OfficerManagementService {
   /**
-   * Scenario A: Promote or assign an existing registered student as Officer.
+   * Scenario A: Promote an existing student's authenticated account to Officer.
    * Does NOT duplicate Auth account or delete STUDENT role.
+   * Does NOT issue activation codes.
    */
-  public static async assignExistingStudentAsOfficer(
+  public static async promoteStudentToOfficer(
     dto: CreateExistingStudentOfficerDto
   ): Promise<{ success: boolean; appointment: OfficerAppointmentRecord; error?: string }> {
     try {
       await OperationPolicyService.assertPermitted('OFFICER_MANAGEMENT_AND_PERMISSIONS');
 
+      const perms = dto.permissionPreset === 'CUSTOM'
+        ? (dto.customPermissions || [])
+        : PRESET_DEFINITIONS[dto.permissionPreset];
+
+      if (DataModeService.isDirectSupabase()) {
+        const { supabase } = await import('@/integrations/supabase/client');
+
+        const { data, error } = await supabase.rpc('devadmin_promote_student_to_officer', {
+          p_student_id: dto.studentId,
+          p_user_id: dto.userId || null,
+          p_full_name: dto.fullName.trim(),
+          p_email: dto.email.trim().toLowerCase(),
+          p_permission_preset: dto.permissionPreset,
+          p_custom_permissions: perms,
+          p_academic_year_id: dto.academicYearId || null,
+          p_semester_id: dto.semesterId || null,
+          p_appointment_start: dto.startDate,
+          p_appointment_end: dto.endDate,
+          p_scope_type: dto.scopeType || 'ORGANIZATION',
+          p_scope_id: dto.scopeId || null,
+        });
+
+        if (error) {
+          throw new Error(`Failed to promote student on Supabase: ${error.message}`);
+        }
+        if (!data || !data.success) {
+          return { success: false, appointment: null as any, error: data?.error || 'Failed to promote student to officer.' };
+        }
+
+        const appointment: OfficerAppointmentRecord = {
+          id: data.appointment_id,
+          user_id: data.user_id || dto.userId || null,
+          student_id: data.student_id || dto.studentId,
+          full_name: data.officer_name || dto.fullName.trim(),
+          email: dto.email.trim().toLowerCase(),
+          permission_preset: dto.permissionPreset,
+          custom_permissions_json: JSON.stringify(perms),
+          academic_year_id: dto.academicYearId || null,
+          semester_id: dto.semesterId || null,
+          appointment_start: dto.startDate,
+          appointment_end: dto.endDate,
+          scope_type: dto.scopeType || 'ORGANIZATION',
+          scope_id: dto.scopeId || null,
+          status: 'ACTIVE',
+          assigned_by_user_id: dto.devAdminUserId,
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        };
+
+        // Cache locally in SQLite for offline consistency
+        try {
+          await OfficerRepository.createAppointment(appointment);
+        } catch {
+          // ignore cache errors
+        }
+
+        return { success: true, appointment };
+      }
+
+      // Offline-First SQLite fallback
       const student = await StudentsRepository.getStudentById(dto.studentId);
       if (!student) {
         return { success: false, appointment: null as any, error: 'Student record not found.' };
       }
 
-      const user = await AuthRepository.getUserById(dto.userId);
-      if (!user) {
-        return { success: false, appointment: null as any, error: 'Associated user account not found.' };
+      // Prevent duplicate active officer appointments
+      if (dto.userId) {
+        const existingUserAppt = await OfficerRepository.getAppointmentByUserId(dto.userId);
+        if (existingUserAppt && existingUserAppt.status === 'ACTIVE') {
+          return { success: false, appointment: null as any, error: 'User already has an active officer appointment.' };
+        }
       }
-
-      // Check if already an active officer
-      const existingAppt = await OfficerRepository.getAppointmentByUserId(dto.userId);
-      if (existingAppt && existingAppt.status === 'ACTIVE') {
-        return { success: false, appointment: null as any, error: 'User is already an active Officer.' };
+      const existingStudentAppt = await OfficerRepository.getAppointmentByStudentId(dto.studentId);
+      if (existingStudentAppt && existingStudentAppt.status === 'ACTIVE') {
+        return { success: false, appointment: null as any, error: 'Student already has an active officer appointment.' };
       }
 
       const now = new Date().toISOString();
       const apptId = 'appt_' + Math.random().toString(36).substring(2, 10);
-      const permissions = dto.permissionPreset === 'CUSTOM'
-        ? (dto.customPermissions || [])
-        : PRESET_DEFINITIONS[dto.permissionPreset];
 
       const appointment: OfficerAppointmentRecord = {
         id: apptId,
-        user_id: dto.userId,
+        user_id: dto.userId || null,
         student_id: dto.studentId,
         full_name: dto.fullName.trim(),
         email: dto.email.trim().toLowerCase(),
         permission_preset: dto.permissionPreset,
-        custom_permissions_json: JSON.stringify(permissions),
+        custom_permissions_json: JSON.stringify(perms),
         academic_year_id: dto.academicYearId || null,
         semester_id: dto.semesterId || null,
         appointment_start: dto.startDate,
@@ -185,24 +245,32 @@ export class OfficerManagementService {
       await OfficerRepository.createAppointment(appointment);
 
       // Ensure user has active OFFICER role in user_roles
-      const existingRoles = await AuthRepository.getUserRoles(dto.userId);
-      const hasOfficerRole = existingRoles.some((r) => r.role === 'OFFICER' && !r.revoked_at);
-      if (!hasOfficerRole) {
-        const roleRecord: UserRoleRecord = {
-          id: 'rol_off_' + Math.random().toString(36).substring(2, 9),
-          user_id: dto.userId,
-          role: 'OFFICER',
-          semester_id: dto.semesterId || null,
-          assigned_by_user_id: dto.devAdminUserId,
-          assigned_at: now,
-        };
-        await AuthRepository.assignUserRole(roleRecord);
+      if (dto.userId) {
+        const existingRoles = await AuthRepository.getUserRoles(dto.userId);
+        const hasOfficerRole = existingRoles.some((r) => r.role === 'OFFICER' && !r.revoked_at);
+        if (!hasOfficerRole) {
+          const roleRecord: UserRoleRecord = {
+            id: 'rol_off_' + Math.random().toString(36).substring(2, 9),
+            user_id: dto.userId,
+            role: 'OFFICER',
+            semester_id: dto.semesterId || null,
+            assigned_by_user_id: dto.devAdminUserId,
+            assigned_at: now,
+          };
+          await AuthRepository.assignUserRole(roleRecord);
+        }
       }
 
       return { success: true, appointment };
     } catch (err: unknown) {
       return { success: false, appointment: null as any, error: (err as Error).message };
     }
+  }
+
+  public static async assignExistingStudentAsOfficer(
+    dto: CreateExistingStudentOfficerDto
+  ): Promise<{ success: boolean; appointment: OfficerAppointmentRecord; error?: string }> {
+    return this.promoteStudentToOfficer(dto);
   }
 
   /**
@@ -428,6 +496,14 @@ export class OfficerManagementService {
       }
       const { data, error } = await query;
       if (error) throw new Error(`Failed to query officers from Supabase: ${error.message}`);
+
+      const studentIds = (data || []).map((row: any) => row.student_id).filter(Boolean);
+      const studentMap = new Map<string, string>();
+      if (studentIds.length > 0) {
+        const { data: stuData } = await supabase.from('students').select('id, school_id').in('id', studentIds);
+        (stuData || []).forEach((s: any) => studentMap.set(s.id, s.school_id));
+      }
+
       return (data || []).map((row: any) => ({
         id: row.id,
         user_id: row.user_id,
@@ -452,7 +528,7 @@ export class OfficerManagementService {
         revoked_at: row.revoked_at,
         last_activity_at: row.last_activity_at,
         username: row.email || null,
-        school_id: null,
+        school_id: studentMap.get(row.student_id) || null,
       }));
     }
     return OfficerRepository.getAppointments(filter);
@@ -502,6 +578,30 @@ export class OfficerManagementService {
         return { success: true };
       }
       await OfficerRepository.revokeAppointment(appointmentId);
+      return { success: true };
+    } catch (err: unknown) {
+      return { success: false, error: (err as Error).message };
+    }
+  }
+
+  /**
+   * Permanently delete an officer appointment. DEVADMIN only.
+   */
+  public static async deleteOfficer(
+    appointmentId: string
+  ): Promise<{ success: boolean; error?: string }> {
+    try {
+      if (DataModeService.isDirectSupabase()) {
+        const { supabase } = await import('@/integrations/supabase/client');
+        const { error } = await supabase
+          .from('officer_appointments')
+          .delete()
+          .eq('id', appointmentId);
+        if (error) throw new Error(error.message || 'Failed to delete officer on Supabase.');
+        return { success: true };
+      }
+      const db = await getDatabase();
+      await db.execute('DELETE FROM officer_appointments WHERE id = ?', [appointmentId]);
       return { success: true };
     } catch (err: unknown) {
       return { success: false, error: (err as Error).message };
@@ -688,14 +788,73 @@ export class OfficerManagementService {
   ): Promise<any[]> {
     const clean = (query || '').trim();
 
-    // 1. Search local SQLite
+    // 1. In Direct Supabase mode, query Supabase authoritative students, users, and appointments
+    if (DataModeService.isDirectSupabase()) {
+      try {
+        const { supabase } = await import('@/integrations/supabase/client');
+        let queryBuilder = supabase
+          .from('students')
+          .select('id, school_id, first_name, middle_name, last_name, status')
+          .eq('status', 'ACTIVE')
+          .order('last_name', { ascending: true });
+
+        if (clean.length > 0) {
+          queryBuilder = queryBuilder.or(`school_id.ilike.%${clean}%,first_name.ilike.%${clean}%,last_name.ilike.%${clean}%`);
+        }
+
+        const { data: remote, error: stuErr } = await queryBuilder.limit(limit);
+        if (!stuErr && remote && remote.length > 0) {
+          const studentIds = remote.map((r: any) => r.id);
+
+          // Find linked user accounts in Supabase
+          const { data: usersData } = await supabase
+            .from('users')
+            .select('id, username, student_id, account_status')
+            .in('student_id', studentIds);
+
+          const userByStudentId = new Map<string, any>();
+          (usersData || []).forEach((u: any) => {
+            if (u.student_id) userByStudentId.set(u.student_id, u);
+          });
+
+          // Find existing active officer appointments in Supabase
+          const { data: apptData } = await supabase
+            .from('officer_appointments')
+            .select('student_id, user_id, status')
+            .in('student_id', studentIds)
+            .in('status', ['ACTIVE', 'SUSPENDED']);
+
+          const activeOfficerStudentIds = new Set<string>((apptData || []).map((a: any) => a.student_id));
+
+          return remote.map((r: any) => {
+            const u = userByStudentId.get(r.id);
+            return {
+              student_id: r.id,
+              school_id: r.school_id,
+              first_name: r.first_name,
+              middle_name: r.middle_name,
+              last_name: r.last_name,
+              user_id: u?.id || null,
+              username: u?.username || null,
+              account_status: u?.account_status || null,
+              is_registered: u?.id ? 1 : 0,
+              is_officer: activeOfficerStudentIds.has(r.id) ? 1 : 0,
+            };
+          });
+        }
+      } catch (err) {
+        console.warn('Direct Supabase searchCandidates error, falling back to SQLite:', err);
+      }
+    }
+
+    // 2. Offline SQLite fallback
     const local = await OfficerRepository.searchStudentsForOfficer(clean, null, limit);
     const resultMap = new Map<string, any>();
     local.forEach((item: any) => {
       resultMap.set(item.school_id?.toLowerCase() || item.student_id, item);
     });
 
-    // 2. If under limit, query is non-empty, and online, supplement from Supabase
+    // 3. If under limit, query is non-empty, and online, supplement from Supabase
     if (resultMap.size < limit && clean.length > 0) {
       try {
         const { supabase } = await import('@/integrations/supabase/client');

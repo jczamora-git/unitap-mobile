@@ -9,23 +9,30 @@ export class EventsRepository {
     return adapter || getDatabase();
   }
 
+  public static toSupabaseEventPayload(event: EventRecord): Record<string, any> {
+    const rawId = event.id.startsWith('evt_') ? event.id.replace(/^evt_/, '') : event.id;
+    const payload: Record<string, any> = {
+      id: rawId,
+      semester_id: event.semester_id,
+      title: event.title,
+      event_type: event.event_type,
+      audience_type: event.audience_type,
+      audience_json: typeof event.audience_json === 'string' ? JSON.parse(event.audience_json || '{}') : event.audience_json,
+      attendance_required: event.attendance_required,
+      status: event.status,
+      created_at: event.created_at,
+      updated_at: event.updated_at,
+    };
+    if (event.category_id) {
+      payload.category_id = event.category_id;
+    }
+    return payload;
+  }
+
   public static async createEvent(event: EventRecord, adapter?: DatabaseAdapter): Promise<void> {
     if (!adapter && DataModeService.isDirectSupabase()) {
-      const { error } = await supabase.from('events').insert({
-        id: event.id,
-        semester_id: event.semester_id,
-        title: event.title,
-        description: event.description || null,
-        event_type: event.event_type,
-        category_id: event.category_id || null,
-        audience_type: event.audience_type,
-        audience_json: event.audience_json,
-        attendance_required: event.attendance_required,
-        status: event.status,
-        created_by_user_id: event.created_by_user_id || null,
-        created_at: event.created_at,
-        updated_at: event.updated_at,
-      });
+      const payload = this.toSupabaseEventPayload(event);
+      const { error } = await supabase.from('events').insert(payload);
       if (error) throw new Error(`Failed to insert event into Supabase: ${error.message}`);
       return;
     }
@@ -88,21 +95,28 @@ export class EventsRepository {
     return db.queryOne<EventRecord>('SELECT * FROM events WHERE id = ?', [id]);
   }
 
+  public static toSupabaseOccurrencePayload(occurrence: EventOccurrenceRecord): Record<string, any> {
+    const rawId = occurrence.id.startsWith('occ_') ? occurrence.id.replace(/^occ_/, '') : occurrence.id;
+    const rawEventId = occurrence.event_id.startsWith('evt_') ? occurrence.event_id.replace(/^evt_/, '') : occurrence.event_id;
+    return {
+      id: rawId,
+      event_id: rawEventId,
+      title: occurrence.title,
+      occurs_on: occurrence.occurs_on,
+      starts_at: occurrence.starts_at,
+      ends_at: occurrence.ends_at,
+      grace_minutes: occurrence.grace_minutes,
+      status: occurrence.status,
+      opened_at: occurrence.opened_at || null,
+      closed_at: occurrence.closed_at || null,
+      updated_at: occurrence.updated_at,
+    };
+  }
+
   public static async createOccurrence(occurrence: EventOccurrenceRecord, adapter?: DatabaseAdapter): Promise<void> {
     if (!adapter && DataModeService.isDirectSupabase()) {
-      const { error } = await supabase.from('event_occurrences').insert({
-        id: occurrence.id,
-        event_id: occurrence.event_id,
-        title: occurrence.title,
-        occurs_on: occurrence.occurs_on,
-        starts_at: occurrence.starts_at,
-        ends_at: occurrence.ends_at,
-        grace_minutes: occurrence.grace_minutes,
-        status: occurrence.status,
-        opened_at: occurrence.opened_at || null,
-        closed_at: occurrence.closed_at || null,
-        updated_at: occurrence.updated_at,
-      });
+      const payload = this.toSupabaseOccurrencePayload(occurrence);
+      const { error } = await supabase.from('event_occurrences').insert(payload);
       if (error) throw new Error(`Failed to insert occurrence into Supabase: ${error.message}`);
       return;
     }
@@ -134,6 +148,7 @@ export class EventsRepository {
     adapter?: DatabaseAdapter
   ): Promise<void> {
     if (!adapter && DataModeService.isDirectSupabase()) {
+      const rawId = occurrence.id.startsWith('occ_') ? occurrence.id.replace(/^occ_/, '') : occurrence.id;
       const remoteUpdates: Record<string, unknown> = {
         updated_at: occurrence.updated_at || new Date().toISOString(),
       };
@@ -141,7 +156,7 @@ export class EventsRepository {
       if (occurrence.opened_at !== undefined) remoteUpdates.opened_at = occurrence.opened_at;
       if (occurrence.closed_at !== undefined) remoteUpdates.closed_at = occurrence.closed_at;
 
-      const { error } = await supabase.from('event_occurrences').update(remoteUpdates).eq('id', occurrence.id);
+      const { error } = await supabase.from('event_occurrences').update(remoteUpdates).eq('id', rawId);
       if (error) throw new Error(`Failed to update occurrence on Supabase: ${error.message}`);
       return;
     }
@@ -174,10 +189,11 @@ export class EventsRepository {
 
   public static async getOccurrencesByEventId(eventId: string, adapter?: DatabaseAdapter): Promise<EventOccurrenceRecord[]> {
     if (!adapter && DataModeService.isDirectSupabase()) {
+      const rawEventId = eventId.startsWith('evt_') ? eventId.replace(/^evt_/, '') : eventId;
       const { data, error } = await supabase
         .from('event_occurrences')
         .select('*')
-        .eq('event_id', eventId)
+        .eq('event_id', rawEventId)
         .order('occurs_on', { ascending: true });
       if (error) throw new Error(`Failed to query occurrences from Supabase: ${error.message}`);
       return (data || []) as EventOccurrenceRecord[];
@@ -193,10 +209,11 @@ export class EventsRepository {
   public static async getOccurrenceById(id: string, adapter?: DatabaseAdapter): Promise<EventOccurrenceRecord | null> {
     if (!id) return null;
     if (!adapter && DataModeService.isDirectSupabase()) {
+      const rawId = id.startsWith('occ_') ? id.replace(/^occ_/, '') : id;
       const { data, error } = await supabase
         .from('event_occurrences')
         .select('*')
-        .eq('id', id)
+        .eq('id', rawId)
         .maybeSingle();
       if (error || !data) return null;
       return data as EventOccurrenceRecord;

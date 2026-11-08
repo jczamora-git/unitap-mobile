@@ -28,6 +28,9 @@ export interface Student {
   rfidUid: string | null; // "04:A7:32:91:BC:20:80"
   rfidUidCompact: string | null; // "04A73291BC2080"
   cards?: NfcCardRecord[];
+  photoStoragePath?: string | null;
+  photoLocalUri?: string | null;
+  photoUrl?: string | null;
   createdAt: string; // ISO Timestamp
   updatedAt: string; // ISO Timestamp
 }
@@ -43,6 +46,8 @@ export interface CreateStudentDto {
   status?: StudentStatus;
   rfidUid?: string | null;
   rfidUidCompact?: string | null;
+  photoStoragePath?: string | null;
+  photoLocalUri?: string | null;
 }
 
 export interface UpdateStudentDto {
@@ -56,6 +61,8 @@ export interface UpdateStudentDto {
   status?: StudentStatus;
   rfidUid?: string | null;
   rfidUidCompact?: string | null;
+  photoStoragePath?: string | null;
+  photoLocalUri?: string | null;
 }
 
 export interface StudentFilterOptions {

@@ -53,32 +53,55 @@ export class AttendanceRepository {
     const db = await this.getDb(adapter);
     await db.transaction(async (tx) => {
       // 1. Insert or update attendance record
-      await tx.execute(
-        `INSERT INTO attendance_records (
-          id, occurrence_id, student_id, status, checked_in_at, client_scanned_at, method,
-          identity_verified_by_user_id, photo_checked, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(occurrence_id, student_id) DO UPDATE SET
-          status = excluded.status,
-          checked_in_at = excluded.checked_in_at,
-          client_scanned_at = excluded.client_scanned_at,
-          method = excluded.method,
-          identity_verified_by_user_id = excluded.identity_verified_by_user_id,
-          photo_checked = excluded.photo_checked,
-          updated_at = excluded.updated_at`,
-        [
-          record.id,
-          record.occurrence_id,
-          record.student_id,
-          record.status,
-          record.checked_in_at || new Date().toISOString(),
-          record.client_scanned_at || null,
-          record.method || 'NFC',
-          record.identity_verified_by_user_id || actorUserId,
-          record.photo_checked,
-          record.updated_at,
-        ]
+      const checkpointId = record.checkpoint_id || 'default_in';
+      const existing = await tx.query<AttendanceRecord>(
+        `SELECT id FROM attendance_records WHERE occurrence_id = ? AND student_id = ? AND checkpoint_id = ? LIMIT 1`,
+        [record.occurrence_id, record.student_id, checkpointId]
       );
+
+      if (existing.length > 0) {
+        await tx.execute(
+          `UPDATE attendance_records SET
+            status = ?,
+            checked_in_at = ?,
+            client_scanned_at = ?,
+            method = ?,
+            identity_verified_by_user_id = ?,
+            photo_checked = ?,
+            updated_at = ?
+           WHERE id = ?`,
+          [
+            record.status,
+            record.checked_in_at || new Date().toISOString(),
+            record.client_scanned_at || null,
+            record.method || 'NFC',
+            record.identity_verified_by_user_id || actorUserId,
+            record.photo_checked,
+            record.updated_at,
+            existing[0].id,
+          ]
+        );
+      } else {
+        await tx.execute(
+          `INSERT INTO attendance_records (
+            id, occurrence_id, student_id, checkpoint_id, status, checked_in_at, client_scanned_at, method,
+            identity_verified_by_user_id, photo_checked, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            record.id,
+            record.occurrence_id,
+            record.student_id,
+            checkpointId,
+            record.status,
+            record.checked_in_at || new Date().toISOString(),
+            record.client_scanned_at || null,
+            record.method || 'NFC',
+            record.identity_verified_by_user_id || actorUserId,
+            record.photo_checked,
+            record.updated_at,
+          ]
+        );
+      }
 
       // 2. Insert audit log
       const auditId = 'aud_' + Math.random().toString(36).substring(2, 10);
@@ -292,20 +315,37 @@ export class AttendanceRepository {
   public static async getRecord(
     occurrenceId: string,
     studentId: string,
+    checkpointIdOrAdapter?: string | DatabaseAdapter,
     adapter?: DatabaseAdapter
   ): Promise<AttendanceRecord | null> {
-    if (!adapter && DataModeService.isDirectSupabase()) {
-      const { data, error } = await supabase
+    const checkpointId = typeof checkpointIdOrAdapter === 'string' ? checkpointIdOrAdapter : undefined;
+    const actualAdapter = (typeof checkpointIdOrAdapter === 'object' && checkpointIdOrAdapter !== null)
+      ? checkpointIdOrAdapter
+      : adapter;
+
+    if (!actualAdapter && DataModeService.isDirectSupabase()) {
+      let query = supabase
         .from('attendance_records')
         .select('*')
         .eq('occurrence_id', occurrenceId)
-        .eq('student_id', studentId)
-        .maybeSingle();
+        .eq('student_id', studentId);
+
+      if (checkpointId) {
+        query = query.eq('checkpoint_id', checkpointId);
+      }
+
+      const { data, error } = await query.maybeSingle();
       if (error || !data) return null;
       return data as AttendanceRecord;
     }
 
-    const db = await this.getDb(adapter);
+    const db = await this.getDb(actualAdapter);
+    if (checkpointId) {
+      return db.queryOne<AttendanceRecord>(
+        'SELECT * FROM attendance_records WHERE occurrence_id = ? AND student_id = ? AND (checkpoint_id = ? OR checkpoint_id IS NULL)',
+        [occurrenceId, studentId, checkpointId]
+      );
+    }
     return db.queryOne<AttendanceRecord>(
       'SELECT * FROM attendance_records WHERE occurrence_id = ? AND student_id = ?',
       [occurrenceId, studentId]

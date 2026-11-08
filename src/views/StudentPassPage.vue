@@ -97,7 +97,13 @@ onIonViewWillEnter(() => {
               <!-- Mid Card: Avatar + Details -->
               <div class="pass-body-row">
                 <div class="pass-avatar-box">
-                  <span class="avatar-initials">{{ initials }}</span>
+                  <img
+                    v-if="student?.photoUrl || student?.photoLocalUri"
+                    :src="(student?.photoUrl || student?.photoLocalUri) || undefined"
+                    alt="Student Photo"
+                    class="pass-photo-img"
+                  />
+                  <span v-else class="avatar-initials">{{ initials }}</span>
                   <div class="avatar-status-dot" :class="{ 'is-active': student?.rfidUid }"></div>
                 </div>
 
@@ -368,6 +374,13 @@ onIonViewWillEnter(() => {
   justify-content: center;
   flex-shrink: 0;
   position: relative;
+  overflow: hidden;
+}
+
+.pass-photo-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
 }
 
 .avatar-initials {

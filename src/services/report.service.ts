@@ -289,4 +289,90 @@ export class ReportService {
       </html>
     `;
   }
+
+  /**
+   * Generates CSV string for attendance with checkpoints completion per student
+   */
+  public static generateAttendanceCsv(
+    occurrenceTitle: string,
+    checkpoints: { id: string; label: string; type: string }[],
+    participants: {
+      studentId: string;
+      schoolId?: string;
+      fullName?: string;
+      course?: string;
+      yearLevel?: number;
+      section?: string;
+      checkpointId?: string;
+      attendanceStatus?: string;
+      attendanceTime?: string;
+    }[]
+  ): string {
+    const headers = [
+      'School ID',
+      'Student Name',
+      'Course',
+      'Year & Section',
+      ...checkpoints.map((c) => `"${c.label} (${c.type})"`),
+      'Overall Status',
+    ];
+
+    // Group participants by studentId
+    const studentMap = new Map<
+      string,
+      {
+        schoolId: string;
+        fullName: string;
+        course: string;
+        yearSection: string;
+        checkpoints: Map<string, { status: string; time: string }>;
+      }
+    >();
+
+    for (const p of participants) {
+      if (!studentMap.has(p.studentId)) {
+        studentMap.set(p.studentId, {
+          schoolId: p.schoolId || '',
+          fullName: p.fullName || '',
+          course: p.course || '',
+          yearSection: p.yearLevel ? `${p.yearLevel}-${p.section || ''}` : '',
+          checkpoints: new Map(),
+        });
+      }
+      const s = studentMap.get(p.studentId)!;
+      if (p.checkpointId) {
+        s.checkpoints.set(p.checkpointId, {
+          status: p.attendanceStatus || 'PENDING',
+          time: p.attendanceTime || '',
+        });
+      }
+    }
+
+    const rows: string[][] = [];
+    for (const [, s] of studentMap) {
+      const checkpointStatuses = checkpoints.map((c) => {
+        const cp = s.checkpoints.get(c.id);
+        return cp ? cp.status : 'ABSENT';
+      });
+
+      const allPresent = checkpointStatuses.length > 0 && checkpointStatuses.every((st) => st === 'PRESENT' || st === 'LATE');
+      const anyPresent = checkpointStatuses.some((st) => st === 'PRESENT' || st === 'LATE');
+      const overall = allPresent ? 'COMPLETED' : anyPresent ? 'PARTIAL' : 'ABSENT';
+
+      rows.push([
+        s.schoolId,
+        `"${s.fullName.replace(/"/g, '""')}"`,
+        s.course,
+        s.yearSection,
+        ...checkpointStatuses,
+        overall,
+      ]);
+    }
+
+    return [
+      `UniTap 2.0 Attendance Report - ${occurrenceTitle}`,
+      headers.join(','),
+      ...rows.map((r) => r.join(',')),
+    ].join('\n');
+  }
 }

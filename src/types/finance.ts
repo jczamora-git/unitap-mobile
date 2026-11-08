@@ -56,6 +56,8 @@ export interface StudentObligationItem {
   studentName?: string;
   yearLevel?: number;
   section?: string;
+  course?: string;
+  program?: string;
 }
 
 // Backward-compatible alias
@@ -216,6 +218,16 @@ export interface BulkContributionParams {
   actorUserId: string;
 }
 
+export type ContributionCreationStage =
+  | 'IDLE'
+  | 'CREATING_RULE'
+  | 'LOADING_STUDENTS'
+  | 'GENERATING_OBLIGATIONS'
+  | 'SAVING_SUPABASE'
+  | 'FINALIZING'
+  | 'SUCCESS'
+  | 'ERROR';
+
 export interface CreateContributionCollectionParams {
   name: string;
   amountCentavos: number;
@@ -228,6 +240,7 @@ export interface CreateContributionCollectionParams {
   studentIds?: string[];
   notes?: string | null;
   actorUserId?: string;
+  existingRuleId?: string;
 }
 
 export interface BulkContributionResult {

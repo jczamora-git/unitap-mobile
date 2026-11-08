@@ -17,11 +17,13 @@ import {
   calendarOutline,
   receiptOutline,
   informationCircleOutline,
+  trashOutline,
 } from 'ionicons/icons';
 import { financeService } from '@/services/finance.service';
 import { studentService } from '@/services/student.service';
 import { AcademicRepository } from '@/database/repositories/academic.repository';
 import { authService } from '@/services/auth.service';
+import { useAuth } from '@/composables/useAuth';
 import { useOperationPolicy } from '@/composables/useOperationPolicy';
 import type { Semester } from '@/types/database';
 import type { Student } from '@/types/student';
@@ -35,6 +37,7 @@ import {
   UniButton,
   UniCard,
   UniSheet,
+  UniDialog,
   UniEmptyState,
   UniSelect,
   UniRecordList,
@@ -144,6 +147,32 @@ const isVoidModalOpen = ref(false);
 const isVoiding = ref(false);
 const voidingObligationId = ref('');
 const voidReason = ref('');
+
+const { isDevAdmin } = useAuth();
+const showDeleteFineDialog = ref(false);
+const fineToDelete = ref<StudentObligationItem | null>(null);
+const isDeletingFine = ref(false);
+
+function promptDeleteFine(fine: StudentObligationItem) {
+  fineToDelete.value = fine;
+  showDeleteFineDialog.value = true;
+}
+
+async function confirmDeleteFine() {
+  if (!fineToDelete.value) return;
+  isDeletingFine.value = true;
+  try {
+    await financeService.deleteStudentObligation(fineToDelete.value.id);
+    await showToast('Fine obligation deleted successfully.', 'success');
+    showDeleteFineDialog.value = false;
+    fineToDelete.value = null;
+    await loadData();
+  } catch (err: any) {
+    await showToast(err?.message || 'Cannot delete fine because payments have already been collected for it.', 'error');
+  } finally {
+    isDeletingFine.value = false;
+  }
+}
 
 // --- Data Loader ---
 async function loadData() {
@@ -530,6 +559,15 @@ onIonViewWillEnter(loadData);
                     >
                       Void / Waive Fine
                     </UniButton>
+                    <UniButton
+                      v-if="isDevAdmin && f.balanceCentavos === f.amountCentavos"
+                      variant="destructive"
+                      size="sm"
+                      :icon="trashOutline"
+                      @click="promptDeleteFine(f)"
+                    >
+                      Delete Fine
+                    </UniButton>
                   </div>
                 </template>
               </UniExpandableRow>
@@ -781,6 +819,19 @@ onIonViewWillEnter(loadData);
           </div>
         </div>
       </UniSheet>
+
+      <!-- Delete Fine Dialog -->
+      <UniDialog
+        v-model:is-open="showDeleteFineDialog"
+        title="Delete Fine Obligation?"
+        :description="`Are you sure you want to permanently delete fine '${fineToDelete?.title}' for ${fineToDelete?.studentName} (${formatPeso(fineToDelete?.amountCentavos || 0)})? If payments exist, deletion will be blocked.`"
+        :confirm-text="isDeletingFine ? 'Deleting...' : 'Delete Fine'"
+        cancel-text="Cancel"
+        :destructive="true"
+        type="destructive"
+        @confirm="confirmDeleteFine"
+        @cancel="showDeleteFineDialog = false"
+      />
     </ion-content>
   </ion-page>
 </template>

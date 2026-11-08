@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted } from 'vue';
+import { ref, computed, onMounted } from 'vue';
 import {
   IonPage,
   IonContent,
@@ -10,19 +10,22 @@ import {
   addOutline,
   createOutline,
   calendarOutline,
-  schoolOutline
+  schoolOutline,
+  trashOutline
 } from 'ionicons/icons';
 import { UniPageHeader, UniDialog, UniButton, UniSelect, UniSheet } from '@/components/ui';
 
 import { SystemSetupService } from '@/services/system-setup.service';
 import { DataModeService } from '@/services/data-mode.service';
 import { SupabaseAuthService } from '@/integrations/supabase/auth.service';
+import { useAuth } from '@/composables/useAuth';
 import type { AcademicYear, Semester } from '@/types/database';
 import { formatAcademicYear } from '@/utilities/presentation-formatters';
 import { haptics } from '@/utilities/haptics';
 import { useToast } from '@/composables/useToast';
 
 const { showToast } = useToast();
+const { isDevAdmin } = useAuth();
 
 const academicYears = ref<AcademicYear[]>([]);
 const semestersByYear = ref<Record<string, Semester[]>>({});
@@ -178,6 +181,35 @@ async function confirmStatusChange() {
   }
 }
 
+const showDeleteConfirm = ref(false);
+const yearToDelete = ref<AcademicYear | null>(null);
+const isDeleting = ref(false);
+
+function promptDelete(ay: AcademicYear) {
+  haptics.light();
+  yearToDelete.value = ay;
+  showDeleteConfirm.value = true;
+}
+
+async function confirmDelete() {
+  if (!yearToDelete.value) return;
+  isDeleting.value = true;
+  try {
+    await SystemSetupService.deleteAcademicYear(yearToDelete.value.id);
+    showDeleteConfirm.value = false;
+    yearToDelete.value = null;
+    haptics.success();
+    await showToast('Academic year deleted successfully', 'success');
+    await loadData();
+  } catch (err: unknown) {
+    showDeleteConfirm.value = false;
+    await showToast(err instanceof Error ? err.message : 'Cannot delete academic year.', 'error');
+    haptics.error();
+  } finally {
+    isDeleting.value = false;
+  }
+}
+
 onMounted(loadData);
 </script>
 
@@ -245,6 +277,15 @@ onMounted(loadData);
                 @click="openEditModal(ay)"
               >
                 <ion-icon :icon="createOutline" />
+              </button>
+
+              <button
+                v-if="isDevAdmin"
+                class="icon-action-btn delete"
+                title="Delete Academic Year"
+                @click.stop="promptDelete(ay)"
+              >
+                <ion-icon :icon="trashOutline" />
               </button>
 
               <button
@@ -368,6 +409,18 @@ onMounted(loadData);
         :confirm-variant="pendingStatus === 'ACTIVE' ? 'primary' : 'warning'"
         @confirm="confirmStatusChange"
         @cancel="showStatusConfirm = false"
+      />
+
+      <!-- Delete Confirmation Dialog -->
+      <UniDialog
+        :is-open="showDeleteConfirm"
+        title="Delete Academic Year"
+        :description="`Are you sure you want to permanently delete academic year '${yearToDelete?.label}'? This will delete all associated semesters and child records without recorded payments. This action cannot be undone.`"
+        :confirm-text="isDeleting ? 'Deleting...' : 'Delete Year'"
+        cancel-text="Cancel"
+        :confirm-variant="'danger'"
+        @confirm="confirmDelete"
+        @cancel="showDeleteConfirm = false"
       />
     </ion-content>
   </ion-page>
@@ -520,6 +573,14 @@ onMounted(loadData);
   color: var(--uni-text, #0f172a);
   font-size: 16px;
   cursor: pointer;
+}
+
+.icon-action-btn.delete {
+  color: var(--ion-color-danger, #ef4444);
+}
+
+.icon-action-btn.delete:hover {
+  background: rgba(239, 68, 68, 0.08);
 }
 
 .status-btn {

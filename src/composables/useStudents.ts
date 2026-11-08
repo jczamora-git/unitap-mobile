@@ -78,7 +78,7 @@ export function useStudents() {
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       error.value = msg;
-      return [];
+      throw err;
     } finally {
       isLoading.value = false;
     }
@@ -182,6 +182,21 @@ export function useStudents() {
     }
   }
 
+  async function deleteNfcCard(cardId: string): Promise<void> {
+    isLoading.value = true;
+    error.value = null;
+    try {
+      await studentService.deleteNfcCard(cardId);
+      await loadStudents();
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      error.value = msg;
+      throw err;
+    } finally {
+      isLoading.value = false;
+    }
+  }
+
   async function deactivateStudent(id: string): Promise<Student> {
     isLoading.value = true;
     error.value = null;
@@ -267,6 +282,7 @@ export function useStudents() {
     deactivateStudent,
     updateStudentEnrollment,
     deleteStudent,
+    deleteNfcCard,
     resetFilters
   };
 }

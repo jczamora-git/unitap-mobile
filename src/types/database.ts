@@ -64,6 +64,7 @@ export interface StudentRecord {
   first_name: string;
   middle_name?: string | null;
   last_name: string;
+  photo_storage_path?: string | null;
   photo_local_uri?: string | null;
   photo_content_hash?: string | null;
   status: 'ACTIVE' | 'INACTIVE' | 'GRADUATED';
@@ -231,6 +232,8 @@ export interface EventOccurrenceRecord {
   ends_at: string;
   grace_minutes: number;
   status: 'SCHEDULED' | 'OPEN' | 'CLOSED' | 'CANCELLED';
+  checkpoints_json?: string | null;
+  active_checkpoint_id?: string | null;
   opened_at?: string | null;
   closed_at?: string | null;
   updated_at: string;
@@ -240,6 +243,7 @@ export interface AttendanceRecord {
   id: string;
   occurrence_id: string;
   student_id: string;
+  checkpoint_id?: string | null;
   status: 'PENDING' | 'PRESENT' | 'LATE' | 'ABSENT' | 'EXCUSED' | 'VOID' | 'REVOKED';
   checked_in_at?: string | null;
   method?: 'NFC' | 'MANUAL' | null;

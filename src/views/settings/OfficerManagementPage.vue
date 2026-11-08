@@ -6,6 +6,7 @@ import {
   IonContent,
   IonIcon,
   IonSpinner,
+  onIonViewWillEnter,
 } from '@ionic/vue';
 import {
   addOutline,
@@ -20,6 +21,7 @@ import {
   copyOutline,
   checkmarkOutline,
   peopleOutline,
+  trashOutline,
 } from 'ionicons/icons';
 import {
   UniPageHeader,
@@ -32,6 +34,7 @@ import {
 import {
   OfficerManagementService,
 } from '@/services/officer-management.service';
+import { useAuth } from '@/composables/useAuth';
 import type { OfficerPermissionPreset } from '@/types/database';
 import type { OfficerListRecord } from '@/database/repositories/officer.repository';
 import { haptics } from '@/utilities/haptics';
@@ -39,6 +42,7 @@ import { useToast } from '@/composables/useToast';
 
 const router = useRouter();
 const { showToast } = useToast();
+const { isDevAdmin } = useAuth();
 
 const isLoading = ref(true);
 const officers = ref<OfficerListRecord[]>([]);
@@ -78,6 +82,7 @@ async function loadOfficers() {
 }
 
 onMounted(loadOfficers);
+onIonViewWillEnter(loadOfficers);
 
 const filteredOfficers = computed(() => {
   let list = officers.value;
@@ -296,6 +301,35 @@ async function saveAppointment() {
     await showToast((err as Error).message || 'Failed to update appointment', 'error');
   } finally {
     isProcessing.value = false;
+  }
+}
+
+// Delete Appointment
+const showDeleteOfficerDialog = ref(false);
+const officerToDelete = ref<OfficerListRecord | null>(null);
+const isDeletingOfficer = ref(false);
+
+function promptDeleteOfficer(officer: OfficerListRecord) {
+  officerToDelete.value = officer;
+  showDeleteOfficerDialog.value = true;
+}
+
+async function confirmDeleteOfficer() {
+  if (!officerToDelete.value) return;
+  isDeletingOfficer.value = true;
+  try {
+    const res = await OfficerManagementService.deleteOfficer(officerToDelete.value.id);
+    if (!res.success) throw new Error(res.error || 'Failed to delete officer.');
+    haptics.success();
+    await showToast('Officer appointment deleted successfully.', 'success');
+    showDeleteOfficerDialog.value = false;
+    officerToDelete.value = null;
+    await loadOfficers();
+  } catch (err: any) {
+    await showToast(err?.message || 'Failed to delete officer.', 'error');
+    haptics.error();
+  } finally {
+    isDeletingOfficer.value = false;
   }
 }
 </script>
@@ -542,6 +576,16 @@ async function saveAppointment() {
                   <ion-icon :icon="closeCircleOutline" slot="start" />
                   <span>Revoke</span>
                 </UniButton>
+
+                <UniButton
+                  v-if="isDevAdmin"
+                  size="sm"
+                  variant="destructive"
+                  @click="promptDeleteOfficer(officer)"
+                >
+                  <ion-icon :icon="trashOutline" slot="start" />
+                  <span>Delete</span>
+                </UniButton>
               </div>
             </div>
           </UniExpandableRow>
@@ -573,6 +617,19 @@ async function saveAppointment() {
       @confirm="confirmRevoke"
       @cancel="isRevokeDialogOpen = false"
       @close="isRevokeDialogOpen = false"
+    />
+
+    <!-- Dialog: Delete Officer Appointment -->
+    <UniDialog
+      :is-open="showDeleteOfficerDialog"
+      title="Delete Officer Appointment?"
+      :description="`Are you sure you want to permanently delete the officer appointment for ${officerToDelete?.full_name}? The student record and account remain preserved, but this appointment will be permanently deleted.`"
+      type="destructive"
+      :confirm-text="isDeletingOfficer ? 'Deleting...' : 'Delete Appointment'"
+      cancel-text="Cancel"
+      @confirm="confirmDeleteOfficer"
+      @cancel="showDeleteOfficerDialog = false"
+      @close="showDeleteOfficerDialog = false"
     />
 
     <!-- Dialog: Cancel Invitation -->

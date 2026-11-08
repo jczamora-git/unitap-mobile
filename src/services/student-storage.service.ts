@@ -313,6 +313,9 @@ export class LocalStudentRepository implements IStudentRepository {
       rfidUid,
       rfidUidCompact: rfidCompact,
       cards,
+      photoStoragePath: r.photo_storage_path || null,
+      photoLocalUri: r.photo_local_uri || null,
+      photoUrl: r.photo_local_uri || null,
       createdAt: r.created_at,
       updatedAt: r.updated_at,
     };

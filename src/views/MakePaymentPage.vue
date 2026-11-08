@@ -26,7 +26,6 @@ import {
   refreshOutline,
 } from 'ionicons/icons';
 import { useNfc } from '@/composables/useNfc';
-import { useStudents } from '@/composables/useStudents';
 import { studentService } from '@/services/student.service';
 import { financeService } from '@/services/finance.service';
 import { authService } from '@/services/auth.service';
@@ -74,15 +73,6 @@ const {
   resetLastTag,
 } = useNfc();
 
-// --- Student Directory & Search (useStudents Composable) ---
-const {
-  filteredStudents,
-  totalCount,
-  searchQuery,
-  isLoading: isStudentsLoading,
-  loadStudents,
-} = useStudents();
-
 // --- Student Identification Tabs ---
 type IdentificationTab = 'nfc' | 'search';
 const identificationTab = ref<IdentificationTab>('nfc');
@@ -91,8 +81,27 @@ const identificationTabs = [
   { value: 'search', label: 'Find Student' },
 ];
 
+// --- Eligible Students for Payment (Filtered by Category & Template) ---
+const eligibleStudents = ref<Student[]>([]);
+const isEligibleLoading = ref<boolean>(false);
+const searchQuery = ref<string>('');
 const searchCurrentPage = ref(1);
 const searchPageSize = ref(5);
+
+const filteredStudents = computed(() => {
+  if (!searchQuery.value || !searchQuery.value.trim()) {
+    return eligibleStudents.value;
+  }
+  const q = searchQuery.value.trim().toLowerCase();
+  return eligibleStudents.value.filter((s) => {
+    const numMatch = s.studentNumber?.toLowerCase().includes(q);
+    const nameMatch = `${s.firstName} ${s.middleName || ''} ${s.lastName}`.toLowerCase().includes(q);
+    const progMatch = s.course?.toLowerCase().includes(q);
+    const secMatch = s.section?.toLowerCase().includes(q);
+    return Boolean(numMatch || nameMatch || progMatch || secMatch);
+  });
+});
+
 const paginatedStudents = computed(() => {
   const start = (searchCurrentPage.value - 1) * searchPageSize.value;
   return filteredStudents.value.slice(start, start + searchPageSize.value);
@@ -101,6 +110,23 @@ const paginatedStudents = computed(() => {
 watch(searchQuery, () => {
   searchCurrentPage.value = 1;
 });
+
+async function loadEligibleStudents() {
+  isEligibleLoading.value = true;
+  try {
+    const list = await financeService.getEligibleStudentsForPayment({
+      category: selectedCategory.value,
+      ruleId: selectedRuleId.value || undefined,
+    });
+    eligibleStudents.value = list;
+    searchCurrentPage.value = 1;
+  } catch (err) {
+    console.error('Failed to load eligible students for payment:', err);
+    eligibleStudents.value = [];
+  } finally {
+    isEligibleLoading.value = false;
+  }
+}
 
 // --- Category & Templates (Rules) for Continuous Mode ---
 export type PaymentCategory = 'ALL' | 'CONTRIBUTION' | 'FINE';
@@ -288,10 +314,7 @@ function getInitials(student: Student | null): string {
 // --- Initial Data Loading ---
 async function loadInitialData() {
   try {
-    const [, templates] = await Promise.all([
-      loadStudents(),
-      financeService.getActiveTemplates(),
-    ]);
+    const templates = await financeService.getActiveTemplates();
     activeTemplates.value = templates;
 
     // Check query params for pre-selected template or student
@@ -308,6 +331,8 @@ async function loadInitialData() {
         selectedRuleId.value = queryTemplateId;
       }
     }
+
+    await loadEligibleStudents();
 
     const queryStudentId = route.query.studentId as string;
     if (queryStudentId) {
@@ -373,6 +398,7 @@ async function onStudentSelected() {
 }
 
 watch(selectedRuleId, () => {
+  loadEligibleStudents();
   if (selectedStudentId.value) {
     onStudentSelected();
   }
@@ -385,6 +411,7 @@ watch(selectedCategory, () => {
       selectedRuleId.value = '';
     }
   }
+  loadEligibleStudents();
   if (selectedStudentId.value) {
     onStudentSelected();
   }
@@ -402,10 +429,11 @@ watch(identificationTab, async (newTab) => {
       await startScan();
     }
   } else {
-    // In search tab, pause active NFC scanning
+    // In search tab, pause active NFC scanning and refresh eligible list
     if (isScanning.value) {
       await stopScan();
     }
+    await loadEligibleStudents();
   }
 });
 
@@ -618,6 +646,7 @@ async function handleConfirmPayment() {
     isReceiptModalOpen.value = true;
 
     await onStudentSelected();
+    await loadEligibleStudents();
   } catch (err: any) {
     console.error('Payment recording failed:', err);
     errorMessage.value = err.message || 'Payment recording failed.';
@@ -858,18 +887,28 @@ onIonViewDidLeave(() => {
               </div>
 
               <!-- Loading State -->
-              <div v-if="isStudentsLoading && totalCount === 0" class="loading-state">
+              <div v-if="isEligibleLoading && eligibleStudents.length === 0" class="loading-state">
                 <ion-spinner name="crescent" color="primary" />
-                <span class="loading-text">Loading student records...</span>
+                <span class="loading-text">Loading eligible students...</span>
               </div>
 
               <!-- Empty State: Filter Returned No Match -->
               <UniEmptyState
                 v-else-if="filteredStudents.length === 0"
                 :icon="searchOutline"
-                title="No students found"
-                description="No student matches your search query. Try searching by student number, last name, or section."
-                action-text="Clear Search"
+                :title="searchQuery ? 'No matching students' : 'No Outstanding Balances'"
+                :description="
+                  searchQuery
+                    ? 'No student matches your search query. Try searching by student number, last name, or section.'
+                    : selectedTemplate
+                    ? `No students currently owe payments for &quot;${selectedTemplate.name}&quot;. All obligations are settled.`
+                    : selectedCategory === 'CONTRIBUTION'
+                    ? 'No students currently have unsettled contributions.'
+                    : selectedCategory === 'FINE'
+                    ? 'No students currently have unsettled fines.'
+                    : 'No students currently have unsettled obligations in this term.'
+                "
+                :action-text="searchQuery ? 'Clear Search' : undefined"
                 @action="searchQuery = ''"
               />
 

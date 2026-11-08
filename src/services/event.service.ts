@@ -4,7 +4,8 @@ import type {
   OccurrenceParticipant, 
   CreateEventDto, 
   CreateOccurrenceDto,
-  AttendanceStatus 
+  AttendanceStatus,
+  AttendanceCheckpoint,
 } from '@/types/event';
 import type { AttendanceStats } from '@/types/attendance';
 import { localEventRepository, type IEventRepository } from '@/storage/event-storage.service';
@@ -13,6 +14,79 @@ import { OperationPolicyService } from './operation-policy.service';
 import { DataModeService } from './data-mode.service';
 import { supabase } from '@/integrations/supabase/client';
 import { logDataSource } from '@/utilities/data-source-logger';
+import { generateUuid } from '@/utilities/uuid';
+import { getDatabase } from '@/database/database';
+
+export interface SupabaseEventPayload {
+  id: string;
+  semester_id: string;
+  title: string;
+  event_type: string;
+  audience_type: string;
+  audience_json: any;
+  attendance_required: number;
+  status: string;
+  created_at: string;
+  updated_at: string;
+  category_id?: string | null;
+}
+
+export interface SupabaseOccurrencePayload {
+  id: string;
+  event_id: string;
+  title: string;
+  occurs_on: string;
+  starts_at: string;
+  ends_at: string;
+  grace_minutes: number;
+  status: string;
+  updated_at: string;
+  opened_at?: string | null;
+  closed_at?: string | null;
+}
+
+export function toSupabaseEventInsertPayload(
+  event: Pick<Event, 'id' | 'title' | 'type' | 'audience' | 'attendanceRequired' | 'status' | 'createdAt' | 'updatedAt' | 'categoryId'>,
+  semesterId: string
+): SupabaseEventPayload {
+  const rawId = event.id.startsWith('evt_') ? event.id.replace(/^evt_/, '') : event.id;
+  const payload: SupabaseEventPayload = {
+    id: rawId,
+    semester_id: semesterId,
+    title: event.title,
+    event_type: event.type,
+    audience_type: event.audience?.type || 'ALL',
+    audience_json: event.audience,
+    attendance_required: event.attendanceRequired ? 1 : 0,
+    status: event.status || 'ACTIVE',
+    created_at: event.createdAt,
+    updated_at: event.updatedAt,
+  };
+  if (event.categoryId) {
+    payload.category_id = event.categoryId;
+  }
+  return payload;
+}
+
+export function toSupabaseOccurrenceInsertPayload(
+  occurrence: Pick<EventOccurrence, 'id' | 'eventId' | 'title' | 'date' | 'startTime' | 'endTime' | 'gracePeriodMinutes' | 'status' | 'createdAt' | 'openedAt' | 'closedAt'>
+): SupabaseOccurrencePayload {
+  const rawId = occurrence.id.startsWith('occ_') ? occurrence.id.replace(/^occ_/, '') : occurrence.id;
+  const rawEventId = occurrence.eventId.startsWith('evt_') ? occurrence.eventId.replace(/^evt_/, '') : occurrence.eventId;
+  return {
+    id: rawId,
+    event_id: rawEventId,
+    title: occurrence.title,
+    occurs_on: occurrence.date,
+    starts_at: occurrence.startTime,
+    ends_at: occurrence.endTime,
+    grace_minutes: occurrence.gracePeriodMinutes ?? 15,
+    status: occurrence.status || 'SCHEDULED',
+    updated_at: occurrence.createdAt || new Date().toISOString(),
+    opened_at: occurrence.openedAt || null,
+    closed_at: occurrence.closedAt || null,
+  };
+}
 
 function generateId(prefix: string): string {
   if (typeof crypto !== 'undefined' && crypto.randomUUID) {
@@ -48,10 +122,11 @@ export class EventService {
 
   async getEvent(id: string): Promise<Event | null> {
     if (DataModeService.isDirectSupabase()) {
+      const rawId = id.startsWith('evt_') ? id.replace(/^evt_/, '') : id;
       const { data, error } = await supabase
         .from('events')
         .select('*')
-        .eq('id', id)
+        .eq('id', rawId)
         .maybeSingle();
       if (error) throw new Error(`Failed to query event from Supabase: ${error.message}`);
       if (!data) return null;
@@ -84,8 +159,9 @@ export class EventService {
     }
 
     const now = new Date().toISOString();
+    const eventId = generateUuid();
     const newEvent: Event = {
-      id: generateId('evt'),
+      id: eventId,
       title: dto.title.trim(),
       description: dto.description?.trim() || '',
       type: dto.type,
@@ -100,19 +176,8 @@ export class EventService {
       const { data: semData } = await supabase.from('semesters').select('id').eq('status', 'ACTIVE').limit(1).maybeSingle();
       const semesterId = semData?.id || 'sem_2026_2027_1';
 
-      const { error } = await supabase.from('events').insert({
-        id: newEvent.id,
-        semester_id: semesterId,
-        title: newEvent.title,
-        description: newEvent.description || null,
-        event_type: newEvent.type,
-        audience_type: newEvent.audience?.type || 'ALL',
-        audience_json: newEvent.audience,
-        attendance_required: newEvent.attendanceRequired ? 1 : 0,
-        status: 'ACTIVE',
-        created_at: now,
-        updated_at: now,
-      });
+      const payload = toSupabaseEventInsertPayload(newEvent, semesterId);
+      const { error } = await supabase.from('events').insert(payload);
       if (error) throw new Error(`Failed to create event on Supabase: ${error.message}`);
       return newEvent;
     }
@@ -136,19 +201,24 @@ export class EventService {
     };
 
     if (DataModeService.isDirectSupabase()) {
+      const rawId = id.startsWith('evt_') ? id.replace(/^evt_/, '') : id;
+      const updatePayload: Record<string, any> = {
+        title: updated.title,
+        event_type: updated.type,
+        audience_type: updated.audience?.type || 'ALL',
+        audience_json: updated.audience,
+        attendance_required: updated.attendanceRequired ? 1 : 0,
+        status: updated.status,
+        updated_at: updated.updatedAt,
+      };
+      if (updated.categoryId) {
+        updatePayload.category_id = updated.categoryId;
+      }
+
       const { error } = await supabase
         .from('events')
-        .update({
-          title: updated.title,
-          description: updated.description || null,
-          event_type: updated.type,
-          audience_type: updated.audience?.type || 'ALL',
-          audience_json: updated.audience,
-          attendance_required: updated.attendanceRequired ? 1 : 0,
-          status: updated.status,
-          updated_at: updated.updatedAt,
-        })
-        .eq('id', id);
+        .update(updatePayload)
+        .eq('id', rawId);
       if (error) throw new Error(`Failed to update event on Supabase: ${error.message}`);
       return updated;
     }
@@ -159,17 +229,104 @@ export class EventService {
   async deleteEvent(id: string): Promise<void> {
     await OperationPolicyService.assertPermitted('EVENTS_AND_OCCURRENCES_MUTATIONS');
     if (DataModeService.isDirectSupabase()) {
-      const { error } = await supabase.from('events').delete().eq('id', id);
+      const rawId = id.startsWith('evt_') ? id.replace(/^evt_/, '') : id;
+      const { error } = await supabase.from('events').delete().eq('id', rawId);
       if (error) throw new Error(`Failed to delete event from Supabase: ${error.message}`);
       return;
     }
     return this.repo.deleteEvent(id);
   }
 
+  public parseCheckpoints(rowOrJson: any): AttendanceCheckpoint[] {
+    let raw = rowOrJson;
+    if (rowOrJson && typeof rowOrJson === 'object' && 'checkpoints_json' in rowOrJson) {
+      raw = rowOrJson.checkpoints_json;
+    }
+    let checkpoints: AttendanceCheckpoint[] = [];
+    if (raw) {
+      try {
+        checkpoints = typeof raw === 'string'
+          ? JSON.parse(raw)
+          : raw;
+      } catch {
+        checkpoints = [];
+      }
+    }
+    if (!checkpoints || checkpoints.length === 0) {
+      const occurrenceId = rowOrJson?.id || (typeof rowOrJson === 'string' ? rowOrJson : 'default_in');
+      checkpoints = this.getDefaultCheckpoints(occurrenceId, rowOrJson?.starts_at || '08:00', rowOrJson?.ends_at || '12:00', rowOrJson?.grace_minutes || 15);
+    }
+    return checkpoints;
+  }
+
+  public getDefaultCheckpoints(_occurrenceId?: string, startTime = '08:00', endTime = '12:00', graceMinutes = 15): AttendanceCheckpoint[] {
+    return [
+      {
+        id: 'default_in',
+        label: 'General Check-In',
+        type: 'IN',
+        startTime: startTime || '08:00',
+        endTime: endTime || '12:00',
+        graceMinutes,
+        orderIndex: 0,
+      },
+    ];
+  }
+
+  async updateOccurrenceCheckpoints(
+    occurrenceId: string,
+    checkpoints: AttendanceCheckpoint[],
+    activeCheckpointId?: string | null
+  ): Promise<void> {
+    await OperationPolicyService.assertPermitted('EVENTS_AND_OCCURRENCES_MUTATIONS');
+    const rawId = occurrenceId.startsWith('occ_') ? occurrenceId.replace(/^occ_/, '') : occurrenceId;
+    const activeId = activeCheckpointId ?? checkpoints[0]?.id ?? null;
+
+    if (DataModeService.isDirectSupabase()) {
+      const { error } = await supabase
+        .from('event_occurrences')
+        .update({
+          checkpoints_json: checkpoints,
+          active_checkpoint_id: activeId,
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', rawId);
+      if (error) throw new Error(`Failed to update checkpoints on Supabase: ${error.message}`);
+      return;
+    }
+
+    const db = await getDatabase();
+    await db.execute(
+      'UPDATE event_occurrences SET checkpoints_json = ?, active_checkpoint_id = ?, updated_at = ? WHERE id = ?',
+      [JSON.stringify(checkpoints), activeId, new Date().toISOString(), rawId]
+    );
+  }
+
+  async setActiveCheckpoint(occurrenceId: string, checkpointId: string): Promise<void> {
+    const rawId = occurrenceId.startsWith('occ_') ? occurrenceId.replace(/^occ_/, '') : occurrenceId;
+    if (DataModeService.isDirectSupabase()) {
+      const { error } = await supabase
+        .from('event_occurrences')
+        .update({ active_checkpoint_id: checkpointId, updated_at: new Date().toISOString() })
+        .eq('id', rawId);
+      if (error) console.warn('[EventService] setActiveCheckpoint warning:', error);
+      return;
+    }
+    const db = await getDatabase();
+    await db.execute('UPDATE event_occurrences SET active_checkpoint_id = ?, updated_at = ? WHERE id = ?', [
+      checkpointId,
+      new Date().toISOString(),
+      rawId,
+    ]);
+  }
+
   async getOccurrences(eventId?: string): Promise<EventOccurrence[]> {
     if (DataModeService.isDirectSupabase()) {
       let query = supabase.from('event_occurrences').select('*').order('occurs_on', { ascending: false });
-      if (eventId) query = query.eq('event_id', eventId);
+      if (eventId) {
+        const rawEventId = eventId.startsWith('evt_') ? eventId.replace(/^evt_/, '') : eventId;
+        query = query.eq('event_id', rawEventId);
+      }
       const { data, error } = await query;
       if (error) throw new Error(`Failed to query occurrences from Supabase: ${error.message}`);
       return (data || []).map((row: any) => ({
@@ -181,6 +338,8 @@ export class EventService {
         endTime: row.ends_at,
         gracePeriodMinutes: row.grace_minutes || 15,
         status: row.status,
+        checkpoints: this.parseCheckpoints(row),
+        activeCheckpointId: row.active_checkpoint_id || null,
         openedAt: row.opened_at,
         closedAt: row.closed_at,
         createdAt: row.updated_at || new Date().toISOString(),
@@ -191,7 +350,8 @@ export class EventService {
 
   async getOccurrence(id: string): Promise<EventOccurrence | null> {
     if (DataModeService.isDirectSupabase()) {
-      const { data, error } = await supabase.from('event_occurrences').select('*').eq('id', id).maybeSingle();
+      const rawId = id.startsWith('occ_') ? id.replace(/^occ_/, '') : id;
+      const { data, error } = await supabase.from('event_occurrences').select('*').eq('id', rawId).maybeSingle();
       if (error) throw new Error(`Failed to query occurrence from Supabase: ${error.message}`);
       if (!data) return null;
       return {
@@ -203,6 +363,8 @@ export class EventService {
         endTime: data.ends_at,
         gracePeriodMinutes: data.grace_minutes || 15,
         status: data.status,
+        checkpoints: this.parseCheckpoints(data),
+        activeCheckpointId: data.active_checkpoint_id || null,
         openedAt: data.opened_at,
         closedAt: data.closed_at,
         createdAt: data.updated_at || new Date().toISOString(),
@@ -229,9 +391,18 @@ export class EventService {
     }
 
     const now = new Date().toISOString();
+    const isDirect = DataModeService.isDirectSupabase();
+    // 1. Generate raw UUIDs for event_occurrences.id in Direct Supabase Mode
+    // 2. Preserve offline-first SQLite ID behavior
+    const occurrenceId = isDirect ? generateUuid() : generateId('occ');
+    // Ensure event_id references the clean raw UUID of the parent event
+    const rawEventId = (isDirect && dto.eventId.startsWith('evt_')) 
+      ? dto.eventId.replace(/^evt_/, '') 
+      : dto.eventId;
+
     const occurrence: EventOccurrence = {
-      id: generateId('occ'),
-      eventId: dto.eventId,
+      id: occurrenceId,
+      eventId: rawEventId,
       title: dto.title.trim(),
       date: dto.date,
       startTime: dto.startTime,
@@ -241,18 +412,9 @@ export class EventService {
       createdAt: now
     };
 
-    if (DataModeService.isDirectSupabase()) {
-      const { error } = await supabase.from('event_occurrences').insert({
-        id: occurrence.id,
-        event_id: occurrence.eventId,
-        title: occurrence.title,
-        occurs_on: occurrence.date,
-        starts_at: occurrence.startTime,
-        ends_at: occurrence.endTime,
-        grace_minutes: occurrence.gracePeriodMinutes,
-        status: 'SCHEDULED',
-        updated_at: now,
-      });
+    if (isDirect) {
+      const payload = toSupabaseOccurrenceInsertPayload(occurrence);
+      const { error } = await supabase.from('event_occurrences').insert(payload);
       if (error) throw new Error(`Failed to create occurrence on Supabase: ${error.message}`);
       return occurrence;
     }
@@ -283,7 +445,8 @@ export class EventService {
     occurrence.status = 'OPEN';
     occurrence.openedAt = new Date().toISOString();
     if (DataModeService.isDirectSupabase()) {
-      await supabase.from('event_occurrences').update({ status: 'OPEN', opened_at: occurrence.openedAt }).eq('id', occurrenceId);
+      const rawId = occurrenceId.startsWith('occ_') ? occurrenceId.replace(/^occ_/, '') : occurrenceId;
+      await supabase.from('event_occurrences').update({ status: 'OPEN', opened_at: occurrence.openedAt }).eq('id', rawId);
       return occurrence;
     }
     return this.repo.saveOccurrence(occurrence);
@@ -299,7 +462,8 @@ export class EventService {
     occurrence.status = 'CLOSED';
     occurrence.closedAt = now;
     if (DataModeService.isDirectSupabase()) {
-      await supabase.from('event_occurrences').update({ status: 'CLOSED', closed_at: now }).eq('id', occurrenceId);
+      const rawId = occurrenceId.startsWith('occ_') ? occurrenceId.replace(/^occ_/, '') : occurrenceId;
+      await supabase.from('event_occurrences').update({ status: 'CLOSED', closed_at: now }).eq('id', rawId);
       return occurrence;
     }
 
@@ -413,8 +577,9 @@ export class EventService {
         occurrenceId: row.occurrence_id,
         eventId: row.event_id || '',
         studentId: row.student_id,
+        checkpointId: row.checkpoint_id || 'default_in',
         attendanceStatus: (row.status as AttendanceStatus) || 'PENDING',
-        checkInTime: row.checked_in_at || undefined,
+        attendanceTime: row.checked_in_at || undefined,
         attendanceMethod: row.method || 'NFC',
         manualNote: row.notes || undefined,
         updatedAt: row.updated_at,

@@ -11,7 +11,8 @@ import {
   addOutline,
   createOutline,
   schoolOutline,
-  checkmarkCircle
+  checkmarkCircle,
+  trashOutline
 } from 'ionicons/icons';
 import {
   UniPageHeader,
@@ -25,12 +26,14 @@ import {
 import { SystemSetupService } from '@/services/system-setup.service';
 import { DataModeService } from '@/services/data-mode.service';
 import { SupabaseAuthService } from '@/integrations/supabase/auth.service';
+import { useAuth } from '@/composables/useAuth';
 import type { Semester, AcademicYear } from '@/types/database';
 import { formatSemesterName, formatAcademicYear } from '@/utilities/presentation-formatters';
 import { haptics } from '@/utilities/haptics';
 import { useToast } from '@/composables/useToast';
 
 const { showToast } = useToast();
+const { isDevAdmin } = useAuth();
 
 const semesters = ref<Semester[]>([]);
 const academicYears = ref<AcademicYear[]>([]);
@@ -210,6 +213,35 @@ async function confirmActivation() {
   }
 }
 
+const showDeleteConfirm = ref(false);
+const semesterToDelete = ref<Semester | null>(null);
+const isDeleting = ref(false);
+
+function promptDelete(sem: Semester) {
+  haptics.light();
+  semesterToDelete.value = sem;
+  showDeleteConfirm.value = true;
+}
+
+async function confirmDelete() {
+  if (!semesterToDelete.value) return;
+  isDeleting.value = true;
+  try {
+    await SystemSetupService.deleteSemester(semesterToDelete.value.id);
+    showDeleteConfirm.value = false;
+    semesterToDelete.value = null;
+    haptics.success();
+    await showToast('Semester deleted successfully', 'success');
+    await loadData();
+  } catch (err: unknown) {
+    showDeleteConfirm.value = false;
+    await showToast(err instanceof Error ? err.message : 'Cannot delete semester.', 'error');
+    haptics.error();
+  } finally {
+    isDeleting.value = false;
+  }
+}
+
 onMounted(loadData);
 </script>
 
@@ -316,6 +348,15 @@ onMounted(loadData);
                 <span v-else class="active-badge-indicator font-mono">
                   ✓ Current Active Term
                 </span>
+                <UniButton
+                  v-if="isDevAdmin"
+                  variant="destructive"
+                  size="sm"
+                  :icon="trashOutline"
+                  @click.stop="promptDelete(sem)"
+                >
+                  Delete
+                </UniButton>
               </div>
             </template>
           </UniExpandableRow>
@@ -431,6 +472,18 @@ onMounted(loadData);
         confirm-variant="primary"
         @confirm="confirmActivation"
         @cancel="showActivateConfirm = false"
+      />
+
+      <!-- Delete Confirmation Dialog -->
+      <UniDialog
+        :is-open="showDeleteConfirm"
+        title="Delete Semester Term"
+        :description="`Are you sure you want to permanently delete '${formatSemesterName(semesterToDelete?.term)}'? This will remove non-financial associated records. If financial records exist, deletion will be blocked.`"
+        :confirm-text="isDeleting ? 'Deleting...' : 'Delete Semester'"
+        cancel-text="Cancel"
+        confirm-variant="danger"
+        @confirm="confirmDelete"
+        @cancel="showDeleteConfirm = false"
       />
     </ion-content>
   </ion-page>

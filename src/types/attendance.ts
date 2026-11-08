@@ -1,5 +1,5 @@
 import type { Student } from './student';
-import type { EventOccurrence, OccurrenceParticipant, AttendanceStatus } from './event';
+import type { EventOccurrence, OccurrenceParticipant, AttendanceStatus, CheckpointType } from './event';
 
 export type ScanResultType =
   | 'ACCEPTED'
@@ -20,6 +20,9 @@ export interface AttendanceScanResult {
   occurrence?: EventOccurrence;
   participant?: OccurrenceParticipant;
   attendanceStatus?: AttendanceStatus;
+  checkpointId?: string;
+  checkpointLabel?: string;
+  checkpointType?: CheckpointType;
   timestamp: string;
   rfidUid: string;
   recordId?: string;
@@ -34,6 +37,9 @@ export interface AttendanceScanLog {
   rfidUid: string;
   result: ScanResultType;
   attendanceStatus?: AttendanceStatus;
+  checkpointId?: string;
+  checkpointLabel?: string;
+  checkpointType?: CheckpointType;
   timestamp: string;
   note?: string;
 }

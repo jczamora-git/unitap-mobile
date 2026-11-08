@@ -20,12 +20,14 @@ import {
   flashOutline,
   sparklesOutline,
   shieldCheckmarkOutline,
+  alertCircleOutline,
+  refreshOutline,
 } from 'ionicons/icons';
 import { useCurrentStudentPortal } from '@/composables/useCurrentStudentPortal';
 import { formatPeso } from '@/utilities/finance-formatters';
 import { formatDate, formatTime } from '@/utilities/date-formatters';
 import { haptics } from '@/utilities/haptics';
-import { UniPageHeader, UniStatCard, UniButton } from '@/components/ui';
+import { UniPageHeader, UniStatCard, UniButton, UniEmptyState } from '@/components/ui';
 import UniGlobalSyncPill from '@/components/shared/UniGlobalSyncPill.vue';
 
 const router = useRouter();
@@ -36,6 +38,7 @@ const {
   recentActivity,
   portalEvents,
   isLoading,
+  error,
   outstandingBalanceCentavos,
   totalPaidCentavos,
   attendedCount,
@@ -79,22 +82,53 @@ onIonViewWillEnter(() => {
 
     <ion-content class="safe-content">
       <div class="page-container">
-        <!-- 1. STUDENT IDENTITY DIGITAL PASS BANNER -->
-        <section class="student-card-section">
-          <div class="aurora-card student-hero-card" @click="navigate('/tabs/pass')">
-            <div class="card-inner-top">
-              <div class="identity-badge-row">
-                <span class="hero-overline font-mono">
-                  <span class="pulse-dot"></span> CSG STUDENT PASS
-                </span>
-                <span class="role-pill-student font-mono">STUDENT</span>
+        <!-- Loading State -->
+        <div v-if="isLoading && !student" class="portal-loading-box">
+          <ion-spinner name="crescent" color="primary" />
+          <p class="portal-loading-text">Loading student profile...</p>
+        </div>
+
+        <!-- Unlinked Account or Error State -->
+        <UniEmptyState
+          v-else-if="!student && !isLoading"
+          :icon="alertCircleOutline"
+          title="Student Profile Unlinked"
+          :description="error || 'No student profile is linked to this authenticated account. Please contact an officer or administrator to link your student record.'"
+          action-text="Retry Connection"
+          :action-icon="refreshOutline"
+          @action="loadPortalData"
+        />
+
+        <template v-else>
+          <!-- 1. STUDENT IDENTITY DIGITAL PASS BANNER -->
+          <section class="student-card-section">
+            <div class="aurora-card student-hero-card" @click="navigate('/tabs/pass')">
+              <div class="card-inner-top">
+                <div class="identity-badge-row">
+                  <span class="hero-overline font-mono">
+                    <span class="pulse-dot"></span> CSG STUDENT PASS
+                  </span>
+                  <span class="role-pill-student font-mono">STUDENT</span>
+                </div>
+                <div class="student-hero-content-row">
+                  <div class="student-hero-avatar">
+                    <img
+                      v-if="student?.photoUrl || student?.photoLocalUri"
+                      :src="(student?.photoUrl || student?.photoLocalUri) || undefined"
+                      alt="Student"
+                      class="hero-avatar-img"
+                    />
+                    <span v-else class="hero-avatar-initials">{{ studentName?.charAt(0) || 'S' }}</span>
+                  </div>
+                  <div class="student-hero-details">
+                    <h2 class="student-display-name">{{ studentName || 'Student' }}</h2>
+                    <div class="student-id-row">
+                      <span class="school-id-pill font-mono">{{ student?.studentNumber }}</span>
+                      <span v-if="academicSummary" class="academic-text">{{ academicSummary }}</span>
+                    </div>
+                  </div>
+                </div>
               </div>
-              <h2 class="student-display-name">{{ studentName }}</h2>
-              <div class="student-id-row">
-                <span class="school-id-pill font-mono">{{ student?.studentNumber || 'MCC STUDENT' }}</span>
-                <span v-if="academicSummary" class="academic-text">{{ academicSummary }}</span>
-              </div>
-            </div>
 
             <div class="card-inner-bottom">
               <div class="card-status-info">
@@ -277,12 +311,26 @@ onIonViewWillEnter(() => {
             </button>
           </div>
         </section>
+      </template>
       </div>
     </ion-content>
   </div>
 </template>
 
 <style scoped>
+.portal-loading-box {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 60px 20px;
+  gap: 12px;
+}
+.portal-loading-text {
+  font-size: 13px;
+  color: var(--uni-text-muted, #94a3b8);
+}
+
 .student-portal-wrapper {
   display: flex;
   flex-direction: column;
@@ -351,11 +399,47 @@ onIonViewWillEnter(() => {
   border: 1px solid rgba(14, 165, 233, 0.3);
 }
 
+.student-hero-content-row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.student-hero-avatar {
+  width: 52px;
+  height: 52px;
+  border-radius: 16px;
+  background: rgba(112, 243, 207, 0.15);
+  border: 1.5px solid rgba(112, 243, 207, 0.35);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  overflow: hidden;
+}
+
+.hero-avatar-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.hero-avatar-initials {
+  font-size: 20px;
+  font-weight: 800;
+  color: var(--aurora-mint, #70f3cf);
+}
+
+.student-hero-details {
+  flex: 1;
+  min-width: 0;
+}
+
 .student-display-name {
-  font-size: 22px;
+  font-size: 20px;
   font-weight: 800;
   color: var(--app-text-primary, #f5f6f7);
-  margin: 0 0 6px 0;
+  margin: 0 0 4px 0;
   line-height: 1.2;
 }
 

@@ -17,14 +17,19 @@ import {
   addOutline,
   createOutline,
   checkmarkCircle,
-  closeCircleOutline
+  closeCircleOutline,
+  trashOutline,
+  optionsOutline,
+  flagOutline,
+  downloadOutline
 } from 'ionicons/icons';
 import { authService } from '@/services/auth.service';
 import { SupabaseAuthService } from '@/integrations/supabase/auth.service';
 import { AttendanceRepository } from '@/database/repositories/attendance.repository';
 import { eventService } from '@/services/event.service';
 import { studentService } from '@/services/student.service';
-import type { Event, EventOccurrence, OccurrenceParticipant, AttendanceStatus } from '@/types/event';
+import { ReportService } from '@/services/report.service';
+import type { Event, EventOccurrence, OccurrenceParticipant, AttendanceStatus, AttendanceCheckpoint, CheckpointType } from '@/types/event';
 import type { AttendanceStats } from '@/types/attendance';
 import type { Student } from '@/types/student';
 import { formatDate, formatTime } from '@/utilities/date-formatters';
@@ -59,6 +64,29 @@ const isStudent = computed(() => {
   return role === 'STUDENT';
 });
 
+const isDevAdmin = computed(() => {
+  const role = authService.role.value || SupabaseAuthService.role.value;
+  return role === 'DEVADMIN';
+});
+
+const showDeleteEventDialog = ref(false);
+const isDeletingEvent = ref(false);
+
+async function handleDeleteEvent() {
+  if (!event.value) return;
+  isDeletingEvent.value = true;
+  try {
+    await eventService.deleteEvent(event.value.id);
+    await showToast('Event deleted successfully', 'success');
+    showDeleteEventDialog.value = false;
+    router.replace('/tabs/events');
+  } catch (err: any) {
+    await showToast(err?.message || 'Cannot delete event because paid absence fines are associated with it. Please archive or deactivate the event instead.', 'error');
+  } finally {
+    isDeletingEvent.value = false;
+  }
+}
+
 const studentAttendanceMap = ref<Record<string, { status: string; checkedInAt?: string }>>({});
 
 const event = ref<Event | null>(null);
@@ -83,6 +111,112 @@ const newSessionDate = ref(new Date().toISOString().split('T')[0]);
 const newStartTime = ref('13:00');
 const newEndTime = ref('17:00');
 const newGrace = ref(15);
+
+// Checkpoint management state
+const showCheckpointsModal = ref(false);
+const editingOccurrence = ref<EventOccurrence | null>(null);
+const editingCheckpoints = ref<AttendanceCheckpoint[]>([]);
+const newCpLabel = ref('');
+const newCpType = ref<CheckpointType>('IN');
+const isSavingCheckpoints = ref(false);
+
+const checkpointTypeOptions = [
+  { value: 'IN', label: 'Check-In (IN)' },
+  { value: 'OUT', label: 'Check-Out (OUT)' },
+];
+
+function openCheckpointsModal(occ: EventOccurrence) {
+  editingOccurrence.value = occ;
+  editingCheckpoints.value = (occ.checkpoints && occ.checkpoints.length > 0)
+    ? JSON.parse(JSON.stringify(occ.checkpoints))
+    : eventService.getDefaultCheckpoints();
+  newCpLabel.value = '';
+  newCpType.value = 'IN';
+  showCheckpointsModal.value = true;
+}
+
+function addCheckpoint() {
+  if (!newCpLabel.value.trim()) {
+    showToast('Please enter a checkpoint label', 'warning');
+    return;
+  }
+  const id = 'cp_' + Math.random().toString(36).substring(2, 9);
+  editingCheckpoints.value.push({
+    id,
+    label: newCpLabel.value.trim(),
+    type: newCpType.value,
+    orderIndex: editingCheckpoints.value.length,
+  });
+  newCpLabel.value = '';
+}
+
+function removeCheckpoint(idx: number) {
+  if (editingCheckpoints.value.length <= 1) {
+    showToast('At least one checkpoint is required', 'warning');
+    return;
+  }
+  editingCheckpoints.value.splice(idx, 1);
+  editingCheckpoints.value.forEach((c, i) => { c.orderIndex = i; });
+}
+
+async function saveCheckpoints() {
+  if (!editingOccurrence.value) return;
+  if (editingCheckpoints.value.length === 0) {
+    showToast('At least one checkpoint is required', 'warning');
+    return;
+  }
+  isSavingCheckpoints.value = true;
+  try {
+    await eventService.updateOccurrenceCheckpoints(editingOccurrence.value.id, editingCheckpoints.value);
+    showCheckpointsModal.value = false;
+    await showToast('Attendance checkpoints updated successfully', 'success');
+    await loadData();
+  } catch (err: any) {
+    await showToast(err?.message || 'Failed to update checkpoints', 'error');
+  } finally {
+    isSavingCheckpoints.value = false;
+  }
+}
+
+function downloadAttendanceCsv() {
+  if (!selectedOccurrence.value) return;
+  const occ = selectedOccurrence.value;
+  const cps = occ.checkpoints && occ.checkpoints.length > 0
+    ? occ.checkpoints
+    : [{ id: 'default_in', label: 'General Check-In', type: 'IN' as const, orderIndex: 0 }];
+
+  const exportParticipants = participants.value.map((p) => {
+    const stu = allStudents.value[p.studentId];
+    return {
+      studentId: p.studentId,
+      schoolId: stu?.studentNumber || '',
+      fullName: stu ? formatFullName(stu.firstName, stu.middleName, stu.lastName) : p.studentId,
+      course: stu?.course || '',
+      yearLevel: stu?.yearLevel || 1,
+      section: stu?.section || '',
+      checkpointId: p.checkpointId || 'default_in',
+      attendanceStatus: p.attendanceStatus,
+      attendanceTime: p.attendanceTime,
+    };
+  });
+
+  const csv = ReportService.generateAttendanceCsv(
+    `${event.value?.title || 'Event'} - ${occ.title}`,
+    cps,
+    exportParticipants
+  );
+
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.setAttribute('href', url);
+  link.setAttribute('download', `attendance_${occ.title.replace(/\s+/g, '_')}_${occ.date}.csv`);
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  URL.revokeObjectURL(url);
+  showToast('Attendance report exported as CSV', 'success');
+}
 
 // Confirmation alert
 const showAlert = ref(false);
@@ -227,6 +361,15 @@ async function handleAddSession() {
           <UniButton size="sm" :icon="addOutline" @click="showAddSessionModal = true">
             Session
           </UniButton>
+          <UniButton
+            v-if="isDevAdmin && event"
+            variant="destructive"
+            size="sm"
+            :icon="trashOutline"
+            @click="showDeleteEventDialog = true"
+          >
+            Delete
+          </UniButton>
         </div>
       </template>
     </UniPageHeader>
@@ -273,6 +416,11 @@ async function handleAddSession() {
                     <span>{{ formatDate(occ.date) }}</span> • 
                     <ion-icon :icon="timeOutline" />
                     <span>{{ formatTime(occ.startTime) }} - {{ formatTime(occ.endTime) }}</span>
+                  </div>
+                  <div v-if="occ.checkpoints && occ.checkpoints.length > 0" class="occ-checkpoints-row">
+                    <span v-for="cp in occ.checkpoints" :key="cp.id" class="occ-cp-badge" :class="{ 'type-out': cp.type === 'OUT' }">
+                      {{ cp.label }} ({{ cp.type }})
+                    </span>
                   </div>
                 </div>
                 <span class="status-badge" :class="occ.status === 'OPEN' ? 'badge-success' : 'badge-neutral'">
@@ -359,6 +507,15 @@ async function handleAddSession() {
                     </button>
                   </template>
 
+                  <!-- Checkpoints button -->
+                  <button 
+                    class="action-btn btn-subtle"
+                    @click="openCheckpointsModal(occ)"
+                  >
+                    <ion-icon :icon="optionsOutline" />
+                    <span>Checkpoints</span>
+                  </button>
+
                   <!-- CLOSED / View Roster -->
                   <button 
                     class="action-btn btn-subtle"
@@ -398,6 +555,14 @@ async function handleAddSession() {
         <div class="sheet-inner-container">
           <div class="roster-meta-header" v-if="selectedOccurrence">
             <p class="roster-meta-sub">{{ participants.length }} Expected Students</p>
+            <UniButton
+              variant="outline"
+              size="sm"
+              :icon="downloadOutline"
+              @click="downloadAttendanceCsv"
+            >
+              Export CSV
+            </UniButton>
           </div>
 
           <div class="roster-list-wrap minimal-card">
@@ -408,6 +573,9 @@ async function handleAddSession() {
                 </span>
                 <span class="student-cell-sub" v-if="allStudents[p.studentId]">
                   {{ allStudents[p.studentId].studentNumber || 'No ID #' }} • {{ formatStudentAcademicSummary(allStudents[p.studentId]) }}
+                </span>
+                <span v-if="p.checkpointLabel" class="student-cell-checkpoint font-mono">
+                  Checkpoint: {{ p.checkpointLabel }} ({{ p.checkpointType || 'IN' }})
                 </span>
                 <span v-if="p.attendanceTime" class="student-cell-time font-mono">
                   Scanned: {{ formatTime(p.attendanceTime) }} ({{ p.attendanceMethod || 'NFC' }})
@@ -468,6 +636,75 @@ async function handleAddSession() {
         </div>
       </UniSheet>
 
+      <!-- Checkpoint Management Sheet -->
+      <UniSheet
+        :is-open="showCheckpointsModal"
+        title="Configure Checkpoints"
+        :subtitle="editingOccurrence ? `${editingOccurrence.title} Checkpoints` : ''"
+        size="expanded"
+        @close="showCheckpointsModal = false"
+      >
+        <div class="sheet-form-wrap">
+          <p class="secondary-text">
+            Configure attendance checkpoints for this session (e.g. Morning IN, Morning OUT, Afternoon IN, Afternoon OUT). Each checkpoint tracks attendance independently.
+          </p>
+
+          <div class="checkpoints-list-box minimal-card">
+            <div
+              v-for="(cp, idx) in editingCheckpoints"
+              :key="cp.id"
+              class="checkpoint-manage-row"
+            >
+              <div class="cp-info-group">
+                <span class="cp-type-tag" :class="{ 'type-out': cp.type === 'OUT' }">{{ cp.type }}</span>
+                <span class="cp-label-name">{{ cp.label }}</span>
+              </div>
+              <button
+                v-if="editingCheckpoints.length > 1"
+                type="button"
+                class="cp-delete-btn"
+                @click="removeCheckpoint(idx)"
+                aria-label="Remove Checkpoint"
+              >
+                <ion-icon :icon="trashOutline" />
+              </button>
+            </div>
+          </div>
+
+          <!-- Add Checkpoint Form -->
+          <div class="add-cp-box">
+            <h5 class="add-cp-title">Add Checkpoint</h5>
+            <div class="add-cp-grid">
+              <UniFormField label="Checkpoint Label" :required="true">
+                <UniInput v-model="newCpLabel" placeholder="e.g. Morning OUT" />
+              </UniFormField>
+              <UniFormField label="Type" :required="true">
+                <UniSelect v-model="newCpType" :options="checkpointTypeOptions" />
+              </UniFormField>
+            </div>
+            <UniButton
+              variant="outline"
+              size="sm"
+              :icon="addOutline"
+              @click="addCheckpoint"
+            >
+              Add Checkpoint
+            </UniButton>
+          </div>
+
+          <div style="margin-top: 20px;">
+            <UniButton
+              variant="primary"
+              :full-width="true"
+              :disabled="isSavingCheckpoints"
+              @click="saveCheckpoints"
+            >
+              {{ isSavingCheckpoints ? 'Saving Checkpoints...' : 'Save Checkpoints' }}
+            </UniButton>
+          </div>
+        </div>
+      </UniSheet>
+
       <!-- Add Session Sheet -->
       <UniSheet 
         :is-open="showAddSessionModal" 
@@ -508,6 +745,19 @@ async function handleAddSession() {
           </div>
         </div>
       </UniSheet>
+
+      <!-- Delete Event Dialog -->
+      <UniDialog
+        v-model:is-open="showDeleteEventDialog"
+        title="Delete Event?"
+        :description="`Are you sure you want to permanently delete event '${event?.title}'? All event sessions, attendance logs, and unpaid absence fines will be removed. If paid absence fines exist, deletion will be blocked.`"
+        :confirm-text="isDeletingEvent ? 'Deleting...' : 'Delete Event'"
+        cancel-text="Cancel"
+        :destructive="true"
+        type="destructive"
+        @confirm="handleDeleteEvent"
+        @cancel="showDeleteEventDialog = false"
+      />
     </ion-content>
   </ion-page>
 </template>
@@ -918,5 +1168,118 @@ async function handleAddSession() {
   font-weight: 600;
   cursor: pointer;
   margin-top: 6px;
+}
+
+.occ-checkpoints-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+.occ-cp-badge {
+  font-size: 10px;
+  font-weight: 700;
+  padding: 2px 7px;
+  border-radius: 9999px;
+  background: rgba(15, 118, 110, 0.12);
+  color: #0f766e;
+  border: 1px solid rgba(15, 118, 110, 0.25);
+}
+
+.occ-cp-badge.type-out {
+  background: rgba(225, 29, 72, 0.12);
+  color: #e11d48;
+  border-color: rgba(225, 29, 72, 0.25);
+}
+
+.student-cell-checkpoint {
+  font-size: 11px;
+  color: #0f766e;
+  font-weight: 600;
+}
+
+.roster-meta-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+
+.checkpoints-list-box {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 16px;
+  padding: 12px;
+}
+
+.checkpoint-manage-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 10px;
+  background: var(--app-surface-subtle);
+  border: 1px solid var(--app-border);
+  border-radius: 8px;
+}
+
+.cp-info-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.cp-type-tag {
+  font-size: 10px;
+  font-weight: 800;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: rgba(15, 118, 110, 0.15);
+  color: #0f766e;
+}
+
+.cp-type-tag.type-out {
+  background: rgba(225, 29, 72, 0.15);
+  color: #e11d48;
+}
+
+.cp-label-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--app-text-primary);
+}
+
+.cp-delete-btn {
+  background: none;
+  border: none;
+  color: #ef4444;
+  cursor: pointer;
+  padding: 4px;
+  display: flex;
+  align-items: center;
+}
+
+.add-cp-box {
+  border: 1px dashed var(--app-border);
+  border-radius: 12px;
+  padding: 14px;
+  margin-top: 12px;
+}
+
+.add-cp-title {
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--app-text-secondary);
+  margin: 0 0 10px 0;
+}
+
+.add-cp-grid {
+  display: grid;
+  grid-template-columns: 2fr 1fr;
+  gap: 10px;
+  margin-bottom: 10px;
 }
 </style>

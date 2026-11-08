@@ -28,6 +28,8 @@ export interface StudentObligationWithBalance extends StudentObligation {
   last_name?: string;
   year_level?: number;
   section?: string;
+  course?: string;
+  program?: string;
 }
 
 export interface PaymentWithAllocations extends PaymentRecord {
@@ -559,7 +561,7 @@ export class FinanceRepository {
     adapter?: DatabaseAdapter
   ): Promise<StudentObligationWithBalance[]> {
     if (!adapter && DataModeService.isDirectSupabase()) {
-      let query = supabase.from('student_obligations').select('*').eq('student_id', studentId).eq('status', 'ACTIVE');
+      let query = supabase.from('student_obligations').select('*').eq('student_id', studentId).neq('status', 'VOID');
       if (semesterId) query = query.eq('semester_id', semesterId);
       const { data: obs, error } = await query.order('issued_at', { ascending: false });
       if (error) throw new Error(`Failed to query student obligations from Supabase: ${error.message}`);
@@ -651,7 +653,7 @@ export class FinanceRepository {
     adapter?: DatabaseAdapter
   ): Promise<StudentObligationWithBalance[]> {
     if (!adapter && DataModeService.isDirectSupabase()) {
-      let query = supabase.from('student_obligations').select('*').eq('semester_id', semesterId).eq('status', 'ACTIVE');
+      let query = supabase.from('student_obligations').select('*').eq('semester_id', semesterId).neq('status', 'VOID');
       if (type) query = query.eq('type', type);
       const { data: obs, error } = await query;
       if (error) throw new Error(`Failed to query obligations by semester from Supabase: ${error.message}`);
@@ -678,15 +680,26 @@ export class FinanceRepository {
       }
 
       const studentIds = Array.from(new Set((obs || []).map((o: any) => o.student_id).filter(Boolean)));
-      const [studentsRes, enrollmentsRes] = await Promise.all([
+      const [studentsRes, enrollmentsRes, programsRes] = await Promise.all([
         studentIds.length > 0 ? supabase.from('students').select('*').in('id', studentIds) : Promise.resolve({ data: [] }),
-        studentIds.length > 0 ? supabase.from('student_enrollments').select('*').eq('semester_id', semesterId).in('student_id', studentIds) : Promise.resolve({ data: [] }),
+        studentIds.length > 0 ? supabase.from('student_enrollments').select('*').in('student_id', studentIds) : Promise.resolve({ data: [] }),
+        supabase.from('programs').select('id, code, name'),
       ]);
+
+      const programsMap = new Map<string, string>();
+      for (const p of (programsRes.data || [])) {
+        if (p.id) programsMap.set(p.id, p.code);
+      }
 
       const stuMap = new Map<string, any>();
       for (const s of (studentsRes.data || [])) stuMap.set(s.id, s);
       const enrMap = new Map<string, any>();
-      for (const e of (enrollmentsRes.data || [])) enrMap.set(e.student_id, e);
+      for (const e of (enrollmentsRes.data || [])) {
+        const existing = enrMap.get(e.student_id);
+        if (!existing || e.semester_id === semesterId || e.enrollment_status === 'ENROLLED') {
+          enrMap.set(e.student_id, e);
+        }
+      }
 
       return (obs || []).map((o: any) => {
         const assessed = Number(o.amount_centavos || 0);
@@ -694,6 +707,7 @@ export class FinanceRepository {
         const balance = Math.max(0, assessed - paid);
         const s = stuMap.get(o.student_id);
         const enr = enrMap.get(o.student_id);
+        const progCode = enr?.program_id ? programsMap.get(enr.program_id) : (enr?.course || 'BSIT');
 
         return {
           ...o,
@@ -703,8 +717,10 @@ export class FinanceRepository {
           school_id: s?.school_id,
           first_name: s?.first_name,
           last_name: s?.last_name,
-          year_level: enr?.year_level || 1,
-          section: enr?.section || '1A',
+          year_level: enr?.year_level,
+          section: enr?.section,
+          course: progCode,
+          program: progCode,
         };
       });
     }
@@ -744,6 +760,143 @@ export class FinanceRepository {
     sql += ' ORDER BY o.issued_at DESC';
 
     return db.query<StudentObligationWithBalance>(sql, params);
+  }
+
+  /**
+   * Retrieves unique student IDs that have outstanding (unpaid or partially paid)
+   * balances for a given category ('ALL' | 'CONTRIBUTION' | 'FINE') or specific template ruleId.
+   * Completely excludes VOID and fully-settled obligations.
+   */
+  public static async getStudentIdsWithOutstandingBalance(
+    filter: {
+      category?: 'ALL' | 'CONTRIBUTION' | 'FINE';
+      ruleId?: string;
+      semesterId?: string;
+    },
+    adapter?: DatabaseAdapter
+  ): Promise<string[]> {
+    if (!adapter && DataModeService.isDirectSupabase()) {
+      let query = supabase
+        .from('student_obligations')
+        .select('id, student_id, amount_centavos, status, type, rule_id')
+        .neq('status', 'VOID');
+
+      if (filter.ruleId) {
+        query = query.eq('rule_id', filter.ruleId);
+      } else if (filter.category === 'CONTRIBUTION') {
+        query = query.eq('type', 'CONTRIBUTION');
+      } else if (filter.category === 'FINE') {
+        query = query.eq('type', 'FINE');
+      }
+
+      if (filter.semesterId && filter.semesterId !== 'sem_default') {
+        query = query.eq('semester_id', filter.semesterId);
+      }
+
+      const { data: obs, error: obsErr } = await query;
+      if (obsErr) {
+        throw new Error(`Failed to query student obligations for payment filtering: ${obsErr.message}`);
+      }
+
+      if (!obs || obs.length === 0) {
+        return [];
+      }
+
+      const obIds = obs.map((o: any) => o.id);
+      const { data: allocData, error: allocErr } = await supabase
+        .from('payment_allocations')
+        .select('obligation_id, amount_centavos, payment_id')
+        .in('obligation_id', obIds);
+
+      if (allocErr) {
+        throw new Error(`Failed to query payment allocations: ${allocErr.message}`);
+      }
+
+      const allocs = allocData || [];
+      const payIds = Array.from(new Set(allocs.map((a: any) => a.payment_id).filter(Boolean)));
+      const postedPaymentIds = new Set<string>();
+
+      if (payIds.length > 0) {
+        const { data: payData, error: payErr } = await supabase
+          .from('payments')
+          .select('id, status')
+          .in('id', payIds)
+          .eq('status', 'POSTED');
+
+        if (payErr) {
+          throw new Error(`Failed to query payments: ${payErr.message}`);
+        }
+
+        for (const p of payData || []) {
+          postedPaymentIds.add(p.id);
+        }
+      }
+
+      const paidByObId = new Map<string, number>();
+      for (const a of allocs) {
+        if (postedPaymentIds.has(a.payment_id)) {
+          paidByObId.set(
+            a.obligation_id,
+            (paidByObId.get(a.obligation_id) || 0) + Number(a.amount_centavos || 0)
+          );
+        }
+      }
+
+      const owingStudentIds = new Set<string>();
+      for (const o of obs) {
+        if (o.status === 'PAID') continue;
+        const assessed = Number(o.amount_centavos || 0);
+        const paid = paidByObId.get(o.id) || 0;
+        const balance = Math.max(0, assessed - paid);
+        if (balance > 0 && o.student_id) {
+          owingStudentIds.add(o.student_id);
+        }
+      }
+
+      return Array.from(owingStudentIds);
+    }
+
+    // Offline / SQLite mode
+    const db = await this.getDb(adapter);
+    let sql = `
+      WITH adjustment_totals AS (
+        SELECT obligation_id,
+               SUM(CASE WHEN kind='ADDITION' THEN amount_centavos ELSE -amount_centavos END) AS change_centavos
+        FROM obligation_adjustments GROUP BY obligation_id
+      ),
+      paid_totals AS (
+        SELECT pa.obligation_id, SUM(pa.amount_centavos) AS paid_centavos
+        FROM payment_allocations pa
+        JOIN payments p ON p.id = pa.payment_id
+        WHERE p.status = 'POSTED'
+        GROUP BY pa.obligation_id
+      )
+      SELECT DISTINCT o.student_id
+      FROM student_obligations o
+      LEFT JOIN adjustment_totals a ON a.obligation_id = o.id
+      LEFT JOIN paid_totals p ON p.obligation_id = o.id
+      WHERE o.status != 'VOID' AND o.status != 'PAID'
+        AND (o.amount_centavos + COALESCE(a.change_centavos, 0)) > COALESCE(p.paid_centavos, 0)
+    `;
+    const params: unknown[] = [];
+    if (filter.ruleId) {
+      sql += ' AND o.rule_id = ?';
+      params.push(filter.ruleId);
+    } else if (filter.category === 'CONTRIBUTION') {
+      sql += ' AND o.type = ?';
+      params.push('CONTRIBUTION');
+    } else if (filter.category === 'FINE') {
+      sql += ' AND o.type = ?';
+      params.push('FINE');
+    }
+
+    if (filter.semesterId && filter.semesterId !== 'sem_default') {
+      sql += ' AND o.semester_id = ?';
+      params.push(filter.semesterId);
+    }
+
+    const rows = await db.query<{ student_id: string }>(sql, params);
+    return rows.map((r) => r.student_id);
   }
 
   public static async voidObligation(
@@ -1268,13 +1421,181 @@ export class FinanceRepository {
       notes?: string | null;
       actorUserId: string;
     },
-    adapter?: DatabaseAdapter
+    adapter?: DatabaseAdapter,
+    onProgress?: (stage: string, meta?: { current?: number; total?: number }) => void
   ): Promise<BulkContributionResult> {
     if (!params.title || !params.title.trim()) {
       throw new Error('Contribution title is required.');
     }
     if (params.amountCentavos <= 0 || !Number.isInteger(params.amountCentavos)) {
       throw new Error('Contribution amount must be a positive integer in centavos.');
+    }
+
+    if (!adapter && DataModeService.isDirectSupabase()) {
+      onProgress?.('LOADING_STUDENTS');
+
+      // 1. Identify target students from Supabase
+      let targetStudents: { student_id: string }[] = [];
+
+      if (params.targetScope === 'INDIVIDUAL' && params.studentIds && params.studentIds.length > 0) {
+        const { data: stuData, error: stuError } = await supabase
+          .from('students')
+          .select('id')
+          .in('id', params.studentIds)
+          .eq('status', 'ACTIVE');
+
+        if (stuError) {
+          throw new Error(`Failed to load target students from Supabase: ${stuError.message}`);
+        }
+        targetStudents = (stuData || []).map((s: any) => ({ student_id: s.id }));
+      } else {
+        let enrQuery = supabase
+          .from('student_enrollments')
+          .select('student_id')
+          .eq('semester_id', params.semesterId);
+
+        if (params.targetScope === 'PROGRAM' && params.programIds && params.programIds.length > 0) {
+          enrQuery = enrQuery.in('program_id', params.programIds);
+        } else if (params.targetScope === 'YEAR_LEVEL' && params.yearLevels && params.yearLevels.length > 0) {
+          enrQuery = enrQuery.in('year_level', params.yearLevels);
+        } else if (params.targetScope === 'SECTION' && params.sections && params.sections.length > 0) {
+          enrQuery = enrQuery.in('section', params.sections);
+        }
+
+        const { data: enrData, error: enrError } = await enrQuery;
+        if (enrError) {
+          throw new Error(`Failed to load student enrollments from Supabase: ${enrError.message}`);
+        }
+
+        const rawStudentIds = Array.from(
+          new Set((enrData || []).map((e: any) => e.student_id).filter(Boolean))
+        );
+
+        if (rawStudentIds.length === 0) {
+          throw new Error('No eligible enrolled students found for the selected contribution audience.');
+        }
+
+        const { data: activeStudents, error: actError } = await supabase
+          .from('students')
+          .select('id')
+          .in('id', rawStudentIds)
+          .eq('status', 'ACTIVE');
+
+        if (actError) {
+          throw new Error(`Failed to verify active students from Supabase: ${actError.message}`);
+        }
+
+        targetStudents = (activeStudents || []).map((s: any) => ({ student_id: s.id }));
+      }
+
+      if (targetStudents.length === 0) {
+        throw new Error('No eligible enrolled students found for the selected contribution audience.');
+      }
+
+      onProgress?.('GENERATING_OBLIGATIONS', { total: targetStudents.length });
+
+      // 2. Prevent duplicate student obligations under the same rule and semester
+      let studentsToAssign = targetStudents;
+      if (params.ruleId) {
+        const { data: existingObs, error: existError } = await supabase
+          .from('student_obligations')
+          .select('student_id')
+          .eq('semester_id', params.semesterId)
+          .eq('rule_id', params.ruleId)
+          .neq('status', 'VOID');
+
+        if (existError) {
+          throw new Error(`Failed to check existing obligations on Supabase: ${existError.message}`);
+        }
+
+        const existingStudentIds = new Set((existingObs || []).map((o: any) => o.student_id));
+        studentsToAssign = targetStudents.filter((t) => !existingStudentIds.has(t.student_id));
+      }
+
+      const batchId = this.generateUuid();
+      const now = new Date().toISOString();
+      const createdObligations: StudentObligationItem[] = [];
+
+      // Resolve valid actor user UUID
+      const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+      let validActorId: string | null = null;
+      if (params.actorUserId && UUID_REGEX.test(params.actorUserId)) {
+        validActorId = params.actorUserId;
+      } else {
+        const { data: authUser } = await supabase.auth.getUser();
+        if (authUser?.user?.id && UUID_REGEX.test(authUser.user.id)) {
+          validActorId = authUser.user.id;
+        }
+      }
+
+      if (studentsToAssign.length > 0) {
+        onProgress?.('SAVING_SUPABASE', { current: 0, total: studentsToAssign.length });
+
+        const rowsToInsert = studentsToAssign.map((t) => {
+          const id = this.generateUuid();
+          return {
+            id,
+            student_id: t.student_id,
+            semester_id: params.semesterId,
+            rule_id: params.ruleId || null,
+            title: params.title.trim(),
+            type: 'CONTRIBUTION',
+            amount_centavos: Math.round(params.amountCentavos),
+            status: 'ACTIVE',
+            due_date: params.dueDate ? params.dueDate.substring(0, 10) : null,
+            issued_by_user_id: validActorId,
+            batch_id: batchId,
+            issued_at: now,
+            updated_at: now,
+          };
+        });
+
+        // Insert in chunks of 100
+        const CHUNK_SIZE = 100;
+        for (let i = 0; i < rowsToInsert.length; i += CHUNK_SIZE) {
+          const chunk = rowsToInsert.slice(i, i + CHUNK_SIZE);
+          const { error: insertError } = await supabase
+            .from('student_obligations')
+            .insert(chunk);
+
+          if (insertError) {
+            throw new Error(`Failed to create student obligations on Supabase: ${insertError.message}`);
+          }
+          onProgress?.('SAVING_SUPABASE', {
+            current: Math.min(i + CHUNK_SIZE, rowsToInsert.length),
+            total: rowsToInsert.length,
+          });
+        }
+
+        onProgress?.('FINALIZING', { total: rowsToInsert.length });
+
+        for (const row of rowsToInsert) {
+          createdObligations.push({
+            id: row.id,
+            studentId: row.student_id,
+            semesterId: row.semester_id,
+            ruleId: row.rule_id,
+            title: row.title,
+            type: 'CONTRIBUTION',
+            amountCentavos: row.amount_centavos,
+            paidCentavos: 0,
+            balanceCentavos: row.amount_centavos,
+            status: 'UNPAID',
+            dueDate: row.due_date,
+            batchId: row.batch_id,
+            issuedByUserId: row.issued_by_user_id,
+            issuedAt: row.issued_at,
+            updatedAt: row.updated_at,
+          });
+        }
+      }
+
+      return {
+        batchId,
+        totalAssigned: createdObligations.length,
+        totalCentavos: createdObligations.length * params.amountCentavos,
+        createdObligations,
+      };
     }
 
     const db = await this.getDb(adapter);

@@ -55,6 +55,34 @@ const selectedOccurrence = computed(() =>
   openOccurrences.value.find(item => item.occurrence.id === selectedOccurrenceId.value) || null
 );
 
+const activeCheckpointId = ref<string>('');
+
+const occurrenceCheckpoints = computed(() => {
+  if (!selectedOccurrence.value) return [];
+  const occ = selectedOccurrence.value.occurrence;
+  if (occ.checkpoints && occ.checkpoints.length > 0) {
+    return occ.checkpoints;
+  }
+  return [{ id: 'default_in', label: 'General Check-In', type: 'IN' as const, orderIndex: 0 }];
+});
+
+watch(selectedOccurrence, (occ) => {
+  if (occ?.occurrence) {
+    activeCheckpointId.value = occ.occurrence.activeCheckpointId || (occ.occurrence.checkpoints && occ.occurrence.checkpoints[0]?.id) || 'default_in';
+  }
+}, { immediate: true });
+
+async function selectCheckpoint(checkpointId: string) {
+  activeCheckpointId.value = checkpointId;
+  if (selectedOccurrenceId.value) {
+    try {
+      await eventService.setActiveCheckpoint(selectedOccurrenceId.value, checkpointId);
+    } catch {
+      // Offline fallback silent
+    }
+  }
+}
+
 const sessionOptions = computed(() =>
   openOccurrences.value.map((item) => ({
     value: item.occurrence.id,
@@ -119,7 +147,12 @@ watch(lastTag, async (newTag) => {
   isProcessing.value = true;
   try {
     const officerId = authService.user.value?.id || 'officer_user';
-    const prep = await attendanceService.prepareNfcVerification(selectedOccurrenceId.value, newTag.id, officerId);
+    const prep = await attendanceService.prepareNfcVerification(
+      selectedOccurrenceId.value,
+      newTag.id,
+      officerId,
+      activeCheckpointId.value
+    );
     
     if (prep.type === 'ACCEPTED' && prep.eligible && prep.student) {
       pendingVerification.value = prep;
@@ -167,11 +200,17 @@ async function handleConfirmStudent() {
       pv.occurrenceId,
       pv.student.id,
       officerId,
-      pv.suggestedStatus
+      pv.suggestedStatus,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      'NFC',
+      pv.checkpointId || activeCheckpointId.value
     );
     lastResult.value = {
       type: 'ACCEPTED',
-      message: `${pv.studentFullName} confirmed as ${pv.suggestedStatus}!`,
+      message: `${pv.studentFullName} confirmed for ${pv.checkpointLabel || 'session'} as ${pv.suggestedStatus}!`,
       timestamp: new Date().toISOString(),
       rfidUid: pv.rfidUid,
     };
@@ -329,6 +368,24 @@ function handleRegisterCard() {
             <span>{{ formatDate(selectedOccurrence.occurrence.date) }} • {{ formatTime(selectedOccurrence.occurrence.startTime) }} - {{ formatTime(selectedOccurrence.occurrence.endTime) }}</span>
             <span>Grace: {{ selectedOccurrence.occurrence.gracePeriodMinutes }}m</span>
           </div>
+
+          <!-- Active Checkpoint Selector -->
+          <div v-if="selectedOccurrence && occurrenceCheckpoints.length > 0" class="checkpoint-selector-wrap">
+            <span class="checkpoint-header-label">Active Checkpoint</span>
+            <div class="checkpoint-chips-row">
+              <button
+                v-for="cp in occurrenceCheckpoints"
+                :key="cp.id"
+                type="button"
+                class="checkpoint-chip"
+                :class="{ 'is-active': activeCheckpointId === cp.id, 'type-out': cp.type === 'OUT' }"
+                @click="selectCheckpoint(cp.id)"
+              >
+                <span class="cp-type-badge">{{ cp.type }}</span>
+                <span class="cp-label-text">{{ cp.label }}</span>
+              </button>
+            </div>
+          </div>
         </div>
 
         <!-- Hero Luminous NFC Scanner Panel -->
@@ -378,7 +435,12 @@ function handleRegisterCard() {
         <!-- Photo Identity Verification Card (UniTap 2.0) -->
         <div v-if="pendingVerification" class="minimal-card photo-verify-card">
           <div class="verify-header">
-            <span class="verify-eyebrow">PHOTO IDENTITY VERIFICATION</span>
+            <div class="verify-header-left">
+              <span class="verify-eyebrow">PHOTO IDENTITY VERIFICATION</span>
+              <span v-if="pendingVerification.checkpointLabel" class="checkpoint-active-pill" :class="{ 'type-out': pendingVerification.checkpointType === 'OUT' }">
+                {{ pendingVerification.checkpointLabel }} ({{ pendingVerification.checkpointType || 'IN' }})
+              </span>
+            </div>
             <span class="verify-status-tag" :class="pendingVerification.suggestedStatus.toLowerCase()">
               Suggested: {{ pendingVerification.suggestedStatus }}
             </span>
@@ -387,8 +449,8 @@ function handleRegisterCard() {
           <div class="verify-student-row">
             <div class="verify-avatar-box">
               <img
-                v-if="pendingVerification.photoLocalUri"
-                :src="pendingVerification.photoLocalUri"
+                v-if="pendingVerification.photoUrl || pendingVerification.photoLocalUri"
+                :src="(pendingVerification.photoUrl || pendingVerification.photoLocalUri)!"
                 alt="Student Photo"
                 class="verify-photo-img"
               />
@@ -684,6 +746,94 @@ function handleRegisterCard() {
   font-size: 12px;
   color: var(--app-text-secondary);
   padding: 0 2px;
+}
+
+.checkpoint-selector-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 4px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--app-border);
+}
+
+.checkpoint-header-label {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--app-text-secondary);
+}
+
+.checkpoint-chips-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.checkpoint-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border-radius: 9999px;
+  background: var(--app-surface-subtle);
+  border: 1px solid var(--app-border);
+  color: var(--app-text-secondary);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.checkpoint-chip:hover {
+  border-color: var(--ion-color-primary);
+}
+
+.checkpoint-chip.is-active {
+  background: rgba(15, 118, 110, 0.12);
+  border-color: #0f766e;
+  color: #0f766e;
+  box-shadow: 0 0 0 1px #0f766e;
+}
+
+.checkpoint-chip.is-active.type-out {
+  background: rgba(225, 29, 72, 0.12);
+  border-color: #e11d48;
+  color: #e11d48;
+  box-shadow: 0 0 0 1px #e11d48;
+}
+
+.cp-type-badge {
+  font-size: 10px;
+  font-weight: 800;
+  padding: 2px 5px;
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.08);
+  letter-spacing: 0.04em;
+}
+
+.verify-header-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.checkpoint-active-pill {
+  font-size: 11px;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 9999px;
+  background: rgba(15, 118, 110, 0.15);
+  color: #0f766e;
+  border: 1px solid rgba(15, 118, 110, 0.3);
+}
+
+.checkpoint-active-pill.type-out {
+  background: rgba(225, 29, 72, 0.15);
+  color: #e11d48;
+  border-color: rgba(225, 29, 72, 0.3);
 }
 
 /* Hero Scanner Card */

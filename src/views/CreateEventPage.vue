@@ -14,7 +14,7 @@ import { checkmarkOutline, closeCircleOutline, alertCircleOutline } from 'ionico
 import { eventService } from '@/services/event.service';
 import { AcademicRepository } from '@/database/repositories/academic.repository';
 import { useOperationPolicy } from '@/composables/useOperationPolicy';
-import type { EventType, AudienceType } from '@/types/event';
+import type { Event as UniTapEvent, EventType, AudienceType } from '@/types/event';
 import type { EventCategory, YearLevel, SectionRecord } from '@/types/database';
 import { UniPageHeader, UniButton, UniSelect } from '@/components/ui';
 import { useToast } from '@/composables/useToast';
@@ -198,33 +198,48 @@ async function handleSaveEvent() {
       return;
     }
 
-    const event = await eventService.createEvent({
-      title: title.value.trim(),
-      description: description.value.trim(),
-      type: eventType.value,
-      audience: {
-        type: audienceType.value,
-        yearLevels: audienceType.value === 'YEAR_LEVEL' ? selectedYears.value : undefined,
-        sections: audienceType.value === 'SECTION' ? selectedSections.value : undefined
-      },
-      attendanceRequired: true
-    });
+    let event: UniTapEvent;
+    try {
+      event = await eventService.createEvent({
+        title: title.value.trim(),
+        description: description.value.trim(),
+        type: eventType.value,
+        audience: {
+          type: audienceType.value,
+          yearLevels: audienceType.value === 'YEAR_LEVEL' ? selectedYears.value : undefined,
+          sections: audienceType.value === 'SECTION' ? selectedSections.value : undefined
+        },
+        attendanceRequired: true
+      });
+    } catch (createErr: unknown) {
+      console.error('Failed to create event:', createErr);
+      errorMessage.value = createErr instanceof Error ? createErr.message : 'Error creating event.';
+      return;
+    }
 
     // Create initial session occurrence
-    await eventService.createOccurrence({
-      eventId: event.id,
-      title: sessionTitle.value.trim(),
-      date: sessionDate.value,
-      startTime: startTime.value,
-      endTime: endTime.value,
-      gracePeriodMinutes: Number(gracePeriodMinutes.value) || 15
-    });
+    try {
+      await eventService.createOccurrence({
+        eventId: event.id,
+        title: sessionTitle.value.trim(),
+        date: sessionDate.value,
+        startTime: startTime.value,
+        endTime: endTime.value,
+        gracePeriodMinutes: Number(gracePeriodMinutes.value) || 15
+      });
+    } catch (occErr: unknown) {
+      console.error('Event created, but failed to create occurrence session:', occErr);
+      const sessionErrorMsg = occErr instanceof Error ? occErr.message : 'Unknown error creating session.';
+      await showToast(`Event was saved, but its initial session failed: ${sessionErrorMsg}`, 'warning');
+      router.replace(`/events/${event.id}`);
+      return;
+    }
 
     await showToast('Event created successfully', 'success');
     router.replace(`/events/${event.id}`);
   } catch (err: unknown) {
-    console.error('Failed to create event:', err);
-    errorMessage.value = err instanceof Error ? err.message : 'Error creating event.';
+    console.error('Unexpected error in event flow:', err);
+    errorMessage.value = err instanceof Error ? err.message : 'Error processing event.';
   } finally {
     isSubmitting.value = false;
   }

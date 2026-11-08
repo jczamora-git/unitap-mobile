@@ -8,6 +8,7 @@ import { ATTENDANCE_CONCURRENCY_MIGRATION_SQL } from './migrations/006_attendanc
 import { SCHEMA_COMPATIBILITY_MIGRATION_SQL } from './migrations/007_schema_compatibility_and_sync_alignment';
 import { ENTITY_CHECKPOINTS_MIGRATION_SQL } from './migrations/008_entity_sync_checkpoints';
 import { LOCAL_SYNC_AUDIT_LOGS_MIGRATION_SQL } from './migrations/009_local_sync_audit_logs';
+import { ATTENDANCE_CHECKPOINTS_MIGRATION_SQL } from './migrations/010_attendance_checkpoints';
 
 export interface Migration {
   version: number;
@@ -60,6 +61,11 @@ export const MIGRATIONS: Migration[] = [
     version: 9,
     description: 'UniTap 2.0 Local-Only Sync Audit Logs & Diagnostics',
     sql: LOCAL_SYNC_AUDIT_LOGS_MIGRATION_SQL,
+  },
+  {
+    version: 10,
+    description: 'UniTap 2.0 Attendance Checkpoints & Photo Path',
+    sql: ATTENDANCE_CHECKPOINTS_MIGRATION_SQL,
   },
 ];
 

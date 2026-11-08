@@ -27,11 +27,13 @@ import {
 import { SystemSetupService } from '@/services/system-setup.service';
 import { DataModeService } from '@/services/data-mode.service';
 import { SupabaseAuthService } from '@/integrations/supabase/auth.service';
+import { useAuth } from '@/composables/useAuth';
 import type { Program } from '@/types/database';
 import { haptics } from '@/utilities/haptics';
 import { useToast } from '@/composables/useToast';
 
 const { showToast } = useToast();
+const { isDevAdmin } = useAuth();
 
 const programs = ref<Program[]>([]);
 const sectionCounts = ref<Record<string, number>>({});
@@ -191,6 +193,8 @@ async function handleToggleStatus(prog: Program) {
   }
 }
 
+const isDeleting = ref(false);
+
 function promptDelete(prog: Program) {
   haptics.light();
   activeProgramForDelete.value = prog;
@@ -199,6 +203,7 @@ function promptDelete(prog: Program) {
 
 async function confirmDelete() {
   if (!activeProgramForDelete.value) return;
+  isDeleting.value = true;
   try {
     await SystemSetupService.deleteProgram(activeProgramForDelete.value.id);
     showDeleteConfirm.value = false;
@@ -210,6 +215,8 @@ async function confirmDelete() {
     showDeleteConfirm.value = false;
     await showToast(err instanceof Error ? err.message : 'Cannot delete program.', 'error');
     haptics.error();
+  } finally {
+    isDeleting.value = false;
   }
 }
 
@@ -331,7 +338,7 @@ onMounted(loadData);
                   {{ (prog.status || (prog.is_active === 1 ? 'ACTIVE' : 'INACTIVE')) === 'ACTIVE' ? 'Deactivate' : 'Activate' }}
                 </UniButton>
                 <UniButton
-                  v-if="(sectionCounts[prog.id] || 0) === 0 && (enrollmentCounts[prog.id] || 0) === 0"
+                  v-if="isDevAdmin && (sectionCounts[prog.id] || 0) === 0 && (enrollmentCounts[prog.id] || 0) === 0"
                   variant="destructive"
                   size="sm"
                   :icon="trashOutline"
@@ -438,7 +445,7 @@ onMounted(loadData);
         :is-open="showDeleteConfirm"
         title="Delete Degree Program"
         :description="`Are you sure you want to permanently delete program '${activeProgramForDelete?.code} - ${activeProgramForDelete?.name}'? This action cannot be undone.`"
-        confirm-text="Delete Program"
+        :confirm-text="isDeleting ? 'Deleting...' : 'Delete Program'"
         cancel-text="Keep Program"
         confirm-variant="danger"
         @confirm="confirmDelete"

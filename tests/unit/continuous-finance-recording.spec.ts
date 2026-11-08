@@ -687,5 +687,76 @@ describe('Phase 5: Continuous NFC Finance Recording', () => {
       expect(bscsObs.length).toBe(1);
       expect(bscsObs[0].studentId).toBe(student1Id);
     });
+
+    it('filters eligible students with outstanding balances by category and template', async () => {
+      // Assess student1 for Contribution
+      await service.assessBulkContributions({
+        semesterId,
+        ruleId: contributionRuleId,
+        title: 'CSG Membership Fee 2026',
+        amountCentavos: 15000,
+        targetScope: 'INDIVIDUAL',
+        studentIds: [student1Id],
+        actorUserId: officerId,
+      });
+
+      // Assess student2 for Fine
+      await service.issueManualFine({
+        studentId: student2Id,
+        semesterId,
+        ruleId: fineRuleId,
+        title: 'General Assembly Absence Fine',
+        amountCentavos: 5000,
+        actorUserId: officerId,
+      });
+
+      // 1. ALL obligations: student1 and student2 (student3 has none)
+      const eligibleAll = await service.getEligibleStudentsForPayment({
+        semesterId,
+        category: 'ALL',
+      });
+      expect(eligibleAll.some((s) => s.id === student1Id)).toBe(true);
+      expect(eligibleAll.some((s) => s.id === student2Id)).toBe(true);
+      expect(eligibleAll.some((s) => s.id === student3Id)).toBe(false);
+
+      // 2. CONTRIBUTION: only student1
+      const eligibleContrib = await service.getEligibleStudentsForPayment({
+        semesterId,
+        category: 'CONTRIBUTION',
+      });
+      expect(eligibleContrib.some((s) => s.id === student1Id)).toBe(true);
+      expect(eligibleContrib.some((s) => s.id === student2Id)).toBe(false);
+
+      // 3. FINE: only student2
+      const eligibleFines = await service.getEligibleStudentsForPayment({
+        semesterId,
+        category: 'FINE',
+      });
+      expect(eligibleFines.some((s) => s.id === student2Id)).toBe(true);
+      expect(eligibleFines.some((s) => s.id === student1Id)).toBe(false);
+
+      // 4. Specific template: contributionRuleId -> only student1
+      const eligibleRule = await service.getEligibleStudentsForPayment({
+        semesterId,
+        ruleId: contributionRuleId,
+      });
+      expect(eligibleRule.length).toBe(1);
+      expect(eligibleRule[0].id).toBe(student1Id);
+
+      // 5. Filter by search query
+      const searched = await service.getEligibleStudentsForPayment({
+        semesterId,
+        category: 'ALL',
+        searchQuery: 'Dela Cruz',
+      });
+      expect(searched.length).toBe(1);
+      expect(searched[0].id).toBe(student1Id);
+
+      const searchNone = await service.getEligibleStudentsForPayment({
+        semesterId,
+        searchQuery: 'NonExistentStudentQuery',
+      });
+      expect(searchNone.length).toBe(0);
+    });
   });
 });

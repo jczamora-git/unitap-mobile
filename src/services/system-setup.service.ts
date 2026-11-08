@@ -593,6 +593,22 @@ export class SystemSetupService {
     return (await AcademicRepository.getYearById(id))!;
   }
 
+  public static async deleteAcademicYear(id: string): Promise<void> {
+    await this.verifyDevAdmin();
+    if (DataModeService.isDirectSupabase()) {
+      const { error } = await supabase.from('academic_years').delete().eq('id', id);
+      if (error) throw new Error(error.message || 'Failed to delete academic year.');
+      return;
+    }
+    const db = await getDatabase();
+    await db.execute('DELETE FROM academic_years WHERE id = ?', [id]);
+    try {
+      await supabase.from('academic_years').delete().eq('id', id);
+    } catch {
+      await this.enqueueOutbox('ACADEMIC_YEAR', id, 'DELETE', { id });
+    }
+  }
+
   public static async setAcademicYearStatus(id: string, status: AcademicYear['status']): Promise<void> {
     await this.verifyDevAdmin();
     await AcademicRepository.setYearStatus(id, status);
@@ -741,6 +757,26 @@ export class SystemSetupService {
       } catch {
         await this.enqueueOutbox('SEMESTER', semesterId, 'UPDATE', { id: semesterId, status: 'ACTIVE' });
       }
+    }
+  }
+
+  public static async deleteSemester(id: string): Promise<void> {
+    await this.verifyDevAdmin();
+    const sem = await AcademicRepository.getSemesterById(id);
+    if (sem?.status === 'ACTIVE') {
+      throw new Error('Cannot delete the active semester. Activate another semester first.');
+    }
+    if (DataModeService.isDirectSupabase()) {
+      const { error } = await supabase.from('semesters').delete().eq('id', id);
+      if (error) throw new Error(error.message || 'Failed to delete semester.');
+      return;
+    }
+    const db = await getDatabase();
+    await db.execute('DELETE FROM semesters WHERE id = ?', [id]);
+    try {
+      await supabase.from('semesters').delete().eq('id', id);
+    } catch {
+      await this.enqueueOutbox('SEMESTER', id, 'DELETE', { id });
     }
   }
 

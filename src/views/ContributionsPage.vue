@@ -7,6 +7,7 @@ import {
   IonIcon,
   IonSpinner,
   IonSearchbar,
+  IonModal,
   onIonViewWillEnter,
 } from '@ionic/vue';
 import {
@@ -21,14 +22,23 @@ import {
   listOutline,
   arrowForwardOutline,
   alertCircleOutline,
+  trashOutline,
 } from 'ionicons/icons';
 import { financeService } from '@/services/finance.service';
 import { authService } from '@/services/auth.service';
+import { useAuth } from '@/composables/useAuth';
 import { useOperationPolicy } from '@/composables/useOperationPolicy';
 import { AcademicRepository } from '@/database/repositories/academic.repository';
 import { StudentsRepository, type StudentWithEnrollment } from '@/database/repositories/students.repository';
+import { studentService } from '@/services/student.service';
 import type { Semester, Program, SectionRecord } from '@/types/database';
-import type { StudentObligationItem, ContributionCollectionItem } from '@/types/finance';
+import type {
+  StudentObligationItem,
+  ContributionCollectionItem,
+  ContributionCreationStage,
+  BulkContributionResult,
+  ObligationRuleItem,
+} from '@/types/finance';
 import { formatPeso, pesoToCentavos, centavosToPeso } from '@/utilities/finance-formatters';
 import { formatSemesterName, formatObligationStatus } from '@/utilities/presentation-formatters';
 import { useToast } from '@/composables/useToast';
@@ -117,6 +127,24 @@ const selectedCollectionDetails = ref<ContributionCollectionItem | null>(null);
 // --- 2. Create Contribution Form State ---
 const isCreateCollectionSheetOpen = ref(false);
 const isCreatingCollection = ref(false);
+
+// --- Blocking Processing & Success Modal State ---
+const isBlockingModalOpen = ref(false);
+const isSuccessModalOpen = ref(false);
+const creationStage = ref<ContributionCreationStage>('IDLE');
+const creationStatusTitle = ref('Creating Contribution...');
+const creationStatusDesc = ref('Registering contribution definition in Supabase.');
+const creationProgressCurrent = ref(0);
+const creationProgressTotal = ref(0);
+const creationErrorMessage = ref<string | null>(null);
+const createdRuleRecord = ref<ObligationRuleItem | null>(null);
+const createdAssessResult = ref<BulkContributionResult | null>(null);
+const isRuleSavedOnFailure = ref(false);
+
+const selectedSemesterLabel = computed(() => {
+  const opt = semesterOptions.value.find((s) => s.value === (collectionSemesterId.value || selectedSemesterId.value));
+  return opt ? opt.label : 'Active Semester';
+});
 
 const defaultDueDate = () => {
   const d = new Date();
@@ -268,11 +296,80 @@ const paginatedContributions = computed(() => {
   return filteredContributions.value.slice(start, start + recordsPageSize.value);
 });
 
+function formatObligationAcademicSubtitle(c: StudentObligationItem): string {
+  const schoolId = c.schoolId || '—';
+  const program = c.program || c.course || '—';
+  const yearText = c.yearLevel ? `Year ${c.yearLevel}` : '—';
+  const sectionText = c.section || '—';
+  const academic = (yearText === '—' && sectionText === '—') ? '—' : `${yearText}-${sectionText}`;
+  return `${schoolId} • ${program} • ${academic} • ${c.title}`;
+}
+
+function formatStudentYearSection(s: { year_level?: number | null; section?: string | null }): string {
+  const yearText = s.year_level ? `Year ${s.year_level}` : '—';
+  const sectionText = s.section || '—';
+  return (yearText === '—' && sectionText === '—') ? '—' : `${yearText}-${sectionText}`;
+}
+
 // --- 4. Void Obligation Dialog ---
 const isVoidModalOpen = ref(false);
 const isVoiding = ref(false);
 const voidingObligationId = ref('');
 const voidReason = ref('');
+
+const { isDevAdmin } = useAuth();
+
+const showDeleteCollectionDialog = ref(false);
+const collectionToDelete = ref<ContributionCollectionItem | null>(null);
+const isDeletingCollection = ref(false);
+
+function promptDeleteCollection(col: ContributionCollectionItem) {
+  collectionToDelete.value = col;
+  showDeleteCollectionDialog.value = true;
+}
+
+async function confirmDeleteCollection() {
+  if (!collectionToDelete.value) return;
+  const targetRuleId = collectionToDelete.value.ruleId || collectionToDelete.value.id;
+  if (!targetRuleId) return;
+  isDeletingCollection.value = true;
+  try {
+    await financeService.deleteObligationRule(targetRuleId);
+    await showToast('Contribution collection deleted successfully.', 'success');
+    showDeleteCollectionDialog.value = false;
+    collectionToDelete.value = null;
+    await loadData();
+  } catch (err: any) {
+    await showToast(err?.message || 'Cannot delete contribution collection because payments have already been collected for it. Archive or deactivate instead.', 'error');
+  } finally {
+    isDeletingCollection.value = false;
+  }
+}
+
+const showDeleteObligationDialog = ref(false);
+const obligationToDelete = ref<StudentObligationItem | null>(null);
+const isDeletingObligation = ref(false);
+
+function promptDeleteObligation(ob: StudentObligationItem) {
+  obligationToDelete.value = ob;
+  showDeleteObligationDialog.value = true;
+}
+
+async function confirmDeleteObligation() {
+  if (!obligationToDelete.value) return;
+  isDeletingObligation.value = true;
+  try {
+    await financeService.deleteStudentObligation(obligationToDelete.value.id);
+    await showToast('Student obligation deleted successfully.', 'success');
+    showDeleteObligationDialog.value = false;
+    obligationToDelete.value = null;
+    await loadData();
+  } catch (err: any) {
+    await showToast(err?.message || 'Cannot delete student obligation because payments have already been allocated to it.', 'error');
+  } finally {
+    isDeletingObligation.value = false;
+  }
+}
 
 // --- Data Loader ---
 async function loadData() {
@@ -295,16 +392,29 @@ async function loadData() {
         await Promise.all([
           financeService.getContributionCollections(selectedSemesterId.value),
           financeService.getObligationsBySemester(selectedSemesterId.value, 'CONTRIBUTION'),
-          StudentsRepository.getStudents({ semesterId: selectedSemesterId.value }),
+          studentService.getStudents(),
           AcademicRepository.getPrograms(),
           AcademicRepository.getSections(),
         ]);
 
       collections.value = fetchedCols;
       contributions.value = fetchedContribs;
-      enrolledStudents.value = fetchedStudents;
       programs.value = fetchedPrograms;
       sections.value = fetchedSections;
+
+      enrolledStudents.value = (fetchedStudents || []).map((s: any) => ({
+        id: s.id,
+        school_id: s.studentNumber || s.school_id || '',
+        first_name: s.firstName || s.first_name || '',
+        last_name: s.lastName || s.last_name || '',
+        status: (s.status === 'INACTIVE' || s.status === 'GRADUATED') ? s.status : 'ACTIVE',
+        created_at: s.createdAt || new Date().toISOString(),
+        updated_at: s.updatedAt || new Date().toISOString(),
+        year_level: s.yearLevel ?? s.year_level ?? null,
+        section: s.section || '',
+        program_id: s.programId || s.program_id || (fetchedPrograms.find((p: any) => p.code === s.course)?.id) || '',
+        enrollment_status: s.status || 'ENROLLED',
+      }));
 
       if (!selectedProgramId.value && fetchedPrograms.length > 0) {
         selectedProgramId.value = fetchedPrograms[0].id;
@@ -327,11 +437,13 @@ function openCreateContributionModal() {
   collectionName.value = '';
   collectionAmountPesos.value = 100;
   collectionDueDate.value = defaultDueDate();
-  collectionSemesterId.value = selectedSemesterId.value;
+  collectionSemesterId.value = selectedSemesterId.value || '';
   collectionTargetScope.value = 'ALL';
   selectedStudentIds.value = [];
   studentSearchInModal.value = '';
   collectionNotes.value = '';
+  isBlockingModalOpen.value = false;
+  isSuccessModalOpen.value = false;
   isCreateCollectionSheetOpen.value = true;
 }
 
@@ -354,7 +466,8 @@ function clearModalStudentSelection() {
   selectedStudentIds.value = [];
 }
 
-async function handleCreateContribution() {
+async function handleCreateContribution(retryRuleId?: string | unknown) {
+  const effectiveRetryRuleId = typeof retryRuleId === 'string' ? retryRuleId : undefined;
   if (!canManageRules.value) {
     errorMessage.value = rulesDisabledReason.value || 'Creating contributions requires an active connection.';
     return;
@@ -377,37 +490,124 @@ async function handleCreateContribution() {
   }
 
   isCreatingCollection.value = true;
-  errorMessage.value = null;
+  isBlockingModalOpen.value = true;
+  isSuccessModalOpen.value = false;
+  creationProgressCurrent.value = 0;
+  creationProgressTotal.value = 0;
+  creationErrorMessage.value = null;
+  isRuleSavedOnFailure.value = false;
+
+  if (effectiveRetryRuleId) {
+    creationStage.value = 'LOADING_STUDENTS';
+    creationStatusTitle.value = 'Retrying Student Assignment...';
+    creationStatusDesc.value = 'Assigning eligible students to existing contribution fee definition.';
+  } else {
+    creationStage.value = 'CREATING_RULE';
+    creationStatusTitle.value = 'Creating Contribution...';
+    creationStatusDesc.value = 'Registering contribution fee definition in Supabase Cloud.';
+  }
 
   try {
-    const res = await financeService.createContributionCollection({
-      name: collectionName.value.trim(),
-      amountCentavos: pesoToCentavos(collectionAmountPesos.value),
-      dueDate: collectionDueDate.value,
-      semesterId: collectionSemesterId.value || selectedSemesterId.value,
-      targetScope: collectionTargetScope.value,
-      programIds: collectionTargetScope.value === 'PROGRAM' ? [selectedProgramId.value] : undefined,
-      yearLevels: collectionTargetScope.value === 'YEAR_LEVEL' ? [selectedYearLevel.value] : undefined,
-      sections: collectionTargetScope.value === 'SECTION' ? [selectedSection.value] : undefined,
-      studentIds: collectionTargetScope.value === 'INDIVIDUAL' ? selectedStudentIds.value : undefined,
-      notes: collectionNotes.value.trim() || null,
-      actorUserId: authService.user.value?.id || 'officer_user',
-    });
-
-    haptics.success();
-    await showToast(
-      `Collection "${collectionName.value.trim()}" created successfully (${res.assessResult.totalAssigned} assigned).`,
-      'success'
+    const res = await financeService.createContributionCollection(
+      {
+        name: collectionName.value.trim(),
+        amountCentavos: pesoToCentavos(collectionAmountPesos.value),
+        dueDate: collectionDueDate.value,
+        semesterId: collectionSemesterId.value || selectedSemesterId.value,
+        targetScope: collectionTargetScope.value,
+        programIds: collectionTargetScope.value === 'PROGRAM' ? [selectedProgramId.value] : undefined,
+        yearLevels: collectionTargetScope.value === 'YEAR_LEVEL' ? [selectedYearLevel.value] : undefined,
+        sections: collectionTargetScope.value === 'SECTION' ? [selectedSection.value] : undefined,
+        studentIds: collectionTargetScope.value === 'INDIVIDUAL' ? selectedStudentIds.value : undefined,
+        notes: collectionNotes.value.trim() || null,
+        actorUserId: authService.user.value?.id || 'officer_user',
+        existingRuleId: effectiveRetryRuleId,
+      },
+      (stage, meta) => {
+        creationStage.value = stage;
+        if (stage === 'CREATING_RULE') {
+          creationStatusTitle.value = 'Creating Contribution...';
+          creationStatusDesc.value = 'Registering contribution fee definition in Supabase Cloud.';
+        } else if (stage === 'LOADING_STUDENTS') {
+          creationStatusTitle.value = 'Loading Students...';
+          creationStatusDesc.value = 'Querying enrolled active students matching audience criteria.';
+        } else if (stage === 'GENERATING_OBLIGATIONS') {
+          creationStatusTitle.value = 'Generating Student Obligations...';
+          creationStatusDesc.value = meta?.total
+            ? `Preparing obligation records for ${meta.total} eligible students.`
+            : 'Preparing student obligation records and checking duplicates.';
+          if (meta?.total) creationProgressTotal.value = meta.total;
+        } else if (stage === 'SAVING_SUPABASE') {
+          creationStatusTitle.value = 'Saving to Supabase...';
+          creationStatusDesc.value = meta?.total
+            ? `Persisting student obligations to Supabase (${meta.current || 0}/${meta.total}).`
+            : 'Persisting student obligations to Supabase Cloud Database.';
+          if (meta?.current !== undefined) creationProgressCurrent.value = meta.current;
+          if (meta?.total) creationProgressTotal.value = meta.total;
+        } else if (stage === 'FINALIZING') {
+          creationStatusTitle.value = 'Finalizing...';
+          creationStatusDesc.value = 'Confirming assignments and calculating collection target.';
+        }
+      }
     );
+
+    creationStage.value = 'SUCCESS';
+    creationStatusTitle.value = 'Contribution Created & Assigned';
+    creationStatusDesc.value = 'Contribution fee and student obligations have been confirmed on Supabase.';
+    createdRuleRecord.value = res.rule;
+    createdAssessResult.value = res.assessResult;
+    haptics.success();
+
+    // 1. After confirmed Supabase success, close and dismiss the Create Contribution sheet
     isCreateCollectionSheetOpen.value = false;
-    await loadData();
-    activeSection.value = 'COLLECTIONS';
+
+    // 2. Close the blocking processing modal before displaying the success modal
+    isBlockingModalOpen.value = false;
+
+    // 3. Prevent stacked or overlapping Ionic modals by yielding for dismiss transition
+    await new Promise((resolve) => setTimeout(resolve, 150));
+
+    // 4. Display the dedicated success modal
+    isSuccessModalOpen.value = true;
   } catch (err: any) {
     console.error('Failed to create contribution collection:', err);
-    errorMessage.value = err.message || 'Error creating contribution collection.';
+    creationStage.value = 'ERROR';
+    isRuleSavedOnFailure.value = !!err.ruleSaved;
+    if (err.savedRule) createdRuleRecord.value = err.savedRule;
+    creationErrorMessage.value = err.message || 'Error creating contribution collection.';
+    creationStatusTitle.value = err.ruleSaved ? 'Student Assignment Incomplete' : 'Creation Failed';
+    creationStatusDesc.value = err.ruleSaved
+      ? 'The contribution fee was saved, but assigning individual student obligations failed.'
+      : 'Failed to create contribution fee in Supabase.';
     haptics.error();
   } finally {
     isCreatingCollection.value = false;
+  }
+}
+
+async function handleFinishCreationSuccess() {
+  isSuccessModalOpen.value = false;
+  isBlockingModalOpen.value = false;
+  isCreateCollectionSheetOpen.value = false;
+  collectionName.value = '';
+  collectionNotes.value = '';
+  selectedStudentIds.value = [];
+  await loadData();
+  activeSection.value = 'COLLECTIONS';
+}
+
+function handleRetryAssignment() {
+  if (createdRuleRecord.value?.id) {
+    handleCreateContribution(createdRuleRecord.value.id);
+  }
+}
+
+async function handleDismissFailureModal() {
+  isBlockingModalOpen.value = false;
+  if (isRuleSavedOnFailure.value) {
+    isCreateCollectionSheetOpen.value = false;
+    await loadData();
+    activeSection.value = 'COLLECTIONS';
   }
 }
 
@@ -486,6 +686,189 @@ onIonViewWillEnter(loadData);
       default-back-href="/tabs/finance"
       variant="detail"
     />
+
+    <!-- FULL BLOCKING PROCESSING MODAL -->
+    <ion-modal
+      :is-open="isBlockingModalOpen"
+      :backdrop-dismiss="false"
+      class="blocking-process-modal"
+    >
+      <div class="blocking-modal-wrap">
+        <div class="blocking-modal-card animate-fade-up">
+          <!-- Animated Header Icon / Status Icon -->
+          <div
+            class="blocking-icon-box"
+            :class="{
+              'is-error': creationStage === 'ERROR',
+            }"
+          >
+            <ion-spinner
+              v-if="creationStage !== 'ERROR'"
+              name="crescent"
+              class="blocking-spinner"
+            />
+            <ion-icon
+              v-else
+              :icon="alertCircleOutline"
+              class="error-icon"
+            />
+          </div>
+
+          <!-- Dynamic Title & Description -->
+          <div class="blocking-text-block">
+            <h3 class="blocking-modal-title">
+              {{ creationStatusTitle }}
+            </h3>
+            <p class="blocking-modal-desc">
+              {{ creationStatusDesc }}
+            </p>
+          </div>
+
+          <!-- Progress Bar (Determinate if counts known, else Indeterminate) -->
+          <div
+            v-if="creationStage !== 'ERROR'"
+            class="indeterminate-progress-bar"
+          >
+            <div
+              v-if="creationProgressTotal > 0 && creationProgressCurrent > 0"
+              class="determinate-bar-fill"
+              :style="{ width: Math.min(100, Math.round((creationProgressCurrent / creationProgressTotal) * 100)) + '%' }"
+            ></div>
+            <div v-else class="indeterminate-bar-fill"></div>
+          </div>
+
+          <!-- Metadata Context Card -->
+          <div class="blocking-meta-box font-mono">
+            <div class="meta-row">
+              <span class="meta-lbl">Contribution:</span>
+              <span class="meta-val">{{ collectionName || 'Contribution Fee' }}</span>
+            </div>
+            <div class="meta-row">
+              <span class="meta-lbl">Target Semester:</span>
+              <span class="meta-val">{{ selectedSemesterLabel }}</span>
+            </div>
+            <div class="meta-row">
+              <span class="meta-lbl">Assignment Scope:</span>
+              <span class="meta-val">{{ targetAudienceLabel }}</span>
+            </div>
+
+            <!-- On Error: show partial success status or error note -->
+            <template v-if="creationStage === 'ERROR'">
+              <div class="meta-row">
+                <span class="meta-lbl">Contribution Rule:</span>
+                <span class="meta-val" :class="isRuleSavedOnFailure ? 'text-amber font-bold' : 'text-danger'">
+                  {{ isRuleSavedOnFailure ? 'Saved in Supabase' : 'Not Created' }}
+                </span>
+              </div>
+              <div v-if="creationProgressTotal > 0" class="meta-row">
+                <span class="meta-lbl">Target Students:</span>
+                <span class="meta-val">{{ creationProgressTotal }} students</span>
+              </div>
+            </template>
+
+            <!-- While Processing: show active count if available -->
+            <template v-else-if="creationProgressTotal > 0">
+              <div class="meta-row">
+                <span class="meta-lbl">Progress:</span>
+                <span class="meta-val">{{ creationProgressCurrent }} / {{ creationProgressTotal }}</span>
+              </div>
+            </template>
+          </div>
+
+          <!-- Error Alert Banner inside modal -->
+          <div v-if="creationStage === 'ERROR' && creationErrorMessage" class="blocking-error-banner font-mono">
+            <p>{{ creationErrorMessage }}</p>
+          </div>
+
+          <!-- Disclaimer while processing -->
+          <div v-if="creationStage !== 'ERROR'" class="blocking-disclaimer font-mono">
+            <ion-icon :icon="alertCircleOutline" />
+            <span>Screen is blocked to protect data integrity and prevent double execution.</span>
+          </div>
+
+          <div v-if="creationStage === 'ERROR'" class="blocking-modal-actions">
+            <UniButton
+              v-if="isRuleSavedOnFailure"
+              variant="primary"
+              size="md"
+              :block="true"
+              @click="handleRetryAssignment"
+            >
+              Retry Student Assignment
+            </UniButton>
+            <UniButton
+              variant="outline"
+              size="md"
+              :block="true"
+              @click="handleDismissFailureModal"
+            >
+              Close
+            </UniButton>
+          </div>
+        </div>
+      </div>
+    </ion-modal>
+
+    <!-- CONFIRMED SUCCESS MODAL -->
+    <ion-modal
+      :is-open="isSuccessModalOpen"
+      :backdrop-dismiss="false"
+      class="blocking-process-modal"
+    >
+      <div class="blocking-modal-wrap">
+        <div class="blocking-modal-card animate-fade-up">
+          <div class="blocking-icon-box is-success">
+            <ion-icon :icon="checkmarkCircle" class="success-icon" />
+          </div>
+
+          <div class="blocking-text-block">
+            <h3 class="blocking-modal-title">
+              {{ creationStatusTitle }}
+            </h3>
+            <p class="blocking-modal-desc">
+              {{ creationStatusDesc }}
+            </p>
+          </div>
+
+          <div class="blocking-meta-box font-mono">
+            <div class="meta-row">
+              <span class="meta-lbl">Contribution:</span>
+              <span class="meta-val">{{ createdRuleRecord?.name || collectionName || 'Contribution Fee' }}</span>
+            </div>
+            <div class="meta-row">
+              <span class="meta-lbl">Target Semester:</span>
+              <span class="meta-val">{{ selectedSemesterLabel }}</span>
+            </div>
+            <div class="meta-row">
+              <span class="meta-lbl">Assignment Scope:</span>
+              <span class="meta-val">{{ targetAudienceLabel }}</span>
+            </div>
+            <template v-if="createdAssessResult">
+              <div class="meta-row">
+                <span class="meta-lbl">Assigned Students:</span>
+                <span class="meta-val text-success font-bold">{{ createdAssessResult.totalAssigned }} students</span>
+              </div>
+              <div class="meta-row">
+                <span class="meta-lbl">Collection Target:</span>
+                <span class="meta-val text-primary font-bold">{{ formatPeso(createdAssessResult.totalCentavos) }}</span>
+              </div>
+            </template>
+          </div>
+
+          <div class="blocking-modal-actions">
+            <UniButton
+              variant="primary"
+              size="md"
+              :block="true"
+              :icon="checkmarkCircle"
+              @click="handleFinishCreationSuccess"
+            >
+              Done & View Collections
+            </UniButton>
+          </div>
+        </div>
+      </div>
+    </ion-modal>
 
     <ion-content class="safe-content non-tab-content">
       <div class="page-container">
@@ -638,6 +1021,17 @@ onIonViewWillEnter(loadData);
                   View Students
                 </UniButton>
                 <UniButton
+                  v-if="isDevAdmin"
+                  variant="destructive"
+                  size="sm"
+                  :icon="trashOutline"
+                  class="action-btn"
+                  title="Delete Collection"
+                  @click="promptDeleteCollection(col)"
+                >
+                  Delete
+                </UniButton>
+                <UniButton
                   variant="ghost"
                   size="sm"
                   :icon="informationCircleOutline"
@@ -715,7 +1109,7 @@ onIonViewWillEnter(loadData);
                 v-for="c in paginatedContributions"
                 :key="c.id"
                 :title="c.studentName || 'Student'"
-                :subtitle="`${c.schoolId} • Year ${c.yearLevel || 1}-${c.section || 'N/A'} • ${c.title}`"
+                :subtitle="formatObligationAcademicSubtitle(c)"
                 :badge="
                   isObligationOverdue(c)
                     ? 'Overdue'
@@ -795,6 +1189,16 @@ onIonViewWillEnter(loadData);
                       @click="openVoidModal(c.id)"
                     >
                       Void / Waive Dues
+                    </UniButton>
+                    <UniButton
+                      v-if="isDevAdmin && c.balanceCentavos === c.amountCentavos"
+                      variant="destructive"
+                      size="sm"
+                      :icon="trashOutline"
+                      class="void-action-btn"
+                      @click="promptDeleteObligation(c)"
+                    >
+                      Delete Dues
                     </UniButton>
                   </div>
                 </template>
@@ -950,7 +1354,7 @@ onIonViewWillEnter(loadData);
                 />
                 <div class="student-info-col">
                   <span class="stu-name font-bold">{{ s.first_name }} {{ s.last_name }}</span>
-                  <span class="stu-sub font-mono">{{ s.school_id }} • Year {{ s.year_level || 1 }}-{{ s.section || 'N/A' }}</span>
+                  <span class="stu-sub font-mono">{{ s.school_id || '—' }} • {{ formatStudentYearSection(s) }}</span>
                 </div>
               </label>
             </div>
@@ -1008,7 +1412,7 @@ onIonViewWillEnter(loadData);
               variant="primary"
               size="sm"
               :disabled="isCreatingCollection || !collectionName.trim() || !collectionDueDate || estimatedStudentCount === 0"
-              @click="handleCreateContribution"
+              @click="() => handleCreateContribution()"
             >
               <ion-spinner v-if="isCreatingCollection" name="crescent" slot="start" />
               <span>{{ isCreatingCollection ? 'Creating Collection...' : 'Confirm & Create Collection' }}</span>
@@ -1140,6 +1544,31 @@ onIonViewWillEnter(loadData);
           </div>
         </div>
       </UniSheet>
+      <!-- Delete Collection Dialog -->
+      <UniDialog
+        v-model:is-open="showDeleteCollectionDialog"
+        title="Delete Contribution Collection?"
+        :description="`Are you sure you want to permanently delete collection '${collectionToDelete?.name}'? If no payments have been collected, all student obligations under this rule will be deleted. If payments exist, deletion will be blocked.`"
+        :confirm-text="isDeletingCollection ? 'Deleting...' : 'Delete Collection'"
+        cancel-text="Cancel"
+        :destructive="true"
+        type="destructive"
+        @confirm="confirmDeleteCollection"
+        @cancel="showDeleteCollectionDialog = false"
+      />
+
+      <!-- Delete Individual Student Obligation Dialog -->
+      <UniDialog
+        v-model:is-open="showDeleteObligationDialog"
+        title="Delete Student Obligation?"
+        :description="`Are you sure you want to delete this obligation for ${obligationToDelete?.studentName} (${obligationToDelete?.title} - ${formatPeso(obligationToDelete?.amountCentavos || 0)})? If payments exist, deletion will be blocked.`"
+        :confirm-text="isDeletingObligation ? 'Deleting...' : 'Delete Dues'"
+        cancel-text="Cancel"
+        :destructive="true"
+        type="destructive"
+        @confirm="confirmDeleteObligation"
+        @cancel="showDeleteObligationDialog = false"
+      />
     </ion-content>
   </ion-page>
 </template>
@@ -1786,5 +2215,262 @@ body.dark .student-checkbox-list,
 body.ion-palette-dark .student-checkbox-list {
   background: var(--uni-surface-secondary, #252830);
   border-color: var(--uni-border, #30343D);
+}
+
+/* Full Blocking Processing Modal */
+:global(ion-modal.blocking-process-modal) {
+  --background: transparent;
+  --box-shadow: none;
+  --width: calc(100% - 32px);
+  --max-width: 380px;
+  --height: auto;
+  --border-radius: 20px;
+  align-items: center;
+  justify-content: center;
+}
+
+:global(ion-modal.blocking-process-modal::part(backdrop)) {
+  background: rgba(0, 0, 0, 0.75);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+}
+
+:global(ion-modal.blocking-process-modal::part(content)) {
+  background: transparent;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  box-shadow: none;
+  border-radius: 20px;
+  width: calc(100% - 32px);
+  max-width: 380px;
+  margin: auto;
+  overflow: visible;
+}
+
+.blocking-modal-wrap {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  max-width: 380px;
+  box-sizing: border-box;
+}
+
+.blocking-modal-card {
+  background: var(--uni-surface, #ffffff);
+  border: 1px solid var(--uni-border, #e2e8f0);
+  border-radius: var(--uni-radius-card, 20px);
+  padding: 22px 18px;
+  width: 100%;
+  max-width: 380px;
+  box-shadow: 0 24px 48px rgba(0, 0, 0, 0.45);
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  text-align: center;
+  box-sizing: border-box;
+}
+
+:global(.dark) .blocking-modal-card,
+:global(.ion-palette-dark) .blocking-modal-card {
+  background: var(--uni-surface, #1B1D23);
+  border-color: var(--uni-border, #30343D);
+}
+
+.blocking-icon-box {
+  width: 52px;
+  height: 52px;
+  border-radius: 14px;
+  background: rgba(15, 118, 110, 0.12);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin: 0 auto;
+}
+
+.blocking-icon-box.is-success {
+  background: rgba(16, 185, 129, 0.15);
+  color: #10B981;
+}
+
+.blocking-icon-box.is-error {
+  background: rgba(239, 68, 68, 0.15);
+  color: #EF4444;
+}
+
+:global(.dark) .blocking-icon-box,
+:global(.ion-palette-dark) .blocking-icon-box {
+  background: rgba(94, 234, 212, 0.15);
+}
+
+.blocking-spinner {
+  width: 28px;
+  height: 28px;
+  --color: var(--uni-primary, #0F766E);
+}
+
+:global(.dark) .blocking-spinner,
+:global(.ion-palette-dark) .blocking-spinner {
+  --color: var(--uni-primary, #5EEAD4);
+}
+
+.success-icon {
+  font-size: 32px;
+  color: #10B981;
+}
+
+.error-icon {
+  font-size: 32px;
+  color: #EF4444;
+}
+
+.blocking-text-block {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.blocking-modal-title {
+  font-size: 16.5px;
+  font-weight: 750;
+  color: var(--uni-text-primary, #0F172A);
+  margin: 0;
+}
+
+.blocking-modal-desc {
+  font-size: 12px;
+  color: var(--uni-text-secondary, #64748B);
+  margin: 0;
+  line-height: 1.45;
+}
+
+.indeterminate-progress-bar {
+  width: 100%;
+  height: 6px;
+  background: rgba(15, 118, 110, 0.15);
+  border-radius: 999px;
+  overflow: hidden;
+  position: relative;
+}
+
+:global(.dark) .indeterminate-progress-bar,
+:global(.ion-palette-dark) .indeterminate-progress-bar {
+  background: rgba(94, 234, 212, 0.15);
+}
+
+.indeterminate-bar-fill {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  background: linear-gradient(90deg, #0F766E, #14B8A6, #0F766E);
+  border-radius: 999px;
+  animation: indeterminate-loading 1.6s infinite ease-in-out;
+}
+
+.determinate-bar-fill {
+  height: 100%;
+  background: var(--uni-primary, #0F766E);
+  border-radius: 999px;
+  transition: width 0.3s ease;
+}
+
+:global(.dark) .indeterminate-bar-fill,
+:global(.ion-palette-dark) .indeterminate-bar-fill {
+  background: linear-gradient(90deg, #0D9488, #5EEAD4, #0D9488);
+}
+
+@keyframes indeterminate-loading {
+  0% {
+    left: -40%;
+    width: 40%;
+  }
+  50% {
+    left: 20%;
+    width: 60%;
+  }
+  100% {
+    left: 100%;
+    width: 40%;
+  }
+}
+
+.blocking-meta-box {
+  background: var(--uni-surface-secondary, #F8FAFC);
+  border: 1px solid var(--uni-border, #E2E8F0);
+  border-radius: 10px;
+  padding: 10px 12px;
+  text-align: left;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 11.5px;
+}
+
+:global(.dark) .blocking-meta-box,
+:global(.ion-palette-dark) .blocking-meta-box {
+  background: rgba(255, 255, 255, 0.03);
+  border-color: var(--uni-border, #30343D);
+}
+
+.blocking-meta-box .meta-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.blocking-meta-box .meta-lbl {
+  color: var(--uni-text-muted, #94A3B8);
+}
+
+.blocking-meta-box .meta-val {
+  color: var(--uni-text-primary, #0F172A);
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 60%;
+}
+
+:global(.dark) .blocking-meta-box .meta-val,
+:global(.ion-palette-dark) .blocking-meta-box .meta-val {
+  color: var(--uni-text-primary, #F8FAFC);
+}
+
+.blocking-error-banner {
+  background: rgba(239, 68, 68, 0.1);
+  border: 1px solid rgba(239, 68, 68, 0.3);
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 11px;
+  color: #EF4444;
+  text-align: left;
+  word-break: break-word;
+}
+
+.blocking-disclaimer {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  font-size: 11px;
+  color: #D97706;
+}
+
+.blocking-modal-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.text-amber {
+  color: #D97706 !important;
+}
+
+.text-success {
+  color: #10B981 !important;
 }
 </style>

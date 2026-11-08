@@ -141,10 +141,37 @@ export class StudentsRepository {
     schoolId: string,
     adapter?: DatabaseAdapter
   ): Promise<StudentRecord[]> {
-    const db = await this.getDb(adapter);
     const clean = (schoolId || '').trim();
     if (!clean) return [];
 
+    if (!adapter && DataModeService.isDirectSupabase()) {
+      const variants = getSchoolIdVariants(clean);
+      if (variants.length === 0) return [];
+      const filterConditions = variants.map((v) => `school_id.ilike.${v}`).join(',');
+      const { data, error } = await supabase
+        .from('students')
+        .select('*')
+        .or(filterConditions);
+
+      if (error) {
+        throw new Error(`Failed to query students by canonical school ID from Supabase: ${error.message}`);
+      }
+
+      return (data || []).map((s: any) => ({
+        id: s.id,
+        school_id: s.school_id,
+        first_name: s.first_name,
+        middle_name: s.middle_name,
+        last_name: s.last_name,
+        photo_local_uri: s.photo_storage_path || null,
+        photo_content_hash: null,
+        status: s.status || 'ACTIVE',
+        created_at: s.created_at,
+        updated_at: s.updated_at,
+      }));
+    }
+
+    const db = await this.getDb(adapter);
     const variants = getSchoolIdVariants(clean);
     const placeholders = variants.map(() => '?').join(', ');
     return db.query<StudentRecord>(
@@ -181,6 +208,8 @@ export class StudentsRepository {
       ]);
 
       if (studentsRes.error) throw new Error(`Failed to query students from Supabase: ${studentsRes.error.message}`);
+      if (enrollmentsRes.error) throw new Error(`Failed to query student enrollments from Supabase: ${enrollmentsRes.error.message}`);
+      if (cardsRes.error) throw new Error(`Failed to query NFC cards from Supabase: ${cardsRes.error.message}`);
 
       const enrollmentsByStudent = new Map<string, any>();
       for (const enr of enrollmentsRes.data || []) {
