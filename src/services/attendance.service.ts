@@ -139,7 +139,7 @@ export class AttendanceService {
     }
 
     const fullName = formatFullName(studentModel.firstName, studentModel.middleName, studentModel.lastName);
-    const photoUrl = studentModel.photoUrl || studentService.getStudentPhotoUrl(studentModel);
+    const photoUrl = studentModel.photoUrl || (await studentService.resolveStudentPhotoUrl(studentModel));
 
     // 3. Duplicate / revocation check on Supabase for this checkpoint
     const { data: existingRecord } = await supabase
@@ -393,7 +393,7 @@ export class AttendanceService {
     }
 
     const fullName = formatFullName(student.first_name, student.middle_name, student.last_name);
-    const resolvedPhoto = student.photo_local_uri || (student.photo_storage_path ? studentService.getStudentPhotoUrl({ photoStoragePath: student.photo_storage_path } as any) : null);
+    const resolvedPhoto = student.photo_local_uri || (student.photo_storage_path ? (await studentService.resolveStudentPhotoUrl({ photoStoragePath: student.photo_storage_path } as any)) : null);
 
     // 3. Duplicate & Revocation check in attendance_records for target checkpoint
     const existingRecord = await AttendanceRepository.getRecord(occurrenceId, student.id, targetCheckpointId);

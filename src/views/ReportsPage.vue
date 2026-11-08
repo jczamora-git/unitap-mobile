@@ -12,6 +12,16 @@
           <UniButton
             variant="outline"
             size="icon"
+            :icon="documentTextOutline"
+            aria-label="Download PDF"
+            title="Download PDF"
+            :loading="isDownloadingPdf"
+            :disabled="isDownloadingPdf || studentReport.length === 0"
+            @click="downloadPdf"
+          />
+          <UniButton
+            variant="outline"
+            size="icon"
             :icon="downloadOutline"
             aria-label="Export CSV"
             title="Export CSV"
@@ -249,11 +259,12 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, watch } from 'vue';
 import { IonPage, IonContent } from '@ionic/vue';
-import { downloadOutline, printOutline, filterOutline } from 'ionicons/icons';
+import { downloadOutline, printOutline, filterOutline, documentTextOutline } from 'ionicons/icons';
 
 import { AcademicRepository } from '@/database/repositories/academic.repository';
 import { ReportService } from '@/services/report.service';
 import { authService } from '@/services/auth.service';
+import { useToast } from '@/composables/useToast';
 import { formatCentavosToPesos } from '@/utilities/finance-formatters';
 import { formatAcademicPeriod } from '@/utilities/presentation-formatters';
 import {
@@ -436,6 +447,44 @@ function formatCategoryType(type: string): string {
 
 function formatPesos(centavos: number): string {
   return formatCentavosToPesos(centavos);
+}
+
+const { showToast } = useToast();
+const isDownloadingPdf = ref(false);
+
+async function downloadPdf() {
+  if (isDownloadingPdf.value) return;
+  if (studentReport.value.length === 0) {
+    await showToast('No financial records available to download.', 'warning');
+    return;
+  }
+
+  isDownloadingPdf.value = true;
+  try {
+    const currentSem = semesters.value.find((s) => s.id === selectedSemesterId.value);
+    const semLabel = currentSem ? formatAcademicPeriod(currentSem.term, currentSem.academic_year_id) : 'Semester';
+    const user = authService.user.value?.username || 'Officer';
+
+    const pdfBytes = ReportService.generateObligationsPdf(studentReport.value, semLabel, user);
+    const filename = ReportService.buildObligationsPdfFilename(currentSem);
+
+    const blob = new Blob([pdfBytes as any], { type: 'application/pdf' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+
+    await showToast(`Downloaded ${filename}`, 'success');
+  } catch (err: any) {
+    console.error('PDF generation error:', err);
+    await showToast(err?.message || 'Failed to generate PDF report.', 'error');
+  } finally {
+    isDownloadingPdf.value = false;
+  }
 }
 
 function exportCsv() {

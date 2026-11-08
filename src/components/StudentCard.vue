@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from 'vue';
+import { ref, computed } from 'vue';
 import type { Student } from '@/types/student';
 import { formatFullName, formatYearLevel } from '@/utilities/student-formatters';
 import { radioOutline, chevronForwardOutline } from 'ionicons/icons';
@@ -13,6 +13,8 @@ const props = defineProps<{
 const emit = defineEmits<{
   (e: 'click', student: Student): void;
 }>();
+
+const imgError = ref(false);
 
 const initials = computed(() => {
   const f = props.student.firstName?.[0] || '';
@@ -30,10 +32,11 @@ function onRowClick() {
   <div class="student-directory-row tactile-press" @click="onRowClick">
     <div class="avatar-circle">
       <img
-        v-if="student.photoUrl || student.photoLocalUri"
+        v-if="(student.photoUrl || student.photoLocalUri) && !imgError"
         :src="(student.photoUrl || student.photoLocalUri) || undefined"
         alt="Avatar"
         class="avatar-img"
+        @error="imgError = true"
       />
       <span v-else>{{ initials }}</span>
     </div>

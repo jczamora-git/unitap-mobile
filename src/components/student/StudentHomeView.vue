@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted } from 'vue';
+import { ref, onMounted } from 'vue';
 import { useRouter } from 'vue-router';
 import {
   IonContent,
@@ -31,6 +31,7 @@ import { UniPageHeader, UniStatCard, UniButton, UniEmptyState } from '@/componen
 import UniGlobalSyncPill from '@/components/shared/UniGlobalSyncPill.vue';
 
 const router = useRouter();
+const photoLoadError = ref(false);
 const {
   student,
   studentName,
@@ -113,10 +114,11 @@ onIonViewWillEnter(() => {
                 <div class="student-hero-content-row">
                   <div class="student-hero-avatar">
                     <img
-                      v-if="student?.photoUrl || student?.photoLocalUri"
+                      v-if="(student?.photoUrl || student?.photoLocalUri) && !photoLoadError"
                       :src="(student?.photoUrl || student?.photoLocalUri) || undefined"
                       alt="Student"
                       class="hero-avatar-img"
+                      @error="photoLoadError = true"
                     />
                     <span v-else class="hero-avatar-initials">{{ studentName?.charAt(0) || 'S' }}</span>
                   </div>

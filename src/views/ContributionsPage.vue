@@ -323,13 +323,32 @@ const showDeleteCollectionDialog = ref(false);
 const collectionToDelete = ref<ContributionCollectionItem | null>(null);
 const isDeletingCollection = ref(false);
 
+function handleDeleteCollectionClick(col: ContributionCollectionItem, event?: Event) {
+  event?.stopPropagation?.();
+  promptDeleteCollection(col);
+}
+
 function promptDeleteCollection(col: ContributionCollectionItem) {
+  if (isDeletingCollection.value) return;
   collectionToDelete.value = col;
   showDeleteCollectionDialog.value = true;
 }
 
+function cancelDeleteCollection() {
+  if (isDeletingCollection.value) return;
+  showDeleteCollectionDialog.value = false;
+  collectionToDelete.value = null;
+}
+
+function handleDeleteDialogToggle(isOpen: boolean) {
+  if (!isOpen && !isDeletingCollection.value) {
+    showDeleteCollectionDialog.value = false;
+    collectionToDelete.value = null;
+  }
+}
+
 async function confirmDeleteCollection() {
-  if (!collectionToDelete.value) return;
+  if (!collectionToDelete.value || isDeletingCollection.value) return;
   isDeletingCollection.value = true;
   try {
     await financeService.deleteContributionCollection(collectionToDelete.value);
@@ -1033,9 +1052,11 @@ onIonViewWillEnter(loadData);
                     variant="destructive"
                     size="sm"
                     :icon="trashOutline"
+                    :icon-only="true"
                     class="action-btn-icon delete-icon-btn"
                     title="Delete Collection"
-                    @click.stop="promptDeleteCollection(col)"
+                    :disabled="isDeletingCollection"
+                    @click="handleDeleteCollectionClick(col, $event)"
                   />
                 </div>
               </div>
@@ -1502,6 +1523,7 @@ onIonViewWillEnter(loadData);
               variant="destructive"
               size="sm"
               :icon="trashOutline"
+              :disabled="isDeletingCollection"
               @click="
                 isCollectionDetailsSheetOpen = false;
                 promptDeleteCollection(selectedCollectionDetails);
@@ -1557,16 +1579,44 @@ onIonViewWillEnter(loadData);
       </UniSheet>
       <!-- Delete Collection Dialog -->
       <UniDialog
-        v-model:is-open="showDeleteCollectionDialog"
+        :is-open="showDeleteCollectionDialog"
         title="Delete Contribution Collection?"
-        :description="`Are you sure you want to permanently delete collection '${collectionToDelete?.name}'? If no payments have been collected, all student obligations under this rule will be deleted. If payments exist, deletion will be blocked.`"
         :confirm-text="isDeletingCollection ? 'Deleting...' : 'Delete Collection'"
         cancel-text="Cancel"
         :destructive="true"
         type="destructive"
         @confirm="confirmDeleteCollection"
-        @cancel="showDeleteCollectionDialog = false"
-      />
+        @cancel="cancelDeleteCollection"
+        @update:is-open="handleDeleteDialogToggle"
+      >
+        <div v-if="collectionToDelete" class="dialog-collection-summary">
+          <p class="dialog-summary-intro">
+            Are you sure you want to permanently delete this contribution collection?
+          </p>
+
+          <div class="dialog-summary-card">
+            <div class="summary-line">
+              <span class="summary-key">Contribution:</span>
+              <strong class="summary-val">{{ collectionToDelete.name }}</strong>
+            </div>
+            <div class="summary-line">
+              <span class="summary-key">Amount per Student:</span>
+              <strong class="summary-val text-primary font-mono">{{ formatPeso(collectionToDelete.amountCentavos) }}</strong>
+            </div>
+            <div class="summary-line">
+              <span class="summary-key">Assigned Students:</span>
+              <span class="summary-val font-mono font-bold">{{ collectionToDelete.totalStudentsAssigned }} students</span>
+            </div>
+          </div>
+
+          <div class="dialog-warning-callout">
+            <ion-icon :icon="alertCircleOutline" class="callout-icon" />
+            <div class="callout-body">
+              <strong>Warning:</strong> All unpaid student obligations under this contribution will also be deleted. If any payments have already been collected, deletion will be blocked to preserve financial audit history.
+            </div>
+          </div>
+        </div>
+      </UniDialog>
 
       <!-- Delete Individual Student Obligation Dialog -->
       <UniDialog
@@ -1899,6 +1949,69 @@ onIonViewWillEnter(loadData);
 
 .delete-icon-btn:active {
   transform: scale(0.95);
+}
+
+/* Delete Collection Dialog Content */
+.dialog-collection-summary {
+  margin: 10px 0 16px 0;
+  text-align: left;
+}
+
+.dialog-summary-intro {
+  font-size: 0.9rem;
+  color: var(--uni-text-muted);
+  margin-bottom: 12px;
+  line-height: 1.4;
+}
+
+.dialog-summary-card {
+  background: var(--uni-surface-subtle, rgba(255, 255, 255, 0.04));
+  border: 1px solid var(--uni-border, rgba(255, 255, 255, 0.1));
+  border-radius: 8px;
+  padding: 10px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.summary-line {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 0.85rem;
+}
+
+.summary-key {
+  color: var(--uni-text-muted);
+}
+
+.summary-val {
+  color: var(--uni-text-primary, #ffffff);
+}
+
+.dialog-warning-callout {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  padding: 10px 12px;
+  background: rgba(239, 68, 68, 0.08);
+  border: 1px solid rgba(239, 68, 68, 0.25);
+  border-radius: 8px;
+  font-size: 0.82rem;
+  line-height: 1.4;
+  color: #fca5a5;
+}
+
+.callout-icon {
+  font-size: 1.1rem;
+  color: #ef4444;
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+
+.callout-body strong {
+  color: #ef4444;
 }
 
 /* Records Stack */

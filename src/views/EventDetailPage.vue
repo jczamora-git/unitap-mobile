@@ -21,7 +21,8 @@ import {
   trashOutline,
   optionsOutline,
   flagOutline,
-  downloadOutline
+  downloadOutline,
+  ellipsisVerticalOutline
 } from 'ionicons/icons';
 import { authService } from '@/services/auth.service';
 import { SupabaseAuthService } from '@/integrations/supabase/auth.service';
@@ -41,7 +42,9 @@ import {
   UniButton, 
   UniFormField, 
   UniInput, 
-  UniSelect 
+  UniSelect,
+  UniStatusBadge,
+  UniEmptyState
 } from '@/components/ui';
 import { useToast } from '@/composables/useToast';
 
@@ -69,8 +72,13 @@ const isDevAdmin = computed(() => {
   return role === 'DEVADMIN';
 });
 
+const showActionsMenu = ref(false);
 const showDeleteEventDialog = ref(false);
 const isDeletingEvent = ref(false);
+
+const eventFirstDate = computed(() => {
+  return occurrences.value[0]?.date || event.value?.createdAt || null;
+});
 
 async function handleDeleteEvent() {
   if (!event.value) return;
@@ -341,35 +349,25 @@ async function handleAddSession() {
 <template>
   <ion-page>
     <UniPageHeader
-      title="Event Details"
-      :subtitle="event ? event.title : 'Attendance sessions'"
+      :title="event ? event.title : 'Event Details'"
+      :subtitle="event ? `${event.type} • ${event.status}` : 'Attendance sessions'"
       :back-button="true"
       default-back-href="/tabs/events"
       variant="detail"
     >
-      <template #trailing v-if="!isStudent">
+      <template #trailing v-if="!isStudent && event">
         <div class="header-trailing-actions">
-          <UniButton
-            v-if="event"
-            variant="outline"
-            size="sm"
-            :icon="createOutline"
-            @click="router.push(`/events/${event.id}/edit`)"
-          >
-            Edit
-          </UniButton>
           <UniButton size="sm" :icon="addOutline" @click="showAddSessionModal = true">
-            Session
+            Add Session
           </UniButton>
           <UniButton
-            v-if="isDevAdmin && event"
-            variant="destructive"
+            variant="ghost"
             size="sm"
-            :icon="trashOutline"
-            @click="showDeleteEventDialog = true"
-          >
-            Delete
-          </UniButton>
+            :icon="ellipsisVerticalOutline"
+            class="action-menu-trigger-btn"
+            title="Event Options"
+            @click="showActionsMenu = true"
+          />
         </div>
       </template>
     </UniPageHeader>
@@ -378,24 +376,38 @@ async function handleAddSession() {
       <div v-if="event" class="page-container">
         <!-- Event Overview Header Card -->
         <div class="minimal-card event-header-card">
-          <div class="badge-row">
+          <div class="info-top-row">
             <span class="type-badge">{{ event.type }}</span>
-            <span class="status-indicator" :class="'status-' + event.status.toLowerCase()">
-              <span class="status-dot"></span>
+            <UniStatusBadge
+              :variant="event.status === 'ACTIVE' ? 'active' : event.status === 'COMPLETED' ? 'success' : 'neutral'"
+            >
               {{ event.status }}
-            </span>
+            </UniStatusBadge>
           </div>
 
           <h2 class="event-headline">{{ event.title }}</h2>
           <p v-if="event.description" class="event-desc-text">{{ event.description }}</p>
 
-          <div class="audience-bar">
-            <ion-icon :icon="peopleOutline" />
-            <span>Audience: 
-              <strong v-if="event.audience.type === 'ALL_BSIT'">All BSIT Students</strong>
-              <strong v-else-if="event.audience.type === 'YEAR_LEVEL'">{{ (event.audience.yearLevels || []).join(', ') }} Year Levels</strong>
-              <strong v-else>{{ (event.audience.sections || []).join(', ') }}</strong>
-            </span>
+          <div class="event-meta-grid">
+            <div class="meta-item">
+              <ion-icon :icon="peopleOutline" class="meta-icon" />
+              <div class="meta-content">
+                <span class="meta-label">Audience</span>
+                <span class="meta-val">
+                  <strong v-if="event.audience.type === 'ALL_BSIT'">All BSIT Students</strong>
+                  <strong v-else-if="event.audience.type === 'YEAR_LEVEL'">{{ (event.audience.yearLevels || []).join(', ') }} Year Levels</strong>
+                  <strong v-else>{{ (event.audience.sections || []).join(', ') }}</strong>
+                </span>
+              </div>
+            </div>
+
+            <div v-if="eventFirstDate" class="meta-item">
+              <ion-icon :icon="calendarOutline" class="meta-icon" />
+              <div class="meta-content">
+                <span class="meta-label">Event Date</span>
+                <span class="meta-val font-sans">{{ formatDate(eventFirstDate) }}</span>
+              </div>
+            </div>
           </div>
         </div>
 
@@ -406,7 +418,17 @@ async function handleAddSession() {
             <span class="metadata-text">{{ occurrences.length }} Session(s)</span>
           </div>
 
-          <div class="occurrences-list">
+          <div v-if="occurrences.length === 0" class="empty-sessions-wrap">
+            <UniEmptyState
+              title="No Attendance Sessions"
+              description="Add an attendance session to start tracking student check-ins."
+              :icon="calendarOutline"
+              action-text="Add Session"
+              @action="showAddSessionModal = true"
+            />
+          </div>
+
+          <div v-else class="occurrences-list">
             <div v-for="occ in occurrences" :key="occ.id" class="minimal-card occurrence-card">
               <div class="occ-top-line">
                 <div class="occ-title-group">
@@ -758,6 +780,51 @@ async function handleAddSession() {
         @confirm="handleDeleteEvent"
         @cancel="showDeleteEventDialog = false"
       />
+
+      <!-- Event Options Action Sheet -->
+      <UniSheet
+        :is-open="showActionsMenu"
+        title="Event Options"
+        subtitle="Manage event details and administrative actions"
+        @close="showActionsMenu = false"
+      >
+        <div v-if="event" class="actions-menu-list">
+          <button
+            type="button"
+            class="menu-item-row"
+            @click="
+              showActionsMenu = false;
+              router.push(`/events/${event.id}/edit`);
+            "
+          >
+            <div class="menu-icon-box">
+              <ion-icon :icon="createOutline" />
+            </div>
+            <div class="menu-item-text">
+              <strong>Edit Event Details</strong>
+              <span>Update title, audience scope, or settings</span>
+            </div>
+          </button>
+
+          <button
+            v-if="isDevAdmin"
+            type="button"
+            class="menu-item-row menu-item-destructive"
+            @click="
+              showActionsMenu = false;
+              showDeleteEventDialog = true;
+            "
+          >
+            <div class="menu-icon-box menu-icon-destructive">
+              <ion-icon :icon="trashOutline" />
+            </div>
+            <div class="menu-item-text">
+              <strong>Delete Event</strong>
+              <span>Permanently delete this event and unpaid fines</span>
+            </div>
+          </button>
+        </div>
+      </UniSheet>
     </ion-content>
   </ion-page>
 </template>
@@ -836,10 +903,147 @@ async function handleAddSession() {
   align-items: center;
 }
 
+.action-menu-trigger-btn {
+  width: 34px;
+  height: 34px;
+  min-width: 34px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8px;
+  color: var(--uni-text-muted, #94a3b8);
+}
+
+.action-menu-trigger-btn:hover {
+  background: var(--uni-surface-hover, rgba(255, 255, 255, 0.08));
+  color: var(--uni-text-primary, #ffffff);
+}
+
+/* Event Overview Header Card */
 .event-header-card {
   display: flex;
   flex-direction: column;
+  gap: 12px;
+  padding: 16px;
+  border-radius: 14px;
+  background: var(--uni-surface, #0f172a);
+  border: 1px solid var(--uni-border, rgba(255, 255, 255, 0.1));
+}
+
+.info-top-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.event-meta-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 12px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--uni-border, rgba(255, 255, 255, 0.1));
+}
+
+.meta-item {
+  display: flex;
+  align-items: flex-start;
   gap: 8px;
+}
+
+.meta-icon {
+  font-size: 16px;
+  color: var(--uni-primary, #0F766E);
+  margin-top: 2px;
+  flex-shrink: 0;
+}
+
+.meta-content {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.meta-label {
+  font-size: 11px;
+  color: var(--uni-text-muted, #94a3b8);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-weight: 600;
+}
+
+.meta-val {
+  font-size: 13px;
+  color: var(--uni-text-primary, #ffffff);
+}
+
+.empty-sessions-wrap {
+  padding: 12px 0;
+}
+
+/* Actions Menu Sheet */
+.actions-menu-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 4px 0 16px 0;
+}
+
+.menu-item-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+  border-radius: 10px;
+  background: transparent;
+  border: none;
+  width: 100%;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+
+.menu-item-row:hover {
+  background: var(--uni-surface-subtle, rgba(255, 255, 255, 0.05));
+}
+
+.menu-icon-box {
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
+  background: var(--uni-surface-subtle, rgba(255, 255, 255, 0.06));
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--uni-primary, #0F766E);
+  font-size: 18px;
+  flex-shrink: 0;
+}
+
+.menu-icon-destructive {
+  background: rgba(239, 68, 68, 0.12);
+  color: #ef4444;
+}
+
+.menu-item-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.menu-item-text strong {
+  font-size: 14px;
+  color: var(--uni-text-primary, #ffffff);
+}
+
+.menu-item-destructive .menu-item-text strong {
+  color: #ef4444;
+}
+
+.menu-item-text span {
+  font-size: 12px;
+  color: var(--uni-text-muted, #94a3b8);
 }
 
 .badge-row {

@@ -17,6 +17,9 @@ export interface AttendanceScanResult {
   type: ScanResultType;
   message: string;
   student?: Student;
+  studentFullName?: string;
+  photoUrl?: string | null;
+  photoLocalUri?: string | null;
   occurrence?: EventOccurrence;
   participant?: OccurrenceParticipant;
   attendanceStatus?: AttendanceStatus;

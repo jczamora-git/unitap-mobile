@@ -40,6 +40,26 @@ describe('Direct Supabase Student Reading Diagnostic & Integrity', () => {
 
   beforeEach(() => {
     DataModeService.setMode('supabase_direct');
+    (supabase.storage.from as any) = vi.fn().mockImplementation((bucket: string) => ({
+      createSignedUrl: vi.fn().mockImplementation((path: string, _expiry: number) => {
+        return Promise.resolve({
+          data: { signedUrl: `https://supabase.co/storage/v1/object/sign/${bucket}/${path}?token=abc` },
+          error: null,
+        });
+      }),
+      createSignedUrls: vi.fn().mockImplementation((paths: string[], _expiry: number) => {
+        return Promise.resolve({
+          data: paths.map((p) => ({
+            path: p,
+            signedUrl: `https://supabase.co/storage/v1/object/sign/${bucket}/${p}?token=abc`,
+            error: null,
+          })),
+          error: null,
+        });
+      }),
+      upload: vi.fn().mockResolvedValue({ data: { path: 'test' }, error: null }),
+      remove: vi.fn().mockResolvedValue({ data: [], error: null }),
+    }));
   });
 
   afterEach(async () => {
@@ -1371,9 +1391,9 @@ describe('Direct Supabase Student Reading Diagnostic & Integrity', () => {
       photoStoragePath: 'students/stu-photo-1.jpg',
     } as any;
 
-    const url1 = studentService.getStudentPhotoUrl(studentWithPhoto);
+    const url1 = await studentService.resolveStudentPhotoUrl(studentWithPhoto);
     expect(url1).toBeTruthy();
-    expect(url1).toContain('student-profile-photos/students/stu-photo-1.jpg');
+    expect(url1).toContain('students/stu-photo-1.jpg');
 
     // Should return cached URL on second call
     const url2 = studentService.getStudentPhotoUrl(studentWithPhoto);
@@ -1411,8 +1431,21 @@ describe('Direct Supabase Student Reading Diagnostic & Integrity', () => {
       { id: 'pay-3', status: 'POSTED' },
       { id: 'pay-1', status: 'POSTED' },
     ];
+    let mockAdjustments: any[] = [];
 
     supabase.from = vi.fn().mockImplementation((table: string) => {
+      if (table === 'obligation_adjustments') {
+        let currentAdjs = [...mockAdjustments];
+        const handler: any = {
+          select: vi.fn().mockImplementation(() => handler),
+          in: vi.fn().mockImplementation((col: string, ids: string[]) => {
+            currentAdjs = currentAdjs.filter((a: any) => ids.includes(a[col]));
+            return handler;
+          }),
+          then: (resolve: any) => resolve({ data: currentAdjs, error: null }),
+        };
+        return handler;
+      }
       if (table === 'student_obligations') {
         let currentFilter = [...mockObligations];
         const handler: any = {
@@ -1534,6 +1567,14 @@ describe('Direct Supabase Student Reading Diagnostic & Integrity', () => {
     });
     expect(eligibleStudents.length).toBe(1);
     expect(eligibleStudents[0].id).toBe('stu-1');
+
+    // 6. Verifies obligation_adjustments affects outstanding balance (deduction settles ob-1)
+    mockAdjustments = [{ obligation_id: 'ob-1', kind: 'DEDUCTION', amount_centavos: 10000 }];
+    const afterAdjIds = await FinanceRepository.getStudentIdsWithOutstandingBalance({
+      category: 'CONTRIBUTION',
+      semesterId: 'sem-1',
+    });
+    expect(afterAdjIds).not.toContain('stu-1');
   });
 
   it('24. FinanceService cleanly deletes contribution collection and child obligations in Direct Supabase mode', async () => {
@@ -1568,6 +1609,8 @@ describe('Direct Supabase Student Reading Diagnostic & Integrity', () => {
           delete: vi.fn().mockImplementation(() => ({
             eq: vi.fn().mockImplementation((col: string, val: any) => {
               mockRules = mockRules.filter((r: any) => (r as any)[col] !== val);
+              // Simulate PostgreSQL foreign key ON DELETE CASCADE
+              mockObs = mockObs.filter((o: any) => o.rule_id !== val);
               return Promise.resolve({ error: null });
             }),
           })),
@@ -1595,5 +1638,51 @@ describe('Direct Supabase Student Reading Diagnostic & Integrity', () => {
     await financeService.deleteContributionCollection(colItem);
     expect(mockRules.length).toBe(0);
     expect(mockObs.length).toBe(0);
+  });
+
+  it('25. StudentService resolves signed URLs for private profile photo bucket with caching', async () => {
+    const { studentService } = await import('@/services/student.service');
+
+    let createSignedUrlCalls = 0;
+    (supabase.storage.from as any) = vi.fn().mockImplementation((bucket: string) => ({
+      createSignedUrl: vi.fn().mockImplementation((path: string, _expiry: number) => {
+        createSignedUrlCalls++;
+        return Promise.resolve({
+          data: { signedUrl: `https://supabase.co/storage/v1/object/sign/${bucket}/${path}?token=abc` },
+          error: null,
+        });
+      }),
+      createSignedUrls: vi.fn().mockImplementation((paths: string[], _expiry: number) => {
+        return Promise.resolve({
+          data: paths.map((p) => ({
+            path: p,
+            signedUrl: `https://supabase.co/storage/v1/object/sign/${bucket}/${p}?token=abc`,
+            error: null,
+          })),
+          error: null,
+        });
+      }),
+    }));
+
+    studentService.clearPhotoUrlCache();
+
+    // 1. Resolve student with photo storage path
+    const dummyStudent = {
+      id: 'stu-photo-1',
+      photoStoragePath: 'stu-photo-1/profile_123.jpg',
+    };
+
+    const signedUrl1 = await studentService.resolveStudentPhotoUrl(dummyStudent);
+    expect(signedUrl1).toContain('https://supabase.co/storage/v1/object/sign/student-profile-photos/stu-photo-1/profile_123.jpg');
+    expect(createSignedUrlCalls).toBe(1);
+
+    // 2. Second resolution hits memory cache without calling Supabase Storage createSignedUrl again
+    const signedUrl2 = await studentService.resolveStudentPhotoUrl(dummyStudent);
+    expect(signedUrl2).toBe(signedUrl1);
+    expect(createSignedUrlCalls).toBe(1);
+
+    // 3. getStudentPhotoUrl synchronously returns cached signed URL
+    const syncUrl = studentService.getStudentPhotoUrl(dummyStudent);
+    expect(syncUrl).toBe(signedUrl1);
   });
 });

@@ -49,8 +49,13 @@ export function maskRfidUid(uid: string): string {
 
 export const STUDENT_PHOTOS_BUCKET = 'student-profile-photos';
 
+interface CachedPhotoUrl {
+  url: string;
+  expiresAt: number; // timestamp ms
+}
+
 export class StudentService {
-  private static photoUrlCache = new Map<string, string>();
+  private static photoUrlCache = new Map<string, CachedPhotoUrl>();
 
   constructor(private repo: IStudentRepository = localStudentRepository) {}
 
@@ -64,34 +69,101 @@ export class StudentService {
   }
 
   // ============================================================================
-  // STUDENT PROFILE PHOTO OPERATIONS (Supabase Storage & Local Caching)
+  // STUDENT PROFILE PHOTO OPERATIONS (Private Supabase Storage & Signed URLs)
   // ============================================================================
 
   getStudentPhotoUrl(student?: Partial<Student> | any | null): string | null {
     if (!student) return null;
+    if (student.photoLocalUri || student.photo_local_uri) {
+      return student.photoLocalUri || student.photo_local_uri;
+    }
     if (student.photoUrl) return student.photoUrl;
 
     const storagePath = student.photoStoragePath || student.photo_storage_path;
     if (storagePath) {
-      if (StudentService.photoUrlCache.has(storagePath)) {
-        return StudentService.photoUrlCache.get(storagePath)!;
-      }
-      try {
-        const { data } = supabase.storage.from(STUDENT_PHOTOS_BUCKET).getPublicUrl(storagePath);
-        if (data?.publicUrl) {
-          StudentService.photoUrlCache.set(storagePath, data.publicUrl);
-          return data.publicUrl;
-        }
-      } catch (err) {
-        console.warn('[StudentService] Failed to resolve public photo URL:', err);
+      const cached = StudentService.photoUrlCache.get(storagePath);
+      if (cached && cached.expiresAt > Date.now() + 60000) {
+        return cached.url;
       }
     }
 
+    return null;
+  }
+
+  async resolveStudentPhotoUrl(student?: Partial<Student> | any | null): Promise<string | null> {
+    if (!student) return null;
     if (student.photoLocalUri || student.photo_local_uri) {
       return student.photoLocalUri || student.photo_local_uri;
     }
 
+    const storagePath = student.photoStoragePath || student.photo_storage_path;
+    if (!storagePath) {
+      return student.photoUrl || null;
+    }
+
+    const cached = StudentService.photoUrlCache.get(storagePath);
+    if (cached && cached.expiresAt > Date.now() + 60000) {
+      return cached.url;
+    }
+
+    if (DataModeService.isDirectSupabase()) {
+      try {
+        const { data, error } = await supabase.storage
+          .from(STUDENT_PHOTOS_BUCKET)
+          .createSignedUrl(storagePath, 3600);
+
+        if (!error && data?.signedUrl) {
+          StudentService.photoUrlCache.set(storagePath, {
+            url: data.signedUrl,
+            expiresAt: Date.now() + 3500 * 1000,
+          });
+          return data.signedUrl;
+        }
+      } catch (err) {
+        console.warn('[StudentService] Failed to create signed photo URL:', err);
+      }
+    }
+
     return null;
+  }
+
+  async preloadStudentPhotoUrls(students: Array<Partial<Student> | any>): Promise<void> {
+    if (!DataModeService.isDirectSupabase() || !students || students.length === 0) return;
+
+    const pathsToFetch: string[] = [];
+    const now = Date.now();
+
+    for (const s of students) {
+      const path = s.photoStoragePath || s.photo_storage_path;
+      if (path && typeof path === 'string') {
+        const cached = StudentService.photoUrlCache.get(path);
+        if (!cached || cached.expiresAt <= now + 60000) {
+          pathsToFetch.push(path);
+        }
+      }
+    }
+
+    if (pathsToFetch.length === 0) return;
+
+    const uniquePaths = Array.from(new Set(pathsToFetch));
+    try {
+      const { data, error } = await supabase.storage
+        .from(STUDENT_PHOTOS_BUCKET)
+        .createSignedUrls(uniquePaths, 3600);
+
+      if (!error && Array.isArray(data)) {
+        for (const item of data) {
+          if (item && item.path && item.signedUrl) {
+            StudentService.photoUrlCache.set(item.path, {
+              url: item.signedUrl,
+              expiresAt: now + 3500 * 1000,
+            });
+          }
+        }
+      }
+    } catch (err) {
+      console.warn('[StudentService] Failed to preload signed photo URLs:', err);
+    }
   }
 
   async uploadStudentPhoto(
@@ -111,10 +183,20 @@ export class StudentService {
       throw new Error('Unsupported image format. Please upload a JPEG, PNG, or WEBP image.');
     }
 
-    const ext = mime.split('/')[1]?.replace('jpeg', 'jpg') || 'jpg';
-    const storagePath = `${studentId}/profile_${Date.now()}.${ext}`;
+    const ext = mime.includes('webp') ? 'webp' : (mime.split('/')[1]?.replace('jpeg', 'jpg') || 'jpg');
+    const storagePath = `${studentId}/profile.${ext}`;
 
     if (DataModeService.isDirectSupabase()) {
+      // 1. Fetch current student's existing photo_storage_path to clean up old photo after replacement
+      const { data: s } = await supabase
+        .from('students')
+        .select('photo_storage_path')
+        .eq('id', studentId)
+        .maybeSingle();
+
+      const oldStoragePath = s?.photo_storage_path;
+
+      // 2. Upload with upsert using consistent student UUID file path
       const { error: uploadErr } = await supabase.storage
         .from(STUDENT_PHOTOS_BUCKET)
         .upload(storagePath, file, {
@@ -126,6 +208,7 @@ export class StudentService {
         throw new Error(`Failed to upload photo to Supabase Storage: ${uploadErr.message}`);
       }
 
+      // 3. Update database with new photo_storage_path
       const { error: updateErr } = await supabase
         .from('students')
         .update({
@@ -138,9 +221,30 @@ export class StudentService {
         throw new Error(`Failed to save student photo path: ${updateErr.message}`);
       }
 
-      const photoUrl = this.getStudentPhotoUrl({ photoStoragePath: storagePath }) || '';
-      StudentService.photoUrlCache.set(storagePath, photoUrl);
-      return { photoStoragePath: storagePath, photoUrl };
+      // 4. Only remove old photo after the replacement upload and database update succeed
+      if (oldStoragePath && oldStoragePath !== storagePath) {
+        try {
+          await supabase.storage.from(STUDENT_PHOTOS_BUCKET).remove([oldStoragePath]);
+          StudentService.photoUrlCache.delete(oldStoragePath);
+        } catch (delErr) {
+          console.warn('[StudentService] Non-fatal cleanup warning for previous photo:', delErr);
+        }
+      }
+
+      // 5. Generate fresh signed URL with expiry-aware caching
+      const { data: signData } = await supabase.storage
+        .from(STUDENT_PHOTOS_BUCKET)
+        .createSignedUrl(storagePath, 3600);
+
+      const signedUrl = signData?.signedUrl || '';
+      if (signedUrl) {
+        StudentService.photoUrlCache.set(storagePath, {
+          url: signedUrl,
+          expiresAt: Date.now() + 3500 * 1000,
+        });
+      }
+
+      return { photoStoragePath: storagePath, photoUrl: signedUrl };
     }
 
     // Offline / SQLite mode
@@ -157,7 +261,10 @@ export class StudentService {
       [base64Url, storagePath, new Date().toISOString(), studentId]
     );
 
-    StudentService.photoUrlCache.set(storagePath, base64Url);
+    StudentService.photoUrlCache.set(storagePath, {
+      url: base64Url,
+      expiresAt: Date.now() + 86400 * 1000,
+    });
     return { photoStoragePath: storagePath, photoUrl: base64Url };
   }
 
@@ -286,6 +393,9 @@ export class StudentService {
       cardsByStudent.set(card.student_id, list);
     }
 
+    // Preload signed photo URLs in a single batch before assembling students
+    await this.preloadStudentPhotoUrls(studentsRes.data || []);
+
     return (studentsRes.data || []).map((s: any) =>
       this.assembleStudentFromParts(
         s,
@@ -307,6 +417,10 @@ export class StudentService {
       throw new Error(`Failed to query student from Supabase: ${error.message}`);
     }
     if (!s) return null;
+
+    if (s.photo_storage_path) {
+      await this.preloadStudentPhotoUrls([s]);
+    }
 
     const [enrollmentsRes, programsRes, cardsRes] = await Promise.all([
       supabase.from('student_enrollments').select('*').eq('student_id', id),

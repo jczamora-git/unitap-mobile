@@ -182,6 +182,9 @@ export function useCurrentStudentPortal() {
     }
 
     if (candidate) {
+      if (!candidate.photoUrl && candidate.photoStoragePath) {
+        candidate.photoUrl = (await studentService.resolveStudentPhotoUrl(candidate)) || undefined;
+      }
       currentStudent.value = candidate;
       error.value = null;
     } else {

@@ -1106,7 +1106,7 @@ Prior to this update, parent records across UniTap (such as obligation rules, ev
 
 ### 15.3. Migration File Created
 - **File**: `supabase/migrations/20261108160000_devadmin_cascades_and_delete_protection.sql`
-- **Deployment Status**: Pending Manual Dashboard Deployment via Supabase SQL Editor.
+- **Deployment Status**: DEPLOYED (user-confirmed). Executed manually via Supabase Dashboard SQL Editor on November 8, 2026.
 
 ### 15.4. Verification Results
 - **Unit Tests**:
@@ -1187,6 +1187,7 @@ Prior to this update, parent records across UniTap (such as obligation rules, ev
 ### 17.2. Database & Schema Updates
 
 - **Forward-only Supabase Migration**: `supabase/migrations/20261108170000_attendance_checkpoints_and_storage.sql`
+  - **Deployment Status**: DEPLOYED (user-confirmed). Executed manually via Supabase Dashboard SQL Editor on November 8, 2026.
   - Adds `checkpoints_json JSONB DEFAULT '[]'` and `active_checkpoint_id VARCHAR(64)` to `event_occurrences`.
   - Adds `checkpoint_id VARCHAR(64) DEFAULT 'default_in'` to `attendance_records`.
   - Replaces `(occurrence_id, student_id)` constraint with `UNIQUE (occurrence_id, student_id, checkpoint_id)`.
@@ -1232,31 +1233,133 @@ Prior to this update, parent records across UniTap (such as obligation rules, ev
   - Restyled `collection-card-actions`: Primary operational actions (`Record Payment` and `View Students`) take `flex: 1`, while secondary actions (`(i)` Details and `🗑` Delete) are clean, responsive 36x36 icon action buttons with clear danger styling (`#ef4444`) and tooltips.
   - Added a Delete button inside the Collection Details sheet for convenient management.
 
+### 18.4. Final Corrective Pass: Atomicity, Security & Photo Hardening
+- **Contribution Deletion Atomicity**:
+  - Migrated Direct Supabase collection deletion to leverage database foreign-key `ON DELETE CASCADE` backed by PostgreSQL `BEFORE DELETE` triggers.
+  - Deleting an `obligation_rules` parent record triggers `trg_protect_obligation_rule_deletion`, which aborts atomically if any payments have been collected. If zero payments exist, Postgres cascades child obligation cleanup in a single transaction.
+  - Legacy unlinked collections safely target only matching records with `rule_id IS NULL` without sending synthetic strings like `legacy_test` to UUID columns.
+- **Immutable Financial & Audit Records**:
+  - Added explicit database triggers preventing deletion of `payments`, `payment_allocations`, `attendance_audit`, and `audit_logs`.
+  - Dropped all legacy `FOR ALL` policies on financial ledger tables and replaced them with command-specific `SELECT` and `INSERT` policies.
+- **Hardened Attendance Checkpoint RPC**:
+  - Upgraded `record_attendance_scan` in `20261108170000_attendance_checkpoints_and_storage.sql` to require non-null `auth.uid()`, use `COALESCE(v_role, '') NOT IN ('DEVADMIN', 'OFFICER')`, and preserve full officer appointment, active window, and scope checks.
+  - Validates that `p_checkpoint_id` belongs to occurrence's configured `checkpoints_json`, enforces matching against `active_checkpoint_id`, and logs either `CHECK_IN` or `CHECK_OUT` in `attendance_audit` depending on checkpoint type.
+- **Private Profile Photos & Signed URL Lifecycle**:
+  - Configured `student-profile-photos` storage bucket as strictly PRIVATE (`public = false`).
+  - Added authenticated RLS allowing Officers/DevAdmin to manage photos, and enrolled students to read their own photo (`name LIKE (student_id || '/%')`).
+  - Replaced `getPublicUrl()` with secure 1-hour signed URL generation (`createSignedUrl`, `createSignedUrls`) and 3500-second in-memory caching.
+- **Outstanding Balance Consistency**:
+  - Updated `FinanceRepository.getStudentIdsWithOutstandingBalance` in Direct Supabase mode to query `obligation_adjustments` and compute net assessed amount and remaining balance with batched queries, matching SQLite offline-first calculation.
+
+### 18.5. Delete Collection Confirmation Modal & Resilient Two-Phase Deletion
+- **Issue**:
+  - In `ContributionsPage.vue`, clicking the red trash icon failed to delete contribution collections, and the dialog lacked detailed contextual metadata.
+  - If the database migration `20261108160000` had not yet been executed in the live Supabase project, `student_obligations.rule_id` foreign key defaulted to `ON DELETE SET NULL`. Calling `DELETE FROM obligation_rules` left child obligations with `rule_id = NULL`, which caused them to immediately reappear as an unlinked collection after page refresh.
+  - Event propagation and dialog dismissal could fire prematurely before the asynchronous deletion request completed or reported an error.
+- **Fix**:
+  - **Confirmation Dialog (`UniDialog`)**:
+    - Clicking the red trash icon prompts a confirmation modal displaying the contribution name, amount per student (`formatPeso`), number of assigned students, and a clear warning that unpaid student obligations will also be permanently deleted.
+    - Added loading state (`isDeletingCollection`) with button text changing to "Deleting..." and buttons disabled to prevent duplicate submissions.
+    - Cancel dismisses the dialog cleanly without any database changes.
+    - On success: closes modal, clears selection, refreshes collections and student records directly via `loadData()`, and shows a success toast.
+    - On failure: displays the actual Supabase error in toast and keeps records intact.
+  - **Two-Phase Resilient Deletion**:
+    - In `financeService.deleteContributionCollection(col)`:
+      - Validates that zero payment allocations exist across all obligations in this collection. If any payments exist, immediately throws an error: `Cannot delete contribution collection because payments have already been collected for it. Archive or deactivate instead.`
+      - Deletes unpaid child `student_obligations` explicitly before deleting the parent `obligation_rules` record. This guarantees complete cleanup regardless of whether `ON DELETE CASCADE` or `ON DELETE SET NULL` is currently active on the remote database.
+      - Never passes synthetic legacy identifiers to UUID database columns.
+      - Uses a single database transaction in SQLite offline-first mode.
+
+### 18.6. Student Profile Photo Upload & Client-Side Image Optimization
+- **Client-Side Compression (`src/utilities/image-compression.ts`)**:
+  - Implemented automatic image optimization before upload:
+    - Downscales images to a maximum of 640 × 640 pixels while preserving aspect ratio.
+    - Encodes to WebP at 75–80% quality with automatic fallback to optimized JPEG (80%) when WebP is unsupported.
+    - Strips all EXIF, orientation, and location metadata via clean canvas re-drawing.
+    - Targets compressed payloads under 150 KB with multi-pass quality tuning when necessary.
+    - Validates file type and ensures raw files > 15MB are safely rejected before processing.
+- **Upload UI & Confirmation Preview (`src/views/StudentProfilePage.vue`)**:
+  - Displays a preview modal (`UniSheet`) before upload showing the optimized image, original file size, compressed size with percentage savings badge, dimensions, and format.
+  - Replaced native `window.confirm` with a destructive confirmation dialog (`UniDialog`) for photo deletion.
+  - Shows clear loading states (`Optimizing...`, `Uploading...`, and disabled buttons) to prevent race conditions.
+- **Supabase Storage Integration (`src/services/student.service.ts`)**:
+  - Reuses the existing `student-profile-photos` private bucket without creating duplicate buckets.
+  - Enforces consistent student UUID file paths: `${studentId}/profile.webp` (or `profile.jpg`).
+  - Uses `upsert: true` to overwrite existing photos cleanly.
+  - Deletes previous storage paths only after the replacement upload and database update succeed.
+  - Generates secure 1-hour signed URLs with expiry-aware in-memory caching (`photoUrlCache`).
+  - Preserves offline-first local base64 storage in SQLite (`photo_local_uri`).
+- **Omnipresent UI Display with Initials Fallback**:
+  - Integrated student photo display across all student views:
+    - `StudentProfilePage.vue`: Hero card avatar with upload, preview, and delete controls.
+    - `StudentCard.vue`: Student directory row avatar with `@error` fallback to student initials.
+    - `StudentHomeView.vue`: Student portal hero card avatar with graceful initials fallback.
+    - `StudentPassPage.vue`: CSG Student Pass avatar with photo and initials fallback.
+    - `AttendanceScanPage.vue`: Displays the student's photo during visual identity verification and in the confirmed attendance result card.
+
+### 18.7. Minimal Events Detail UI Redesign (`src/views/EventDetailPage.vue`)
+- **Compact Mobile Header**:
+  - Displays back navigation, event title, category, and status.
+  - Retained `Add Session` as the prominent primary action.
+  - Moved `Edit Event` and `Delete Event` into a compact options menu (`UniSheet`) triggered via an ellipsis (`⋯`) icon button.
+  - Preserved `isDevAdmin` restriction for the Delete action and maintained the existing confirmation modal.
+- **Simplified Event Information**:
+  - Reorganized the event summary into a streamlined card featuring category badge, status badge (`UniStatusBadge`), description, audience breakdown, and event date.
+- **Clean Attendance Sessions & Empty State**:
+  - Added an intuitive empty state (`UniEmptyState`) with an `Add Session` quick action when no occurrences exist.
+  - Maintained accessible checkpoint configuration (`UniSheet`), NFC scanning, and session close workflows.
+
+### 18.8 Direct PDF Downloading in Financial Reports (`/finance/reports`)
+
+- **Zero-Dependency PDF 1.4 Generator**:
+  - Implemented `ReportService.generateObligationsPdf(reportRows, semesterLabel, generatedBy): Uint8Array` adhering to PDF 1.4 specification without external heavy libraries.
+  - Generates top brand accent line (`#0F766E`), title, subtitle, metadata (Term, Generated By, Date), 3 financial summary KPI cards (Total Assessed, Total Collected, Total Outstanding), and full obligation table with column headers and zebra striping.
+  - Sanitizes non-ASCII/Unicode glyphs (including currency symbol `₱` into `PHP `) for standard PDF WinAnsiEncoding compatibility across all desktop, Android WebView, and mobile PDF readers.
+  - Supports automatic multi-page pagination (26 rows on page 1, 34 rows on subsequent pages) with page numbering footer (`Page X of Y`).
+- **Direct File Download Trigger**:
+  - Replaced browser preview/`window.open()` popups with the standard browser download mechanism using `Blob` (`type: 'application/pdf'`) and an anchor tag (`<a>`) with the `download` attribute and Object URL cleanup.
+  - Formatted descriptive filenames via `ReportService.buildObligationsPdfFilename(currentSem)` matching `UniTap_Financial_Report_2026-2027_1st_Semester.pdf`.
+  - Added dedicated Download PDF action (`:icon="documentTextOutline"`) in `ReportsPage.vue` header with loading indicator (`isDownloadingPdf`) and duplicate download prevention.
+  - Kept the separate Print button (`openPrintPreview()`) working normally for standard printing.
+- **Verification**:
+  - Unit tests in `tests/unit/filters-and-reports-ui.spec.ts` verify filename formatting, PDF 1.4 byte stream structure (`%PDF-1.4`, `%%EOF`), multi-page distribution, and empty state handling (8/8 tests passed).
+  - Both `vue-tsc --noEmit` and production build (`npm run build`) passed with zero errors.
+
 ---
 
-## 19. Remaining Tasks & Manual Deployment Checklist
+## 19. Supabase Migration Deployment History & Status
 
-1. **Execute Attendance Checkpoints & Storage Migration in Supabase SQL Editor (CRITICAL)**:
-   - **Action**: Run the SQL in migration `supabase/migrations/20261108170000_attendance_checkpoints_and_storage.sql` in the Supabase Dashboard SQL Editor.
-   - **Verification**: Verifies that `event_occurrences` has `checkpoints_json`, `attendance_records` has `checkpoint_id` and unique constraint `(occurrence_id, student_id, checkpoint_id)`, `record_attendance_scan` supports `p_checkpoint_id`, and the `student-profile-photos` storage bucket is provisioned with RLS policies.
+| Migration File | Description | Deployment Method | Deployed Date | Status |
+|---|---|---|---|---|
+| `20261108160000_devadmin_cascades_and_delete_protection.sql` | DEVADMIN FK Cascades, Orphan Precondition, RLS Helper & Deletion Protection | Supabase Dashboard SQL Editor | November 8, 2026 | **DEPLOYED** (User-confirmed) |
+| `20261108170000_attendance_checkpoints_and_storage.sql` | Configurable Attendance Checkpoints IN/OUT, Unique Checkpoint Constraint & Private Profile Photo Storage Bucket | Supabase Dashboard SQL Editor | November 8, 2026 | **DEPLOYED** (User-confirmed) |
+| `20261108150000_fix_student_obligations_rls.sql` | Student Obligations RLS Fix for DEVADMIN & ACTIVE Officers | Supabase Dashboard SQL Editor | November 8, 2026 | **DEPLOYED** (User-confirmed) |
+| `20261108140000_student_to_officer_promotion.sql` | Student-to-Officer Promotion RPC (`devadmin_promote_student_to_officer`) | Supabase Dashboard SQL Editor | November 8, 2026 | **DEPLOYED** (User-confirmed) |
+| `20261108130000_scoped_events_rls.sql` | Event Scoping & Officer Permission RLS Remediation | Supabase Dashboard SQL Editor | November 8, 2026 | **DEPLOYED** (User-confirmed) |
+| `20261108120000_harden_officer_activation_status.sql` | RPC Activation Status Lookup & Officer Appointment Hardening | Supabase Dashboard SQL Editor | November 8, 2026 | **DEPLOYED** (User-confirmed) |
 
-2. **Execute DEVADMIN Cascades and Delete Protection in Supabase SQL Editor (CRITICAL)**:
-   - **Action**: Run the SQL in migration `supabase/migrations/20261108160000_devadmin_cascades_and_delete_protection.sql` in the Supabase Dashboard SQL Editor.
-   - **Verification**: Verifies that DEVADMIN users can delete parent records with automatic child cleanup, that financial payments are protected by database triggers, and that non-DEVADMIN users are blocked from destructive deletes.
+---
 
-3. **Execute Student Obligations RLS Fix in Supabase SQL Editor (CRITICAL)**:
-   - **Action**: Run migration `supabase/migrations/20261108150000_fix_student_obligations_rls.sql` in the Supabase Dashboard SQL Editor.
-   - **Verification**: Verifies that DEVADMIN and active OFFICER users can insert, update, and read `student_obligations` without `42501` policy violation errors during contribution student assignment.
+## 20. Live Runtime Verification Checklist
 
-4. **Execute Student-to-Officer Promotion RPC in Supabase SQL Editor (CRITICAL)**:
-   - **Action**: Run migration `supabase/migrations/20261108140000_student_to_officer_promotion.sql` in the Supabase Dashboard SQL Editor.
-   - **Verification**: Test promoting a registered student via `devadmin_promote_student_to_officer` and verify that the appointment is marked `ACTIVE` and `user_roles` receives `OFFICER` while preserving `STUDENT`.
+The following items should be exercised during live user acceptance testing:
 
-5. **Execute Scoped Events RLS Remediation in Supabase SQL Editor (CRITICAL)**:
-   - **Action**: Run migration `supabase/migrations/20261108130000_scoped_events_rls.sql` in the Supabase Dashboard SQL Editor.
+- [ ] **DEVADMIN-Only Deletion & Financial History Protection**:
+  - Verify that DEVADMIN users can delete parent records (such as unassigned programs or unused obligation rules) with automatic cascade.
+  - Verify that non-DEVADMIN users (such as standard officers or students) attempting destructive deletions are rejected with `42501` (permission denied).
+  - Verify that deleting any obligation or parent rule with existing `payment_allocations` is strictly blocked by database triggers to maintain audit immutability.
 
-6. **Execute Corrected RPC for Activation Status Lookup in Supabase SQL Editor (CRITICAL)**:
-   - **Action**: Run migration `supabase/migrations/20261108120000_harden_officer_activation_status.sql` in the Supabase Dashboard SQL Editor.
+- [ ] **Automatic Contribution Child-Record Deletion**:
+  - Create a test contribution collection without payments and click the delete button on the card or in the Details sheet.
+  - Verify that confirming deletion deletes both the parent rule and all assigned unpaid `student_obligations` cleanly without leaving orphaned records.
 
-7. **Manual Supabase SQL Editor Policy Update for Students (CRITICAL)**:
-   - **Action**: Update the RLS policies for `students`, `student_enrollments`, and `nfc_cards` in the Supabase SQL Editor using `public.get_current_user_role() IN ('DEVADMIN', 'OFFICER')`.
+- [ ] **Attendance IN/OUT Checkpoint Validation**:
+  - Configure multi-checkpoint attendance on an event occurrence (e.g. "Morning IN" and "Morning OUT").
+  - Verify that tapping a student NFC card identifies the active checkpoint and logs the correct audit entry (`CHECK_IN` or `CHECK_OUT`).
+  - Verify that a second tap against the same active checkpoint reports duplicate scan and prevents double-marking.
+  - Verify switching to the second checkpoint allows the student to scan once for that specific checkpoint.
+
+- [ ] **Private Student Photo Storage Upload & Signed URL Retrieval**:
+  - Upload a profile photo from the Student Profile page; verify that client-side image compression converts it to optimized WebP/JPEG under 150 KB.
+  - Verify that the photo uploads to the private `student-profile-photos` bucket using the student's UUID as the storage path.
+  - Verify that signed URLs load smoothly across Student Directory cards, Student Pass, Student Portal, and NFC attendance tap verification results.

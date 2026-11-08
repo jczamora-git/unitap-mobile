@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted } from 'vue';
+import { ref, computed, onMounted } from 'vue';
 import { useRouter } from 'vue-router';
 import {
   IonPage,
@@ -34,6 +34,8 @@ const {
   isLoading,
   loadPortalData,
 } = useCurrentStudentPortal();
+
+const passImgError = ref(false);
 
 const initials = computed(() => {
   if (!student.value) return 'ST';
@@ -98,10 +100,11 @@ onIonViewWillEnter(() => {
               <div class="pass-body-row">
                 <div class="pass-avatar-box">
                   <img
-                    v-if="student?.photoUrl || student?.photoLocalUri"
+                    v-if="(student?.photoUrl || student?.photoLocalUri) && !passImgError"
                     :src="(student?.photoUrl || student?.photoLocalUri) || undefined"
                     alt="Student Photo"
                     class="pass-photo-img"
+                    @error="passImgError = true"
                   />
                   <span v-else class="avatar-initials">{{ initials }}</span>
                   <div class="avatar-status-dot" :class="{ 'is-active': student?.rfidUid }"></div>

@@ -77,61 +77,101 @@ const activeTab = ref<'OVERVIEW' | 'ATTENDANCE' | 'FINANCE'>('OVERVIEW');
 // Activation details
 const activationDetails = ref<StudentActivationDetails | null>(null);
 const showCodeSheet = ref(false);
+import {
+  compressStudentPhoto,
+  validateImageFile,
+  formatFileSize,
+  type CompressedImageResult,
+} from '@/utilities/image-compression';
+
 const newlyIssuedCode = ref('');
 const isIssuingCode = ref(false);
 const showAuditHistory = ref(false);
 
-// Profile photo upload state
+// Profile photo upload & optimization state
+const isCompressingPhoto = ref(false);
 const isUploadingPhoto = ref(false);
+const showPhotoPreviewSheet = ref(false);
+const compressedPhoto = ref<CompressedImageResult | null>(null);
+const showRemovePhotoDialog = ref(false);
+const isRemovingPhoto = ref(false);
 
-async function handlePhotoUpload(e: Event) {
+async function handlePhotoSelect(e: Event) {
   const target = e.target as HTMLInputElement;
   const file = target.files?.[0];
   if (!file || !currentStudent.value) return;
 
-  if (!file.type.startsWith('image/')) {
-    await showToast('Please select a valid image file (JPEG, PNG, or WebP).', 'warning');
+  const validation = validateImageFile(file);
+  if (!validation.valid) {
+    await showToast(validation.error || 'Invalid image file.', 'warning');
+    target.value = '';
     return;
   }
 
-  if (file.size > 5 * 1024 * 1024) {
-    await showToast('Image file size must be less than 5MB.', 'warning');
-    return;
+  isCompressingPhoto.value = true;
+  try {
+    const result = await compressStudentPhoto(file, `${currentStudent.value.id}.webp`);
+    compressedPhoto.value = result;
+    showPhotoPreviewSheet.value = true;
+  } catch (err: any) {
+    console.error('Photo compression error:', err);
+    await showToast(err?.message || 'Failed to process and compress image', 'error');
+  } finally {
+    isCompressingPhoto.value = false;
+    target.value = '';
   }
+}
 
+function cancelPhotoUpload() {
+  if (compressedPhoto.value?.previewUrl) {
+    URL.revokeObjectURL(compressedPhoto.value.previewUrl);
+  }
+  compressedPhoto.value = null;
+  showPhotoPreviewSheet.value = false;
+}
+
+async function confirmPhotoUpload() {
+  if (!compressedPhoto.value || !currentStudent.value || isUploadingPhoto.value) return;
   isUploadingPhoto.value = true;
   try {
-    const res = await studentService.uploadStudentPhoto(currentStudent.value.id, file);
+    const res = await studentService.uploadStudentPhoto(currentStudent.value.id, compressedPhoto.value.file);
     await showToast('Student photo updated successfully!', 'success');
     if (currentStudent.value) {
       currentStudent.value.photoUrl = res.photoUrl;
       currentStudent.value.photoStoragePath = res.photoStoragePath;
     }
+    cancelPhotoUpload();
     await loadProfile();
   } catch (err: any) {
+    console.error('Photo upload error:', err);
     await showToast(err?.message || 'Failed to upload photo', 'error');
   } finally {
     isUploadingPhoto.value = false;
-    target.value = '';
   }
 }
 
-async function handleRemovePhoto() {
-  if (!currentStudent.value) return;
-  const confirmed = window.confirm('Are you sure you want to remove this student photo?');
-  if (!confirmed) return;
+function promptRemovePhoto() {
+  showRemovePhotoDialog.value = true;
+}
 
+async function confirmRemovePhoto() {
+  if (!currentStudent.value || isRemovingPhoto.value) return;
+  isRemovingPhoto.value = true;
   try {
     await studentService.deleteStudentPhoto(currentStudent.value.id);
-    await showToast('Student photo removed', 'info');
+    await showToast('Student photo removed successfully', 'info');
     if (currentStudent.value) {
       currentStudent.value.photoUrl = undefined;
       currentStudent.value.photoStoragePath = undefined;
       currentStudent.value.photoLocalUri = undefined;
     }
+    showRemovePhotoDialog.value = false;
     await loadProfile();
   } catch (err: any) {
+    console.error('Remove photo error:', err);
     await showToast(err?.message || 'Failed to remove photo', 'error');
+  } finally {
+    isRemovingPhoto.value = false;
   }
 }
 
@@ -175,6 +215,9 @@ async function loadProfile() {
 
   await getStudentById(id);
   if (currentStudent.value) {
+    if (!currentStudent.value.photoUrl && currentStudent.value.photoStoragePath) {
+      currentStudent.value.photoUrl = (await studentService.resolveStudentPhotoUrl(currentStudent.value)) || undefined;
+    }
     studentCharges.value = await financeService.getCharges(id);
     studentPayments.value = await financeService.getPayments(id);
     attendanceHistory.value = await attendanceService.getStudentAttendanceHistory(id);
@@ -367,20 +410,24 @@ async function confirmDeleteCard() {
                 <span v-else>{{ initials }}</span>
               </div>
               <div v-if="!isStudent" class="avatar-actions-bar">
-                <label class="photo-upload-label" :class="{ 'is-loading': isUploadingPhoto }">
+                <label class="photo-upload-label" :class="{ 'is-loading': isCompressingPhoto || isUploadingPhoto }">
                   <input
                     type="file"
-                    accept="image/jpeg,image/png,image/webp"
+                    accept="image/jpeg,image/png,image/webp,image/jpg"
                     class="hidden-file-input"
-                    @change="handlePhotoUpload"
+                    :disabled="isCompressingPhoto || isUploadingPhoto"
+                    @change="handlePhotoSelect"
                   />
-                  <span>{{ isUploadingPhoto ? 'Uploading...' : (currentStudent.photoUrl || currentStudent.photoStoragePath ? 'Change Photo' : 'Upload Photo') }}</span>
+                  <span>
+                    {{ isCompressingPhoto ? 'Optimizing...' : (isUploadingPhoto ? 'Uploading...' : (currentStudent.photoUrl || currentStudent.photoStoragePath ? 'Change Photo' : 'Upload Photo')) }}
+                  </span>
                 </label>
                 <button
                   v-if="currentStudent.photoUrl || currentStudent.photoStoragePath"
                   type="button"
                   class="photo-delete-icon-btn"
-                  @click="handleRemovePhoto"
+                  :disabled="isRemovingPhoto"
+                  @click="promptRemovePhoto"
                   title="Remove Photo"
                 >
                   <ion-icon :icon="trashOutline" />
@@ -917,6 +964,78 @@ async function confirmDeleteCard() {
         </div>
       </div>
     </UniSheet>
+
+    <!-- Photo Upload Preview Sheet (UniTap 2.0 Client Compression) -->
+    <UniSheet
+      :is-open="showPhotoPreviewSheet"
+      title="Confirm Profile Photo"
+      subtitle="Client-side compressed & optimized"
+      @close="cancelPhotoUpload"
+    >
+      <div v-if="compressedPhoto" class="photo-preview-sheet-body">
+        <div class="preview-avatar-box">
+          <img :src="compressedPhoto.previewUrl" alt="Optimized Preview" class="preview-avatar-img" />
+        </div>
+
+        <div class="photo-metrics-card">
+          <div class="metric-row">
+            <span class="metric-label">Original Size:</span>
+            <span class="metric-val text-muted">{{ formatFileSize(compressedPhoto.originalSize) }}</span>
+          </div>
+          <div class="metric-row">
+            <span class="metric-label">Optimized Size:</span>
+            <div class="metric-val-group">
+              <strong class="metric-val text-primary font-mono">{{ formatFileSize(compressedPhoto.compressedSize) }}</strong>
+              <span v-if="compressedPhoto.compressionRatioPercent > 0" class="savings-tag">
+                -{{ compressedPhoto.compressionRatioPercent }}%
+              </span>
+            </div>
+          </div>
+          <div class="metric-row">
+            <span class="metric-label">Dimensions & Format:</span>
+            <span class="metric-val font-mono">
+              {{ compressedPhoto.width }} × {{ compressedPhoto.height }} · {{ compressedPhoto.mimeType === 'image/webp' ? 'WebP' : 'JPEG' }}
+            </span>
+          </div>
+        </div>
+
+        <p class="photo-notice-text">
+          Image resized to maximum 640×640 px with aspect ratio preserved. Metadata and location data have been stripped.
+        </p>
+
+        <div class="photo-actions-row">
+          <UniButton
+            variant="outline"
+            size="sm"
+            :disabled="isUploadingPhoto"
+            @click="cancelPhotoUpload"
+          >
+            Cancel
+          </UniButton>
+          <UniButton
+            variant="primary"
+            size="sm"
+            :disabled="isUploadingPhoto"
+            @click="confirmPhotoUpload"
+          >
+            {{ isUploadingPhoto ? 'Uploading...' : 'Confirm Upload' }}
+          </UniButton>
+        </div>
+      </div>
+    </UniSheet>
+
+    <!-- Remove Photo Confirmation Dialog -->
+    <UniDialog
+      v-model:is-open="showRemovePhotoDialog"
+      title="Remove Student Photo?"
+      description="Are you sure you want to remove this profile photo? The student record will revert to their initials."
+      :confirm-text="isRemovingPhoto ? 'Removing...' : 'Remove Photo'"
+      cancel-text="Cancel"
+      :destructive="true"
+      type="destructive"
+      @confirm="confirmRemovePhoto"
+      @cancel="showRemovePhotoDialog = false"
+    />
   </ion-page>
 </template>
 
@@ -1045,6 +1164,88 @@ async function confirmDeleteCard() {
 
 .photo-delete-icon-btn:hover {
   background: rgba(239, 68, 68, 0.1);
+}
+
+/* Photo Preview Sheet Styles (UniTap 2.0) */
+.photo-preview-sheet-body {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+  padding: 8px 4px 16px 4px;
+}
+
+.preview-avatar-box {
+  width: 140px;
+  height: 140px;
+  border-radius: 20px;
+  overflow: hidden;
+  border: 2px solid var(--uni-primary, #0F766E);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.25);
+  background: #0f172a;
+}
+
+.preview-avatar-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.photo-metrics-card {
+  width: 100%;
+  background: var(--uni-surface-subtle, rgba(255, 255, 255, 0.04));
+  border: 1px solid var(--uni-border, rgba(255, 255, 255, 0.1));
+  border-radius: 12px;
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.metric-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 0.85rem;
+}
+
+.metric-label {
+  color: var(--uni-text-muted, #94a3b8);
+}
+
+.metric-val {
+  color: var(--uni-text-primary, #ffffff);
+}
+
+.metric-val-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.savings-tag {
+  background: rgba(16, 185, 129, 0.15);
+  color: #10b981;
+  font-size: 0.75rem;
+  font-weight: 700;
+  padding: 1px 6px;
+  border-radius: 6px;
+}
+
+.photo-notice-text {
+  font-size: 0.8rem;
+  color: var(--uni-text-muted, #94a3b8);
+  text-align: center;
+  margin: 0;
+  line-height: 1.4;
+}
+
+.photo-actions-row {
+  width: 100%;
+  display: flex;
+  gap: 10px;
+  justify-content: flex-end;
+  margin-top: 4px;
 }
 
 .profile-fullname {

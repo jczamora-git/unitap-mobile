@@ -213,6 +213,10 @@ async function handleConfirmStudent() {
       message: `${pv.studentFullName} confirmed for ${pv.checkpointLabel || 'session'} as ${pv.suggestedStatus}!`,
       timestamp: new Date().toISOString(),
       rfidUid: pv.rfidUid,
+      student: pv.student as any,
+      studentFullName: pv.studentFullName,
+      photoUrl: pv.photoUrl || pv.photoLocalUri || null,
+      photoLocalUri: pv.photoLocalUri || null,
     };
     await haptics.success();
     pendingVerification.value = null;
@@ -508,18 +512,31 @@ function handleRegisterCard() {
             <span class="result-time font-mono">{{ formatTime(lastResult.timestamp) }}</span>
           </div>
 
-          <div v-if="lastResult.student" class="result-student-info">
-            <h4 class="student-name">
-              {{ formatFullName(lastResult.student.firstName, lastResult.student.middleName, lastResult.student.lastName) }}
-            </h4>
-            <div class="student-meta-line">
-              <span v-if="lastResult.student.studentNumber" class="font-mono">
-                ID: {{ lastResult.student.studentNumber }}
-              </span>
-              <span>• {{ formatStudentAcademicSummary(lastResult.student) }}</span>
+          <div v-if="lastResult.student" class="result-student-row">
+            <div class="result-avatar-box">
+              <img
+                v-if="lastResult.photoUrl || lastResult.student?.photoUrl || lastResult.student?.photoLocalUri"
+                :src="(lastResult.photoUrl || lastResult.student?.photoUrl || lastResult.student?.photoLocalUri)!"
+                alt="Student Photo"
+                class="result-photo-img"
+              />
+              <div v-else class="result-avatar-placeholder">
+                {{ lastResult.studentFullName?.charAt(0) || lastResult.student?.firstName?.charAt(0) || 'S' }}
+              </div>
             </div>
-            <div class="uid-sub font-mono">
-              Card UID: {{ lastResult.rfidUid }}
+            <div class="result-student-info">
+              <h4 class="student-name">
+                {{ formatFullName(lastResult.student.firstName, lastResult.student.middleName, lastResult.student.lastName) }}
+              </h4>
+              <div class="student-meta-line">
+                <span v-if="lastResult.student.studentNumber" class="font-mono">
+                  ID: {{ lastResult.student.studentNumber }}
+                </span>
+                <span>• {{ formatStudentAcademicSummary(lastResult.student) }}</span>
+              </div>
+              <div class="uid-sub font-mono">
+                Card UID: {{ lastResult.rfidUid }}
+              </div>
             </div>
           </div>
 
@@ -1028,10 +1045,42 @@ function handleRegisterCard() {
   color: var(--app-text-muted);
 }
 
+.result-student-row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.result-avatar-box {
+  width: 56px;
+  height: 56px;
+  border-radius: 12px;
+  overflow: hidden;
+  border: 1.5px solid var(--uni-border, #cbd5e1);
+  background: var(--uni-surface-subtle, #f1f5f9);
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.result-photo-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.result-avatar-placeholder {
+  font-size: 22px;
+  font-weight: 800;
+  color: var(--uni-primary, #0F766E);
+}
+
 .result-student-info {
   display: flex;
   flex-direction: column;
   gap: 2px;
+  min-width: 0;
 }
 
 .student-name {

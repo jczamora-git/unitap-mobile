@@ -803,16 +803,38 @@ export class FinanceRepository {
       }
 
       const obIds = obs.map((o: any) => o.id);
-      const { data: allocData, error: allocErr } = await supabase
-        .from('payment_allocations')
-        .select('obligation_id, amount_centavos, payment_id')
-        .in('obligation_id', obIds);
 
-      if (allocErr) {
-        throw new Error(`Failed to query payment allocations: ${allocErr.message}`);
+      // Batched lookup: 1) obligation_adjustments, 2) payment_allocations
+      const [adjRes, allocRes] = await Promise.all([
+        supabase
+          .from('obligation_adjustments')
+          .select('obligation_id, kind, amount_centavos')
+          .in('obligation_id', obIds),
+        supabase
+          .from('payment_allocations')
+          .select('obligation_id, amount_centavos, payment_id')
+          .in('obligation_id', obIds),
+      ]);
+
+      if (adjRes.error) {
+        throw new Error(`Failed to query obligation adjustments: ${adjRes.error.message}`);
+      }
+      if (allocRes.error) {
+        throw new Error(`Failed to query payment allocations: ${allocRes.error.message}`);
       }
 
-      const allocs = allocData || [];
+      // Aggregate adjustments per obligation (ADDITION vs DEDUCTION)
+      const adjustmentsByObId = new Map<string, number>();
+      for (const adj of adjRes.data || []) {
+        const amt = Number(adj.amount_centavos || 0);
+        const change = adj.kind === 'ADDITION' ? amt : -amt;
+        adjustmentsByObId.set(
+          adj.obligation_id,
+          (adjustmentsByObId.get(adj.obligation_id) || 0) + change
+        );
+      }
+
+      const allocs = allocRes.data || [];
       const payIds = Array.from(new Set(allocs.map((a: any) => a.payment_id).filter(Boolean)));
       const postedPaymentIds = new Set<string>();
 
@@ -842,13 +864,17 @@ export class FinanceRepository {
         }
       }
 
+      // Evaluate remaining balance using the same business rules as Offline-First SQLite:
+      // (amount_centavos + adjustments) > posted_paid_centavos
       const owingStudentIds = new Set<string>();
       for (const o of obs) {
-        if (o.status === 'PAID') continue;
+        if (o.status === 'PAID' || o.status === 'VOID') continue;
         const assessed = Number(o.amount_centavos || 0);
+        const adj = adjustmentsByObId.get(o.id) || 0;
+        const netAssessed = assessed + adj;
         const paid = paidByObId.get(o.id) || 0;
-        const balance = Math.max(0, assessed - paid);
-        if (balance > 0 && o.student_id) {
+        const remainingBalance = netAssessed - paid;
+        if (remainingBalance > 0 && o.student_id) {
           owingStudentIds.add(o.student_id);
         }
       }
