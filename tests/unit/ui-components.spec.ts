@@ -170,6 +170,64 @@ describe('UI Component Regression Suite', () => {
       expect(wrapper.emitted('close')).toBeTruthy();
       expect(wrapper.emitted('update:isOpen')?.[0]).toEqual([false]);
     });
+
+    it('supports loading prop, disables buttons, and prevents auto-close and backdrop cancel while loading', async () => {
+      const wrapper = mount(UniDialog, {
+        props: {
+          isOpen: true,
+          title: 'Delete Contribution Collection?',
+          confirmText: 'Delete Collection',
+          destructive: true,
+          loading: true,
+          preventAutoClose: true,
+        },
+        global: {
+          stubs: {
+            teleport: true,
+            transition: false,
+          },
+        },
+      });
+
+      const confirmBtn = wrapper.find('.dialog-btn-destructive');
+      const cancelBtn = wrapper.find('.dialog-btn-cancel');
+      const overlay = wrapper.find('.uni-dialog-overlay');
+
+      expect((confirmBtn.element as HTMLButtonElement).disabled).toBe(true);
+      expect((cancelBtn.element as HTMLButtonElement).disabled).toBe(true);
+
+      // Attempt clicking overlay while loading
+      await overlay.trigger('click');
+      expect(wrapper.emitted('cancel')).toBeFalsy();
+      expect(wrapper.emitted('update:isOpen')).toBeFalsy();
+
+      // Attempt clicking confirm while loading
+      await confirmBtn.trigger('click');
+      expect(wrapper.emitted('confirm')).toBeFalsy();
+    });
+
+    it('supports preventAutoClose prop to keep dialog open until parent finishes operation', async () => {
+      const wrapper = mount(UniDialog, {
+        props: {
+          isOpen: true,
+          title: 'Async Operation',
+          confirmText: 'Proceed',
+          preventAutoClose: true,
+        },
+        global: {
+          stubs: {
+            teleport: true,
+            transition: false,
+          },
+        },
+      });
+
+      const confirmBtn = wrapper.find('.dialog-btn-confirm');
+      await confirmBtn.trigger('click');
+
+      expect(wrapper.emitted('confirm')).toBeTruthy();
+      expect(wrapper.emitted('update:isOpen')).toBeFalsy();
+    });
   });
 
   describe('UniPagination', () => {

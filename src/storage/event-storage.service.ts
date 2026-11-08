@@ -21,6 +21,7 @@ export interface IEventRepository {
   getOccurrences(eventId?: string): Promise<EventOccurrence[]>;
   getOccurrenceById(id: string): Promise<EventOccurrence | null>;
   saveOccurrence(occurrence: EventOccurrence): Promise<EventOccurrence>;
+  deleteOccurrence(id: string): Promise<void>;
 
   getParticipants(occurrenceId?: string): Promise<OccurrenceParticipant[]>;
   saveParticipant(participant: OccurrenceParticipant): Promise<OccurrenceParticipant>;
@@ -154,6 +155,14 @@ export class LocalEventRepository implements IEventRepository {
     }
     await this.persist();
     return occurrence;
+  }
+
+  async deleteOccurrence(id: string): Promise<void> {
+    const data = await this.getData();
+    data.occurrences = data.occurrences.filter(o => o.id !== id);
+    data.participants = data.participants.filter(p => p.occurrenceId !== id);
+    data.scanLogs = data.scanLogs.filter(l => l.occurrenceId !== id);
+    await this.persist();
   }
 
   async getParticipants(occurrenceId?: string): Promise<OccurrenceParticipant[]> {

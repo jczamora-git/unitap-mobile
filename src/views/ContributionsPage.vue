@@ -47,6 +47,7 @@ import {
   UniButton,
   UniCard,
   UniSheet,
+  UniDialog,
   UniEmptyState,
   UniSelect,
   UniRecordList,
@@ -322,6 +323,7 @@ const { isDevAdmin } = useAuth();
 const showDeleteCollectionDialog = ref(false);
 const collectionToDelete = ref<ContributionCollectionItem | null>(null);
 const isDeletingCollection = ref(false);
+const deleteCollectionError = ref<string | null>(null);
 
 function handleDeleteCollectionClick(col: ContributionCollectionItem, event?: Event) {
   event?.stopPropagation?.();
@@ -331,6 +333,7 @@ function handleDeleteCollectionClick(col: ContributionCollectionItem, event?: Ev
 function promptDeleteCollection(col: ContributionCollectionItem) {
   if (isDeletingCollection.value) return;
   collectionToDelete.value = col;
+  deleteCollectionError.value = null;
   showDeleteCollectionDialog.value = true;
 }
 
@@ -338,27 +341,35 @@ function cancelDeleteCollection() {
   if (isDeletingCollection.value) return;
   showDeleteCollectionDialog.value = false;
   collectionToDelete.value = null;
+  deleteCollectionError.value = null;
 }
 
 function handleDeleteDialogToggle(isOpen: boolean) {
   if (!isOpen && !isDeletingCollection.value) {
     showDeleteCollectionDialog.value = false;
     collectionToDelete.value = null;
+    deleteCollectionError.value = null;
   }
 }
 
 async function confirmDeleteCollection() {
   if (!collectionToDelete.value || isDeletingCollection.value) return;
   isDeletingCollection.value = true;
+  deleteCollectionError.value = null;
   try {
     await financeService.deleteContributionCollection(collectionToDelete.value);
     await showToast('Contribution collection deleted successfully.', 'success');
     showDeleteCollectionDialog.value = false;
     collectionToDelete.value = null;
+    deleteCollectionError.value = null;
     await loadData();
   } catch (err: any) {
     console.error('Delete collection error:', err);
-    await showToast(err?.message || 'Cannot delete contribution collection because payments have already been collected for it. Archive or deactivate instead.', 'error');
+    const msg =
+      err?.message ||
+      'Cannot delete contribution collection because payments have already been collected for it. Archive or deactivate instead.';
+    deleteCollectionError.value = msg;
+    await showToast(msg, 'error');
   } finally {
     isDeletingCollection.value = false;
   }
@@ -1579,15 +1590,16 @@ onIonViewWillEnter(loadData);
       </UniSheet>
       <!-- Delete Collection Dialog -->
       <UniDialog
-        :is-open="showDeleteCollectionDialog"
+        v-model:is-open="showDeleteCollectionDialog"
         title="Delete Contribution Collection?"
         :confirm-text="isDeletingCollection ? 'Deleting...' : 'Delete Collection'"
         cancel-text="Cancel"
         :destructive="true"
         type="destructive"
+        :loading="isDeletingCollection"
+        :prevent-auto-close="true"
         @confirm="confirmDeleteCollection"
         @cancel="cancelDeleteCollection"
-        @update:is-open="handleDeleteDialogToggle"
       >
         <div v-if="collectionToDelete" class="dialog-collection-summary">
           <p class="dialog-summary-intro">
@@ -1609,7 +1621,16 @@ onIonViewWillEnter(loadData);
             </div>
           </div>
 
-          <div class="dialog-warning-callout">
+          <!-- Error Callout on Failure -->
+          <div v-if="deleteCollectionError" class="dialog-error-callout">
+            <ion-icon :icon="alertCircleOutline" class="error-callout-icon" />
+            <div class="callout-body">
+              <strong>Cannot Delete:</strong> {{ deleteCollectionError }}
+            </div>
+          </div>
+
+          <!-- Financial History Warning -->
+          <div v-else class="dialog-warning-callout">
             <ion-icon :icon="alertCircleOutline" class="callout-icon" />
             <div class="callout-body">
               <strong>Warning:</strong> All unpaid student obligations under this contribution will also be deleted. If any payments have already been collected, deletion will be blocked to preserve financial audit history.
@@ -1953,13 +1974,15 @@ onIonViewWillEnter(loadData);
 
 /* Delete Collection Dialog Content */
 .dialog-collection-summary {
+  width: 100%;
+  box-sizing: border-box;
   margin: 10px 0 16px 0;
   text-align: left;
 }
 
 .dialog-summary-intro {
   font-size: 0.9rem;
-  color: var(--uni-text-muted);
+  color: var(--uni-text-muted, #94a3b8);
   margin-bottom: 12px;
   line-height: 1.4;
 }
@@ -1983,7 +2006,7 @@ onIonViewWillEnter(loadData);
 }
 
 .summary-key {
-  color: var(--uni-text-muted);
+  color: var(--uni-text-muted, #94a3b8);
 }
 
 .summary-val {
@@ -2003,7 +2026,22 @@ onIonViewWillEnter(loadData);
   color: #fca5a5;
 }
 
-.callout-icon {
+.dialog-error-callout {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  padding: 10px 12px;
+  background: rgba(239, 68, 68, 0.14);
+  border: 1px solid rgba(239, 68, 68, 0.45);
+  border-radius: 8px;
+  font-size: 0.82rem;
+  line-height: 1.4;
+  color: #fca5a5;
+  text-align: left;
+}
+
+.callout-icon,
+.error-callout-icon {
   font-size: 1.1rem;
   color: #ef4444;
   flex-shrink: 0;

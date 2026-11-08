@@ -37,6 +37,9 @@ class MockEventRepo implements IEventRepository {
     else this.data.occurrences.push(occurrence);
     return occurrence;
   }
+  async deleteOccurrence(id: string): Promise<void> {
+    this.data.occurrences = this.data.occurrences.filter(o => o.id !== id);
+  }
   async getParticipants(occurrenceId?: string): Promise<OccurrenceParticipant[]> {
     if (occurrenceId) return this.data.participants.filter(p => p.occurrenceId === occurrenceId);
     return [...this.data.participants];
@@ -156,5 +159,72 @@ describe('EventService', () => {
 
     expect(updatedP1?.attendanceStatus).toBe('PRESENT');
     expect(updatedP2?.attendanceStatus).toBe('ABSENT');
+  });
+
+  it('updates attendance occurrence session details and checkpoints', async () => {
+    const event = await service.createEvent({
+      title: 'IT Congress 2026',
+      description: 'Annual Convention',
+      type: 'General Assembly',
+      audience: { type: 'ALL_BSIT' }
+    });
+
+    const occ = await service.createOccurrence({
+      eventId: event.id,
+      title: 'Morning Keynote',
+      date: '2026-11-10',
+      startTime: '08:00',
+      endTime: '12:00',
+      gracePeriodMinutes: 15
+    });
+
+    const updated = await service.updateOccurrence({
+      occurrenceId: occ.id,
+      title: 'Keynote & Morning Tech Talks',
+      date: '2026-11-10',
+      startTime: '08:30',
+      endTime: '12:30',
+      gracePeriodMinutes: 20,
+      checkpoints: [
+        { id: 'cp_in', label: 'Morning Entry', type: 'IN', orderIndex: 0 },
+        { id: 'cp_out', label: 'Morning Exit', type: 'OUT', orderIndex: 1 }
+      ]
+    });
+
+    expect(updated.title).toBe('Keynote & Morning Tech Talks');
+    expect(updated.startTime).toBe('08:30');
+    expect(updated.endTime).toBe('12:30');
+    expect(updated.gracePeriodMinutes).toBe(20);
+    expect(updated.checkpoints).toHaveLength(2);
+    expect(updated.checkpoints?.[0].label).toBe('Morning Entry');
+    expect(updated.checkpoints?.[1].label).toBe('Morning Exit');
+
+    const fetched = await service.getOccurrence(occ.id);
+    expect(fetched?.title).toBe('Keynote & Morning Tech Talks');
+  });
+
+  it('deletes attendance occurrence session cleanly', async () => {
+    const event = await service.createEvent({
+      title: 'IT Workshop',
+      description: 'Hands-on session',
+      type: 'Seminar',
+      audience: { type: 'ALL_BSIT' }
+    });
+
+    const occ = await service.createOccurrence({
+      eventId: event.id,
+      title: 'Session to be deleted',
+      date: '2026-11-12',
+      startTime: '13:00',
+      endTime: '15:00'
+    });
+
+    const beforeDelete = await service.getOccurrences(event.id);
+    expect(beforeDelete.some(o => o.id === occ.id)).toBe(true);
+
+    await service.deleteOccurrence(occ.id);
+
+    const afterDelete = await service.getOccurrences(event.id);
+    expect(afterDelete.some(o => o.id === occ.id)).toBe(false);
   });
 });

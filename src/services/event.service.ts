@@ -4,11 +4,13 @@ import type {
   OccurrenceParticipant,
   CreateEventDto,
   CreateOccurrenceDto,
+  UpdateOccurrenceDto,
   AttendanceStatus,
   AttendanceCheckpoint,
 } from '@/types/event';
 import type { AttendanceStats } from '@/types/attendance';
 import { localEventRepository, type IEventRepository } from '@/storage/event-storage.service';
+import { EventsRepository } from '@/database/repositories/events.repository';
 import { studentService } from '@/services/student.service';
 import { OperationPolicyService } from './operation-policy.service';
 import { DataModeService } from './data-mode.service';
@@ -135,6 +137,8 @@ export class EventService {
         title: data.title,
         description: data.description || '',
         type: data.event_type,
+        categoryId: data.category_id,
+        semesterId: data.semester_id,
         audience: data.audience_json || { type: data.audience_type || 'ALL_BSIT' },
         attendanceRequired: Boolean(data.attendance_required),
         status: data.status,
@@ -256,7 +260,18 @@ export class EventService {
       const occurrenceId = rowOrJson?.id || (typeof rowOrJson === 'string' ? rowOrJson : 'default_in');
       checkpoints = this.getDefaultCheckpoints(occurrenceId, rowOrJson?.starts_at || '08:00', rowOrJson?.ends_at || '12:00', rowOrJson?.grace_minutes || 15);
     }
-    return checkpoints;
+    return checkpoints.map((c, idx) => {
+      const startTime = c.startTime || c.opensAt || rowOrJson?.starts_at || '08:00';
+      const endTime = c.endTime || c.closesAt || rowOrJson?.ends_at || '12:00';
+      return {
+        ...c,
+        startTime,
+        endTime,
+        opensAt: c.opensAt,
+        closesAt: c.closesAt,
+        orderIndex: c.orderIndex ?? idx,
+      };
+    });
   }
 
   public getDefaultCheckpoints(_occurrenceId?: string, startTime = '08:00', endTime = '12:00', graceMinutes = 15): AttendanceCheckpoint[] {
@@ -280,13 +295,25 @@ export class EventService {
   ): Promise<void> {
     await OperationPolicyService.assertPermitted('EVENTS_AND_OCCURRENCES_MUTATIONS');
     const rawId = occurrenceId.startsWith('occ_') ? occurrenceId.replace(/^occ_/, '') : occurrenceId;
-    const activeId = activeCheckpointId ?? checkpoints[0]?.id ?? null;
+    const normalizedCheckpoints = checkpoints.map((c, idx) => {
+      const opensAt = c.opensAt || c.startTime || '08:00';
+      const closesAt = c.closesAt || c.endTime || '12:00';
+      return {
+        ...c,
+        startTime: opensAt,
+        endTime: closesAt,
+        opensAt,
+        closesAt,
+        orderIndex: c.orderIndex ?? idx,
+      };
+    });
+    const activeId = activeCheckpointId ?? normalizedCheckpoints[0]?.id ?? null;
 
     if (DataModeService.isDirectSupabase()) {
       const { error } = await supabase
         .from('event_occurrences')
         .update({
-          checkpoints_json: checkpoints,
+          checkpoints_json: normalizedCheckpoints,
           active_checkpoint_id: activeId,
           updated_at: new Date().toISOString(),
         })
@@ -297,8 +324,8 @@ export class EventService {
 
     const db = await getDatabase();
     await db.execute(
-      'UPDATE event_occurrences SET checkpoints_json = ?, active_checkpoint_id = ?, updated_at = ? WHERE id = ?',
-      [JSON.stringify(checkpoints), activeId, new Date().toISOString(), rawId]
+      'UPDATE event_occurrences SET checkpoints_json = ?, active_checkpoint_id = ?, updated_at = ? WHERE id = ? OR id = ?',
+      [JSON.stringify(normalizedCheckpoints), activeId, new Date().toISOString(), occurrenceId, rawId]
     );
   }
 
@@ -313,9 +340,10 @@ export class EventService {
       return;
     }
     const db = await getDatabase();
-    await db.execute('UPDATE event_occurrences SET active_checkpoint_id = ?, updated_at = ? WHERE id = ?', [
+    await db.execute('UPDATE event_occurrences SET active_checkpoint_id = ?, updated_at = ? WHERE id = ? OR id = ?', [
       checkpointId,
       new Date().toISOString(),
+      occurrenceId,
       rawId,
     ]);
   }
@@ -420,6 +448,109 @@ export class EventService {
     }
 
     return this.repo.saveOccurrence(occurrence);
+  }
+
+  async updateOccurrence(dto: UpdateOccurrenceDto): Promise<EventOccurrence> {
+    await OperationPolicyService.assertPermitted('EVENTS_AND_OCCURRENCES_MUTATIONS');
+
+    const occ = await this.getOccurrence(dto.occurrenceId);
+    if (!occ) {
+      throw new Error('Attendance session does not exist.');
+    }
+
+    const now = new Date().toISOString();
+    const rawId = dto.occurrenceId.startsWith('occ_') ? dto.occurrenceId.replace(/^occ_/, '') : dto.occurrenceId;
+    const normalizedCheckpoints = dto.checkpoints ? dto.checkpoints.map((c, idx) => {
+      const opensAt = c.opensAt || c.startTime || dto.startTime || occ.startTime || '08:00';
+      const closesAt = c.closesAt || c.endTime || dto.endTime || occ.endTime || '12:00';
+      return {
+        ...c,
+        startTime: opensAt,
+        endTime: closesAt,
+        opensAt,
+        closesAt,
+        orderIndex: c.orderIndex ?? idx,
+      };
+    }) : undefined;
+
+    if (DataModeService.isDirectSupabase()) {
+      const remoteUpdates: Record<string, any> = {
+        updated_at: now,
+      };
+      if (dto.title !== undefined) remoteUpdates.title = dto.title.trim();
+      if (dto.date !== undefined) remoteUpdates.occurs_on = dto.date;
+      if (dto.startTime !== undefined) remoteUpdates.starts_at = dto.startTime;
+      if (dto.endTime !== undefined) remoteUpdates.ends_at = dto.endTime;
+      if (dto.gracePeriodMinutes !== undefined) remoteUpdates.grace_minutes = dto.gracePeriodMinutes;
+      if (normalizedCheckpoints !== undefined) {
+        remoteUpdates.checkpoints_json = normalizedCheckpoints;
+        remoteUpdates.active_checkpoint_id = dto.activeCheckpointId ?? normalizedCheckpoints[0]?.id ?? null;
+      }
+
+      const { data, error } = await supabase
+        .from('event_occurrences')
+        .update(remoteUpdates)
+        .eq('id', rawId)
+        .select()
+        .single();
+
+      if (error) throw new Error(`Failed to update attendance session on Supabase: ${error.message}`);
+
+      return {
+        id: data.id,
+        eventId: data.event_id,
+        title: data.title,
+        date: data.occurs_on,
+        startTime: data.starts_at,
+        endTime: data.ends_at,
+        gracePeriodMinutes: data.grace_minutes || 15,
+        status: data.status,
+        checkpoints: this.parseCheckpoints(data),
+        activeCheckpointId: data.active_checkpoint_id || null,
+        openedAt: data.opened_at,
+        closedAt: data.closed_at,
+        createdAt: data.created_at || now,
+      };
+    }
+
+    await EventsRepository.updateOccurrence({
+      id: dto.occurrenceId,
+      title: dto.title !== undefined ? dto.title.trim() : undefined,
+      occurs_on: dto.date,
+      starts_at: dto.startTime,
+      ends_at: dto.endTime,
+      grace_minutes: dto.gracePeriodMinutes,
+      checkpoints_json: normalizedCheckpoints ? JSON.stringify(normalizedCheckpoints) : undefined,
+      active_checkpoint_id: dto.activeCheckpointId,
+      updated_at: now,
+    });
+
+    const updated = await this.repo.getOccurrenceById(dto.occurrenceId);
+    const merged: EventOccurrence = {
+      ...(updated || occ),
+      title: dto.title !== undefined ? dto.title.trim() : occ.title,
+      date: dto.date !== undefined ? dto.date : occ.date,
+      startTime: dto.startTime !== undefined ? dto.startTime : occ.startTime,
+      endTime: dto.endTime !== undefined ? dto.endTime : occ.endTime,
+      gracePeriodMinutes: dto.gracePeriodMinutes !== undefined ? dto.gracePeriodMinutes : occ.gracePeriodMinutes,
+      checkpoints: normalizedCheckpoints !== undefined ? normalizedCheckpoints : occ.checkpoints,
+      activeCheckpointId: dto.activeCheckpointId !== undefined ? dto.activeCheckpointId : occ.activeCheckpointId,
+    };
+    return this.repo.saveOccurrence(merged);
+  }
+
+  async deleteOccurrence(id: string): Promise<void> {
+    await OperationPolicyService.assertPermitted('EVENTS_AND_OCCURRENCES_MUTATIONS');
+
+    if (DataModeService.isDirectSupabase()) {
+      const rawId = id.startsWith('occ_') ? id.replace(/^occ_/, '') : id;
+      const { error } = await supabase.from('event_occurrences').delete().eq('id', rawId);
+      if (error) throw new Error(`Failed to delete attendance session from Supabase: ${error.message}`);
+      return;
+    }
+
+    await EventsRepository.deleteOccurrence(id);
+    await this.repo.deleteOccurrence(id);
   }
 
   async openOccurrence(occurrenceId: string): Promise<EventOccurrence> {

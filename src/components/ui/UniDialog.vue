@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { watch, onBeforeUnmount } from 'vue';
-import { IonIcon, useBackButton } from '@ionic/vue';
+import { IonIcon, IonSpinner, useBackButton } from '@ionic/vue';
 import { alertCircleOutline, helpCircleOutline, checkmarkCircleOutline } from 'ionicons/icons';
 import { haptics } from '@/utilities/haptics';
 
@@ -15,6 +15,9 @@ interface Props {
   destructive?: boolean;
   type?: 'confirm' | 'warning' | 'destructive' | 'info';
   icon?: any;
+  loading?: boolean;
+  disabled?: boolean;
+  preventAutoClose?: boolean;
 }
 
 const props = withDefaults(defineProps<Props>(), {
@@ -25,7 +28,10 @@ const props = withDefaults(defineProps<Props>(), {
   cancelLabel: '',
   destructive: false,
   type: 'confirm',
-  icon: undefined
+  icon: undefined,
+  loading: false,
+  disabled: false,
+  preventAutoClose: false,
 });
 
 const emit = defineEmits<{
@@ -36,16 +42,20 @@ const emit = defineEmits<{
 }>();
 
 function handleConfirm() {
+  if (props.loading || props.disabled) return;
   if (props.destructive || props.type === 'destructive') {
     haptics.warning();
   } else {
     haptics.light();
   }
   emit('confirm');
-  emit('update:isOpen', false);
+  if (!props.preventAutoClose && !props.loading) {
+    emit('update:isOpen', false);
+  }
 }
 
 function handleCancel() {
+  if (props.loading) return;
   haptics.light();
   emit('cancel');
   emit('close');
@@ -53,7 +63,7 @@ function handleCancel() {
 }
 
 function handleKeydown(e: KeyboardEvent) {
-  if (e.key === 'Escape' && props.isOpen) {
+  if (e.key === 'Escape' && props.isOpen && !props.loading) {
     handleCancel();
   }
 }
@@ -75,7 +85,9 @@ onBeforeUnmount(() => {
 
 useBackButton(100, (processNextHandler) => {
   if (props.isOpen) {
-    handleCancel();
+    if (!props.loading) {
+      handleCancel();
+    }
   } else {
     processNextHandler();
   }
@@ -124,6 +136,7 @@ useBackButton(100, (processNextHandler) => {
               <button 
                 type="button" 
                 class="dialog-btn dialog-btn-cancel" 
+                :disabled="loading || disabled"
                 @click="handleCancel"
               >
                 {{ cancelLabel || cancelText }}
@@ -135,11 +148,16 @@ useBackButton(100, (processNextHandler) => {
                 :class="[
                   destructive || type === 'destructive' 
                     ? 'dialog-btn-destructive' 
-                    : 'dialog-btn-confirm'
+                    : 'dialog-btn-confirm',
+                  { 'is-loading': loading }
                 ]"
+                :disabled="loading || disabled"
                 @click="handleConfirm"
               >
-                {{ confirmLabel || confirmText }}
+                <ion-spinner v-if="loading" name="crescent" class="dialog-spinner" />
+                <template v-else>
+                  {{ confirmLabel || confirmText }}
+                </template>
               </button>
             </div>
           </div>
@@ -285,6 +303,18 @@ useBackButton(100, (processNextHandler) => {
 .dialog-btn-destructive {
   background: #DC2626;
   color: #FFFFFF;
+}
+
+.dialog-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+  pointer-events: none;
+}
+
+.dialog-spinner {
+  width: 18px;
+  height: 18px;
+  --color: #ffffff;
 }
 
 /* Transitions */

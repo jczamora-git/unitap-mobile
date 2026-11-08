@@ -98,7 +98,7 @@ export class EventsRepository {
   public static toSupabaseOccurrencePayload(occurrence: EventOccurrenceRecord): Record<string, any> {
     const rawId = occurrence.id.startsWith('occ_') ? occurrence.id.replace(/^occ_/, '') : occurrence.id;
     const rawEventId = occurrence.event_id.startsWith('evt_') ? occurrence.event_id.replace(/^evt_/, '') : occurrence.event_id;
-    return {
+    const payload: Record<string, any> = {
       id: rawId,
       event_id: rawEventId,
       title: occurrence.title,
@@ -111,6 +111,9 @@ export class EventsRepository {
       closed_at: occurrence.closed_at || null,
       updated_at: occurrence.updated_at,
     };
+    if (occurrence.checkpoints_json !== undefined) payload.checkpoints_json = occurrence.checkpoints_json;
+    if (occurrence.active_checkpoint_id !== undefined) payload.active_checkpoint_id = occurrence.active_checkpoint_id;
+    return payload;
   }
 
   public static async createOccurrence(occurrence: EventOccurrenceRecord, adapter?: DatabaseAdapter): Promise<void> {
@@ -125,8 +128,8 @@ export class EventsRepository {
     await db.execute(
       `INSERT INTO event_occurrences (
         id, event_id, title, occurs_on, starts_at, ends_at, grace_minutes,
-        status, opened_at, closed_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        status, opened_at, closed_at, checkpoints_json, active_checkpoint_id, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         occurrence.id,
         occurrence.event_id,
@@ -138,6 +141,8 @@ export class EventsRepository {
         occurrence.status,
         occurrence.opened_at || null,
         occurrence.closed_at || null,
+        occurrence.checkpoints_json || null,
+        occurrence.active_checkpoint_id || null,
         occurrence.updated_at,
       ]
     );
@@ -152,6 +157,13 @@ export class EventsRepository {
       const remoteUpdates: Record<string, unknown> = {
         updated_at: occurrence.updated_at || new Date().toISOString(),
       };
+      if (occurrence.title !== undefined) remoteUpdates.title = occurrence.title;
+      if (occurrence.occurs_on !== undefined) remoteUpdates.occurs_on = occurrence.occurs_on;
+      if (occurrence.starts_at !== undefined) remoteUpdates.starts_at = occurrence.starts_at;
+      if (occurrence.ends_at !== undefined) remoteUpdates.ends_at = occurrence.ends_at;
+      if (occurrence.grace_minutes !== undefined) remoteUpdates.grace_minutes = occurrence.grace_minutes;
+      if (occurrence.checkpoints_json !== undefined) remoteUpdates.checkpoints_json = occurrence.checkpoints_json;
+      if (occurrence.active_checkpoint_id !== undefined) remoteUpdates.active_checkpoint_id = occurrence.active_checkpoint_id;
       if (occurrence.status !== undefined) remoteUpdates.status = occurrence.status;
       if (occurrence.opened_at !== undefined) remoteUpdates.opened_at = occurrence.opened_at;
       if (occurrence.closed_at !== undefined) remoteUpdates.closed_at = occurrence.closed_at;
@@ -165,6 +177,34 @@ export class EventsRepository {
     const updates: string[] = [];
     const params: unknown[] = [];
 
+    if (occurrence.title !== undefined) {
+      updates.push('title = ?');
+      params.push(occurrence.title);
+    }
+    if (occurrence.occurs_on !== undefined) {
+      updates.push('occurs_on = ?');
+      params.push(occurrence.occurs_on);
+    }
+    if (occurrence.starts_at !== undefined) {
+      updates.push('starts_at = ?');
+      params.push(occurrence.starts_at);
+    }
+    if (occurrence.ends_at !== undefined) {
+      updates.push('ends_at = ?');
+      params.push(occurrence.ends_at);
+    }
+    if (occurrence.grace_minutes !== undefined) {
+      updates.push('grace_minutes = ?');
+      params.push(occurrence.grace_minutes);
+    }
+    if (occurrence.checkpoints_json !== undefined) {
+      updates.push('checkpoints_json = ?');
+      params.push(occurrence.checkpoints_json);
+    }
+    if (occurrence.active_checkpoint_id !== undefined) {
+      updates.push('active_checkpoint_id = ?');
+      params.push(occurrence.active_checkpoint_id);
+    }
     if (occurrence.status !== undefined) {
       updates.push('status = ?');
       params.push(occurrence.status);
@@ -181,10 +221,24 @@ export class EventsRepository {
     params.push(occurrence.updated_at || new Date().toISOString());
 
     params.push(occurrence.id);
+    const rawId = occurrence.id.startsWith('occ_') ? occurrence.id.replace(/^occ_/, '') : occurrence.id;
+    params.push(rawId);
     await db.execute(
-      `UPDATE event_occurrences SET ${updates.join(', ')} WHERE id = ?`,
+      `UPDATE event_occurrences SET ${updates.join(', ')} WHERE (id = ? OR id = ?)`,
       params
     );
+  }
+
+  public static async deleteOccurrence(id: string, adapter?: DatabaseAdapter): Promise<void> {
+    if (!adapter && DataModeService.isDirectSupabase()) {
+      const rawId = id.startsWith('occ_') ? id.replace(/^occ_/, '') : id;
+      const { error } = await supabase.from('event_occurrences').delete().eq('id', rawId);
+      if (error) throw new Error(`Failed to delete occurrence from Supabase: ${error.message}`);
+      return;
+    }
+
+    const db = await this.getDb(adapter);
+    await db.execute('DELETE FROM event_occurrences WHERE id = ?', [id]);
   }
 
   public static async getOccurrencesByEventId(eventId: string, adapter?: DatabaseAdapter): Promise<EventOccurrenceRecord[]> {

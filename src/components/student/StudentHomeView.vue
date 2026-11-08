@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted } from 'vue';
+import { ref, computed, onMounted } from 'vue';
 import { useRouter } from 'vue-router';
 import {
   IonContent,
@@ -22,16 +22,39 @@ import {
   shieldCheckmarkOutline,
   alertCircleOutline,
   refreshOutline,
+  cameraOutline,
 } from 'ionicons/icons';
 import { useCurrentStudentPortal } from '@/composables/useCurrentStudentPortal';
 import { formatPeso } from '@/utilities/finance-formatters';
 import { formatDate, formatTime } from '@/utilities/date-formatters';
 import { haptics } from '@/utilities/haptics';
-import { UniPageHeader, UniStatCard, UniButton, UniEmptyState } from '@/components/ui';
+import { UniPageHeader, UniStatCard, UniButton, UniEmptyState, UniSheet } from '@/components/ui';
 import UniGlobalSyncPill from '@/components/shared/UniGlobalSyncPill.vue';
+import { useToast } from '@/composables/useToast';
+import { studentService } from '@/services/student.service';
+import {
+  compressStudentPhoto,
+  validateImageFile,
+  formatFileSize,
+  type CompressedImageResult,
+} from '@/utilities/image-compression';
 
 const router = useRouter();
+const { showToast } = useToast();
 const photoLoadError = ref(false);
+const photoInputRef = ref<HTMLInputElement | null>(null);
+const isCompressingPhoto = ref(false);
+const isUploadingPhoto = ref(false);
+const showPhotoPreviewSheet = ref(false);
+const compressedPhoto = ref<CompressedImageResult | null>(null);
+
+const hasProfilePhoto = computed(() => {
+  return Boolean(
+    (student.value?.photoUrl || student.value?.photoLocalUri) &&
+    !photoLoadError.value
+  );
+});
+
 const {
   student,
   studentName,
@@ -51,6 +74,67 @@ const {
 function navigate(path: string) {
   haptics.light();
   router.push(path);
+}
+
+function triggerPhotoSelect() {
+  if (isCompressingPhoto.value || isUploadingPhoto.value) return;
+  haptics.light();
+  photoInputRef.value?.click();
+}
+
+async function handlePhotoSelect(e: Event) {
+  const target = e.target as HTMLInputElement;
+  const file = target.files?.[0];
+  if (!file || !student.value) return;
+
+  const validation = validateImageFile(file);
+  if (!validation.valid) {
+    await showToast(validation.error || 'Invalid image file selected', 'error');
+    target.value = '';
+    return;
+  }
+
+  isCompressingPhoto.value = true;
+  try {
+    const result = await compressStudentPhoto(file, `${student.value.id}.webp`);
+    compressedPhoto.value = result;
+    showPhotoPreviewSheet.value = true;
+  } catch (err: any) {
+    console.error('Student photo compression error:', err);
+    await showToast(err?.message || 'Failed to process and compress image', 'error');
+  } finally {
+    isCompressingPhoto.value = false;
+    target.value = '';
+  }
+}
+
+function cancelPhotoUpload() {
+  if (compressedPhoto.value?.previewUrl) {
+    URL.revokeObjectURL(compressedPhoto.value.previewUrl);
+  }
+  compressedPhoto.value = null;
+  showPhotoPreviewSheet.value = false;
+}
+
+async function confirmPhotoUpload() {
+  if (!compressedPhoto.value || !student.value || isUploadingPhoto.value) return;
+  isUploadingPhoto.value = true;
+  try {
+    const res = await studentService.uploadStudentPhoto(student.value.id, compressedPhoto.value.file, true);
+    await showToast('Profile photo updated successfully!', 'success');
+    if (student.value) {
+      student.value.photoUrl = res.photoUrl;
+      student.value.photoStoragePath = res.photoStoragePath;
+    }
+    photoLoadError.value = false;
+    cancelPhotoUpload();
+    await loadPortalData();
+  } catch (err: any) {
+    console.error('Student self-service photo upload error:', err);
+    await showToast(err?.message || 'Failed to upload photo', 'error');
+  } finally {
+    isUploadingPhoto.value = false;
+  }
 }
 
 onMounted(() => {
@@ -112,15 +196,38 @@ onIonViewWillEnter(() => {
                   <span class="role-pill-student font-mono">STUDENT</span>
                 </div>
                 <div class="student-hero-content-row">
-                  <div class="student-hero-avatar">
-                    <img
-                      v-if="(student?.photoUrl || student?.photoLocalUri) && !photoLoadError"
-                      :src="(student?.photoUrl || student?.photoLocalUri) || undefined"
-                      alt="Student"
-                      class="hero-avatar-img"
-                      @error="photoLoadError = true"
+                  <div class="student-hero-avatar-wrap">
+                    <button
+                      type="button"
+                      class="student-hero-avatar-btn"
+                      :title="hasProfilePhoto ? 'Change profile photo' : 'Add profile photo'"
+                      :aria-label="hasProfilePhoto ? 'Change profile photo' : 'Add profile photo'"
+                      :disabled="isCompressingPhoto || isUploadingPhoto"
+                      @click.stop="triggerPhotoSelect"
+                    >
+                      <div class="student-hero-avatar" :class="{ 'has-photo': hasProfilePhoto }">
+                        <img
+                          v-if="(student?.photoUrl || student?.photoLocalUri) && !photoLoadError"
+                          :src="(student?.photoUrl || student?.photoLocalUri) || undefined"
+                          alt="Student profile photo"
+                          class="hero-avatar-img"
+                          @error="photoLoadError = true"
+                        />
+                        <span v-else class="hero-avatar-initials">{{ studentName?.charAt(0) || 'S' }}</span>
+                      </div>
+                      <span class="avatar-photo-edit-badge" aria-hidden="true">
+                        <ion-spinner v-if="isCompressingPhoto || isUploadingPhoto" name="crescent" class="photo-badge-spinner" />
+                        <ion-icon v-else :icon="cameraOutline" class="photo-badge-icon" />
+                      </span>
+                    </button>
+                    <input
+                      ref="photoInputRef"
+                      type="file"
+                      accept="image/jpeg,image/png,image/webp"
+                      style="display: none;"
+                      @click.stop
+                      @change="handlePhotoSelect"
                     />
-                    <span v-else class="hero-avatar-initials">{{ studentName?.charAt(0) || 'S' }}</span>
                   </div>
                   <div class="student-hero-details">
                     <h2 class="student-display-name">{{ studentName || 'Student' }}</h2>
@@ -316,6 +423,66 @@ onIonViewWillEnter(() => {
       </template>
       </div>
     </ion-content>
+
+    <!-- Student Self-Service Photo Preview Sheet (UniTap 2.0) -->
+    <UniSheet
+      :is-open="showPhotoPreviewSheet"
+      title="Confirm Profile Photo"
+      subtitle="Client-side compressed &amp; optimized"
+      @close="cancelPhotoUpload"
+    >
+      <div v-if="compressedPhoto" class="photo-preview-sheet-body">
+        <div class="preview-avatar-box">
+          <img :src="compressedPhoto.previewUrl" alt="Optimized Preview" class="preview-avatar-img" />
+        </div>
+
+        <div class="photo-metrics-card">
+          <div class="metric-row">
+            <span class="metric-label">Original Size:</span>
+            <span class="metric-val text-muted">{{ formatFileSize(compressedPhoto.originalSize) }}</span>
+          </div>
+          <div class="metric-row">
+            <span class="metric-label">Optimized Size:</span>
+            <div class="metric-val-group">
+              <strong class="metric-val text-primary font-mono">{{ formatFileSize(compressedPhoto.compressedSize) }}</strong>
+              <span v-if="compressedPhoto.compressionRatioPercent > 0" class="savings-tag">
+                -{{ compressedPhoto.compressionRatioPercent }}%
+              </span>
+            </div>
+          </div>
+          <div class="metric-row">
+            <span class="metric-label">Dimensions &amp; Format:</span>
+            <span class="metric-val font-mono">
+              {{ compressedPhoto.width }} × {{ compressedPhoto.height }} · {{ compressedPhoto.mimeType === 'image/webp' ? 'WebP' : 'JPEG' }}
+            </span>
+          </div>
+        </div>
+
+        <p class="photo-notice-text">
+          Image resized to maximum 640×640 px with aspect ratio preserved. Metadata and location data have been stripped.
+        </p>
+
+        <div class="photo-actions-row">
+          <UniButton
+            variant="outline"
+            size="sm"
+            :disabled="isUploadingPhoto"
+            @click="cancelPhotoUpload"
+          >
+            Cancel
+          </UniButton>
+          <UniButton
+            variant="primary"
+            size="sm"
+            :loading="isUploadingPhoto"
+            :disabled="isUploadingPhoto"
+            @click="confirmPhotoUpload"
+          >
+            {{ isUploadingPhoto ? 'Uploading...' : 'Confirm Upload' }}
+          </UniButton>
+        </div>
+      </div>
+    </UniSheet>
   </div>
 </template>
 
@@ -405,19 +572,180 @@ onIonViewWillEnter(() => {
   display: flex;
   align-items: center;
   gap: 14px;
+  margin-bottom: 14px;
+}
+
+.student-hero-avatar-wrap {
+  position: relative;
+  width: 56px;
+  height: 56px;
+  flex-shrink: 0;
+}
+
+.student-hero-avatar-btn {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  padding: 0;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  border-radius: 16px;
+  display: block;
+  outline: none;
+  transition: transform 0.15s ease;
+}
+
+.student-hero-avatar-btn:hover {
+  transform: scale(1.03);
+}
+
+.student-hero-avatar-btn:active {
+  transform: scale(0.96);
+}
+
+.student-hero-avatar-btn:focus-visible {
+  outline: 2px solid var(--aurora-mint, #70f3cf);
+  outline-offset: 2px;
+}
+
+.student-hero-avatar-btn:disabled {
+  opacity: 0.7;
+  cursor: default;
+  pointer-events: none;
 }
 
 .student-hero-avatar {
-  width: 52px;
-  height: 52px;
+  width: 100%;
+  height: 100%;
   border-radius: 16px;
-  background: rgba(112, 243, 207, 0.15);
+  background: rgba(112, 243, 207, 0.12);
   border: 1.5px solid rgba(112, 243, 207, 0.35);
   display: flex;
   align-items: center;
   justify-content: center;
-  flex-shrink: 0;
   overflow: hidden;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.student-hero-avatar-btn:hover .student-hero-avatar {
+  border-color: var(--aurora-mint, #70f3cf);
+  box-shadow: 0 0 12px rgba(112, 243, 207, 0.25);
+}
+
+.avatar-photo-edit-badge {
+  position: absolute;
+  bottom: -2px;
+  right: -2px;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: var(--ion-color-primary, #0f766e);
+  color: #ffffff;
+  border: 2px solid var(--uni-surface, #1b1d22);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.45);
+  transition: transform 0.15s ease, background 0.15s ease;
+  z-index: 2;
+}
+
+.student-hero-avatar-btn:hover .avatar-photo-edit-badge {
+  background: #14b8a6;
+  transform: scale(1.1);
+}
+
+.photo-badge-icon {
+  font-size: 11px;
+}
+
+.photo-badge-spinner {
+  width: 11px;
+  height: 11px;
+  --color: #ffffff;
+}
+
+/* Photo Preview Sheet Styles (UniTap 2.0) */
+.photo-preview-sheet-body {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+  padding: 8px 4px 16px 4px;
+}
+
+.preview-avatar-box {
+  width: 140px;
+  height: 140px;
+  border-radius: 20px;
+  overflow: hidden;
+  border: 2px solid var(--uni-primary, #0F766E);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.25);
+  background: #0f172a;
+}
+
+.preview-avatar-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.photo-metrics-card {
+  width: 100%;
+  background: var(--uni-surface-subtle, rgba(255, 255, 255, 0.04));
+  border: 1px solid var(--uni-border, rgba(255, 255, 255, 0.1));
+  border-radius: 12px;
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.metric-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 0.85rem;
+}
+
+.metric-label {
+  color: var(--uni-text-muted, #94a3b8);
+}
+
+.metric-val {
+  color: var(--uni-text-primary, #ffffff);
+}
+
+.metric-val-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.savings-tag {
+  background: rgba(16, 185, 129, 0.15);
+  color: #10b981;
+  font-size: 0.75rem;
+  font-weight: 700;
+  padding: 1px 6px;
+  border-radius: 6px;
+}
+
+.photo-notice-text {
+  font-size: 0.8rem;
+  color: var(--uni-text-muted, #94a3b8);
+  text-align: center;
+  margin: 0;
+  line-height: 1.4;
+}
+
+.photo-actions-row {
+  width: 100%;
+  display: flex;
+  gap: 10px;
+  justify-content: flex-end;
+  margin-top: 4px;
 }
 
 .hero-avatar-img {
@@ -435,22 +763,25 @@ onIonViewWillEnter(() => {
 .student-hero-details {
   flex: 1;
   min-width: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
 }
 
 .student-display-name {
-  font-size: 20px;
+  font-size: 19px;
   font-weight: 800;
   color: var(--app-text-primary, #f5f6f7);
   margin: 0 0 4px 0;
-  line-height: 1.2;
+  line-height: 1.25;
 }
 
 .student-id-row {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: 8px;
-  margin-bottom: 18px;
+  gap: 6px 8px;
+  margin-bottom: 0;
 }
 
 .school-id-pill {
@@ -465,6 +796,7 @@ onIonViewWillEnter(() => {
 .academic-text {
   font-size: 12px;
   color: var(--app-text-secondary, #949ba6);
+  line-height: 1.3;
 }
 
 .card-inner-bottom {

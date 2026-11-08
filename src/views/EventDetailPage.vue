@@ -22,10 +22,12 @@ import {
   optionsOutline,
   flagOutline,
   downloadOutline,
-  ellipsisVerticalOutline
+  ellipsisVerticalOutline,
+  alertCircleOutline
 } from 'ionicons/icons';
 import { authService } from '@/services/auth.service';
 import { SupabaseAuthService } from '@/integrations/supabase/auth.service';
+import { OfficerManagementService, OFFICER_PERMISSIONS } from '@/services/officer-management.service';
 import { AttendanceRepository } from '@/database/repositories/attendance.repository';
 import { eventService } from '@/services/event.service';
 import { studentService } from '@/services/student.service';
@@ -72,24 +74,119 @@ const isDevAdmin = computed(() => {
   return role === 'DEVADMIN';
 });
 
+const officerCanEdit = ref(false);
+const officerCanAddSession = ref(false);
+const officerCanManageCheckpoints = ref(false);
+
+const canEditEvent = computed(() => {
+  if (isDevAdmin.value) return true;
+  if (isStudent.value) return false;
+  return officerCanEdit.value;
+});
+
+const canAddSession = computed(() => {
+  if (isDevAdmin.value) return true;
+  if (isStudent.value) return false;
+  return officerCanAddSession.value;
+});
+
+const canManageCheckpoints = computed(() => {
+  if (isDevAdmin.value) return true;
+  if (isStudent.value) return false;
+  return officerCanManageCheckpoints.value;
+});
+
+const canEditSession = computed(() => {
+  if (isDevAdmin.value) return true;
+  if (isStudent.value) return false;
+  return officerCanEdit.value || officerCanManageCheckpoints.value;
+});
+
+async function checkOfficerActionPermissions(ev: Event) {
+  if (isDevAdmin.value) {
+    officerCanEdit.value = true;
+    officerCanAddSession.value = true;
+    officerCanManageCheckpoints.value = true;
+    return;
+  }
+  if (isStudent.value) {
+    officerCanEdit.value = false;
+    officerCanAddSession.value = false;
+    officerCanManageCheckpoints.value = false;
+    return;
+  }
+  const currentUserId = SupabaseAuthService.user.value?.id || authService.user.value?.id;
+  if (!currentUserId || !ev) {
+    officerCanEdit.value = false;
+    officerCanAddSession.value = false;
+    officerCanManageCheckpoints.value = false;
+    return;
+  }
+  try {
+    const [canEdit, canAdd, canCp] = await Promise.all([
+      OfficerManagementService.userCanManageEvent(
+        currentUserId,
+        ev.id,
+        ev.semesterId,
+        OFFICER_PERMISSIONS.EVENTS_EDIT
+      ),
+      OfficerManagementService.userCanManageEvent(
+        currentUserId,
+        ev.id,
+        ev.semesterId,
+        OFFICER_PERMISSIONS.EVENTS_CREATE
+      ),
+      OfficerManagementService.userCanManageEvent(
+        currentUserId,
+        ev.id,
+        ev.semesterId,
+        OFFICER_PERMISSIONS.EVENTS_EDIT
+      ),
+    ]);
+    officerCanEdit.value = canEdit;
+    officerCanAddSession.value = canAdd;
+    officerCanManageCheckpoints.value = canCp;
+  } catch (err) {
+    console.warn('Failed to verify officer event action permissions:', err);
+    officerCanEdit.value = false;
+    officerCanAddSession.value = false;
+    officerCanManageCheckpoints.value = false;
+  }
+}
+
 const showActionsMenu = ref(false);
 const showDeleteEventDialog = ref(false);
 const isDeletingEvent = ref(false);
+const deleteEventError = ref<string | null>(null);
 
 const eventFirstDate = computed(() => {
   return occurrences.value[0]?.date || event.value?.createdAt || null;
 });
 
+function handleCancelDeleteEvent() {
+  if (!isDevAdmin.value) return;
+  if (isDeletingEvent.value) return;
+  showDeleteEventDialog.value = false;
+  deleteEventError.value = null;
+}
+
 async function handleDeleteEvent() {
-  if (!event.value) return;
+  if (!isDevAdmin.value) {
+    await showToast('Only DEVADMIN can delete events.', 'error');
+    return;
+  }
+  if (!event.value || isDeletingEvent.value) return;
   isDeletingEvent.value = true;
+  deleteEventError.value = null;
   try {
     await eventService.deleteEvent(event.value.id);
     await showToast('Event deleted successfully', 'success');
     showDeleteEventDialog.value = false;
     router.replace('/tabs/events');
   } catch (err: any) {
-    await showToast(err?.message || 'Cannot delete event because paid absence fines are associated with it. Please archive or deactivate the event instead.', 'error');
+    const errorMsg = err?.message || 'Cannot delete event because paid absence fines are associated with it. Please archive or deactivate the event instead.';
+    deleteEventError.value = errorMsg;
+    await showToast(errorMsg, 'error');
   } finally {
     isDeletingEvent.value = false;
   }
@@ -126,6 +223,8 @@ const editingOccurrence = ref<EventOccurrence | null>(null);
 const editingCheckpoints = ref<AttendanceCheckpoint[]>([]);
 const newCpLabel = ref('');
 const newCpType = ref<CheckpointType>('IN');
+const newCpOpensAt = ref('08:00');
+const newCpClosesAt = ref('08:30');
 const isSavingCheckpoints = ref(false);
 
 const checkpointTypeOptions = [
@@ -133,13 +232,70 @@ const checkpointTypeOptions = [
   { value: 'OUT', label: 'Check-Out (OUT)' },
 ];
 
+function timeToMinutes(t?: string | null): number {
+  if (!t || !t.includes(':')) return -1;
+  const [h, m] = t.split(':').map(Number);
+  if (isNaN(h) || isNaN(m)) return -1;
+  return h * 60 + m;
+}
+
+function validateCheckpointWindow(
+  opensAt: string,
+  closesAt: string,
+  sessionStart?: string,
+  sessionEnd?: string,
+  label: string = 'Checkpoint'
+): string | null {
+  if (!opensAt || !closesAt) {
+    return `${label}: Opens At and Closes At times are required.`;
+  }
+  const openMin = timeToMinutes(opensAt);
+  const closeMin = timeToMinutes(closesAt);
+
+  if (openMin < 0 || closeMin < 0) {
+    return `${label}: Please enter valid time formats (HH:MM).`;
+  }
+  if (closeMin <= openMin) {
+    return `${label}: Closing time (${formatTime(closesAt)}) must be later than opening time (${formatTime(opensAt)}).`;
+  }
+
+  if (sessionStart && sessionEnd) {
+    const sessionStartMin = timeToMinutes(sessionStart);
+    const sessionEndMin = timeToMinutes(sessionEnd);
+
+    if (sessionStartMin >= 0 && sessionEndMin >= 0) {
+      if (openMin < sessionStartMin) {
+        return `${label}: Opening time (${formatTime(opensAt)}) cannot be earlier than session start (${formatTime(sessionStart)}).`;
+      }
+      if (closeMin > sessionEndMin) {
+        return `${label}: Closing time (${formatTime(closesAt)}) cannot be later than session end (${formatTime(sessionEnd)}).`;
+      }
+    }
+  }
+
+  return null;
+}
+
 function openCheckpointsModal(occ: EventOccurrence) {
+  if (!canManageCheckpoints.value) {
+    showToast('You do not have permission to manage attendance checkpoints for this event.', 'error');
+    return;
+  }
   editingOccurrence.value = occ;
-  editingCheckpoints.value = (occ.checkpoints && occ.checkpoints.length > 0)
+  const parsed = (occ.checkpoints && occ.checkpoints.length > 0)
     ? JSON.parse(JSON.stringify(occ.checkpoints))
-    : eventService.getDefaultCheckpoints();
+    : eventService.getDefaultCheckpoints(occ.id, occ.startTime, occ.endTime);
+  editingCheckpoints.value = parsed.map((c: any) => ({
+    ...c,
+    opensAt: c.opensAt || c.startTime || occ.startTime || '08:00',
+    closesAt: c.closesAt || c.endTime || occ.endTime || '08:30',
+    startTime: c.opensAt || c.startTime || occ.startTime || '08:00',
+    endTime: c.closesAt || c.endTime || occ.endTime || '08:30',
+  }));
   newCpLabel.value = '';
   newCpType.value = 'IN';
+  newCpOpensAt.value = occ.startTime || '08:00';
+  newCpClosesAt.value = occ.endTime || '08:30';
   showCheckpointsModal.value = true;
 }
 
@@ -148,11 +304,26 @@ function addCheckpoint() {
     showToast('Please enter a checkpoint label', 'warning');
     return;
   }
+  const err = validateCheckpointWindow(
+    newCpOpensAt.value,
+    newCpClosesAt.value,
+    editingOccurrence.value?.startTime,
+    editingOccurrence.value?.endTime,
+    newCpLabel.value.trim()
+  );
+  if (err) {
+    showToast(err, 'warning');
+    return;
+  }
   const id = 'cp_' + Math.random().toString(36).substring(2, 9);
   editingCheckpoints.value.push({
     id,
     label: newCpLabel.value.trim(),
     type: newCpType.value,
+    opensAt: newCpOpensAt.value,
+    closesAt: newCpClosesAt.value,
+    startTime: newCpOpensAt.value,
+    endTime: newCpClosesAt.value,
     orderIndex: editingCheckpoints.value.length,
   });
   newCpLabel.value = '';
@@ -168,10 +339,27 @@ function removeCheckpoint(idx: number) {
 }
 
 async function saveCheckpoints() {
+  if (!canManageCheckpoints.value) {
+    await showToast('You do not have permission to manage attendance checkpoints for this event.', 'error');
+    return;
+  }
   if (!editingOccurrence.value) return;
   if (editingCheckpoints.value.length === 0) {
     showToast('At least one checkpoint is required', 'warning');
     return;
+  }
+  for (const cp of editingCheckpoints.value) {
+    const err = validateCheckpointWindow(
+      cp.opensAt || cp.startTime || '',
+      cp.closesAt || cp.endTime || '',
+      editingOccurrence.value.startTime,
+      editingOccurrence.value.endTime,
+      cp.label
+    );
+    if (err) {
+      showToast(err, 'warning');
+      return;
+    }
   }
   isSavingCheckpoints.value = true;
   try {
@@ -183,6 +371,221 @@ async function saveCheckpoints() {
     await showToast(err?.message || 'Failed to update checkpoints', 'error');
   } finally {
     isSavingCheckpoints.value = false;
+  }
+}
+
+// Session Actions Menu & Edit / Delete Session state
+const showSessionActionsSheet = ref(false);
+const selectedSessionForMenu = ref<EventOccurrence | null>(null);
+
+function openSessionActionsMenu(occ: EventOccurrence) {
+  selectedSessionForMenu.value = occ;
+  showSessionActionsSheet.value = true;
+}
+
+function handleOpenEditFromMenu() {
+  const occ = selectedSessionForMenu.value;
+  showSessionActionsSheet.value = false;
+  if (occ) {
+    openEditSessionModal(occ);
+  }
+}
+
+function handleOpenDeleteFromMenu() {
+  const occ = selectedSessionForMenu.value;
+  showSessionActionsSheet.value = false;
+  if (occ) {
+    openDeleteSessionDialog(occ);
+  }
+}
+
+// Edit Session state
+const showEditSessionModal = ref(false);
+const editingSessionOccurrence = ref<EventOccurrence | null>(null);
+const editSessionTitle = ref('');
+const editSessionDate = ref('');
+const editSessionStartTime = ref('');
+const editSessionEndTime = ref('');
+const editSessionGrace = ref(15);
+const editSessionCheckpoints = ref<AttendanceCheckpoint[]>([]);
+const editSessionNewCpLabel = ref('');
+const editSessionNewCpType = ref<CheckpointType>('IN');
+const editSessionNewCpOpensAt = ref('08:00');
+const editSessionNewCpClosesAt = ref('08:30');
+const isSavingSession = ref(false);
+const editSessionError = ref<string | null>(null);
+
+function openEditSessionModal(occ: EventOccurrence) {
+  if (!canEditSession.value) {
+    showToast('You do not have permission to edit this session.', 'error');
+    return;
+  }
+  editingSessionOccurrence.value = occ;
+  editSessionTitle.value = occ.title;
+  editSessionDate.value = occ.date;
+  editSessionStartTime.value = occ.startTime;
+  editSessionEndTime.value = occ.endTime;
+  editSessionGrace.value = occ.gracePeriodMinutes ?? 15;
+  const parsed = (occ.checkpoints && occ.checkpoints.length > 0)
+    ? JSON.parse(JSON.stringify(occ.checkpoints))
+    : eventService.getDefaultCheckpoints(occ.id, occ.startTime, occ.endTime);
+  editSessionCheckpoints.value = parsed.map((c: any) => ({
+    ...c,
+    opensAt: c.opensAt || c.startTime || occ.startTime || '08:00',
+    closesAt: c.closesAt || c.endTime || occ.endTime || '08:30',
+    startTime: c.opensAt || c.startTime || occ.startTime || '08:00',
+    endTime: c.closesAt || c.endTime || occ.endTime || '08:30',
+  }));
+  editSessionNewCpLabel.value = '';
+  editSessionNewCpType.value = 'IN';
+  editSessionNewCpOpensAt.value = occ.startTime || '08:00';
+  editSessionNewCpClosesAt.value = occ.endTime || '08:30';
+  editSessionError.value = null;
+  showEditSessionModal.value = true;
+}
+
+function addEditSessionCheckpoint() {
+  if (!editSessionNewCpLabel.value.trim()) {
+    showToast('Please enter a checkpoint label', 'warning');
+    return;
+  }
+  const err = validateCheckpointWindow(
+    editSessionNewCpOpensAt.value,
+    editSessionNewCpClosesAt.value,
+    editSessionStartTime.value,
+    editSessionEndTime.value,
+    editSessionNewCpLabel.value.trim()
+  );
+  if (err) {
+    showToast(err, 'warning');
+    return;
+  }
+  const id = 'cp_' + Math.random().toString(36).substring(2, 9);
+  editSessionCheckpoints.value.push({
+    id,
+    label: editSessionNewCpLabel.value.trim(),
+    type: editSessionNewCpType.value,
+    opensAt: editSessionNewCpOpensAt.value,
+    closesAt: editSessionNewCpClosesAt.value,
+    startTime: editSessionNewCpOpensAt.value,
+    endTime: editSessionNewCpClosesAt.value,
+    orderIndex: editSessionCheckpoints.value.length,
+  });
+  editSessionNewCpLabel.value = '';
+}
+
+function removeEditSessionCheckpoint(idx: number) {
+  if (editSessionCheckpoints.value.length <= 1) {
+    showToast('At least one checkpoint is required', 'warning');
+    return;
+  }
+  editSessionCheckpoints.value.splice(idx, 1);
+  editSessionCheckpoints.value.forEach((c, i) => { c.orderIndex = i; });
+}
+
+async function handleSaveSessionChanges() {
+  if (!canEditSession.value) {
+    await showToast('You do not have permission to edit this session.', 'error');
+    return;
+  }
+  if (!editingSessionOccurrence.value) return;
+  if (!editSessionTitle.value.trim()) {
+    showToast('Session title is required', 'warning');
+    return;
+  }
+  if (!editSessionDate.value) {
+    showToast('Session date is required', 'warning');
+    return;
+  }
+  if (!editSessionStartTime.value || !editSessionEndTime.value) {
+    showToast('Start and end times are required', 'warning');
+    return;
+  }
+  if (editSessionCheckpoints.value.length === 0) {
+    showToast('At least one checkpoint is required', 'warning');
+    return;
+  }
+  for (const cp of editSessionCheckpoints.value) {
+    const err = validateCheckpointWindow(
+      cp.opensAt || cp.startTime || '',
+      cp.closesAt || cp.endTime || '',
+      editSessionStartTime.value,
+      editSessionEndTime.value,
+      cp.label
+    );
+    if (err) {
+      editSessionError.value = err;
+      showToast(err, 'warning');
+      return;
+    }
+  }
+  isSavingSession.value = true;
+  editSessionError.value = null;
+  try {
+    await eventService.updateOccurrence({
+      occurrenceId: editingSessionOccurrence.value.id,
+      title: editSessionTitle.value.trim(),
+      date: editSessionDate.value,
+      startTime: editSessionStartTime.value,
+      endTime: editSessionEndTime.value,
+      gracePeriodMinutes: Number(editSessionGrace.value) || 0,
+      checkpoints: editSessionCheckpoints.value,
+    });
+    showEditSessionModal.value = false;
+    await showToast('Attendance session updated successfully', 'success');
+    await loadData();
+  } catch (err: any) {
+    const msg = err?.message || 'Failed to update session';
+    editSessionError.value = msg;
+    await showToast(msg, 'error');
+  } finally {
+    isSavingSession.value = false;
+  }
+}
+
+// Delete Session state (DEVADMIN Only)
+const showDeleteSessionDialog = ref(false);
+const sessionToDelete = ref<EventOccurrence | null>(null);
+const isDeletingSession = ref(false);
+const deleteSessionError = ref<string | null>(null);
+
+function openDeleteSessionDialog(occ: EventOccurrence) {
+  if (!isDevAdmin.value) {
+    showToast('Only DEVADMIN can delete attendance sessions.', 'error');
+    return;
+  }
+  sessionToDelete.value = occ;
+  deleteSessionError.value = null;
+  showDeleteSessionDialog.value = true;
+}
+
+function handleCancelDeleteSession() {
+  if (isDeletingSession.value) return;
+  showDeleteSessionDialog.value = false;
+  deleteSessionError.value = null;
+  sessionToDelete.value = null;
+}
+
+async function handleConfirmDeleteSession() {
+  if (!isDevAdmin.value) {
+    await showToast('Only DEVADMIN can delete attendance sessions.', 'error');
+    return;
+  }
+  if (!sessionToDelete.value || isDeletingSession.value) return;
+  isDeletingSession.value = true;
+  deleteSessionError.value = null;
+  try {
+    await eventService.deleteOccurrence(sessionToDelete.value.id);
+    await showToast('Attendance session deleted successfully', 'success');
+    showDeleteSessionDialog.value = false;
+    sessionToDelete.value = null;
+    await loadData();
+  } catch (err: any) {
+    const errorMsg = err?.message || 'Cannot delete attendance session because paid absence fines are associated with it. Please retain or archive the session instead.';
+    deleteSessionError.value = errorMsg;
+    await showToast(errorMsg, 'error');
+  } finally {
+    isDeletingSession.value = false;
   }
 }
 
@@ -236,6 +639,7 @@ async function loadData() {
   const ev = await eventService.getEvent(eventId);
   if (!ev) return;
   event.value = ev;
+  await checkOfficerActionPermissions(ev);
 
   const occs = await eventService.getOccurrences(eventId);
   occurrences.value = occs;
@@ -328,6 +732,10 @@ async function saveCorrection() {
 }
 
 async function handleAddSession() {
+  if (!canAddSession.value) {
+    await showToast('You do not have permission to add attendance sessions to this event.', 'error');
+    return;
+  }
   try {
     await eventService.createOccurrence({
       eventId,
@@ -357,15 +765,22 @@ async function handleAddSession() {
     >
       <template #trailing v-if="!isStudent && event">
         <div class="header-trailing-actions">
-          <UniButton size="sm" :icon="addOutline" @click="showAddSessionModal = true">
+          <UniButton
+            v-if="canAddSession"
+            size="sm"
+            :icon="addOutline"
+            @click="showAddSessionModal = true"
+          >
             Add Session
           </UniButton>
           <UniButton
+            v-if="canEditEvent || isDevAdmin"
             variant="ghost"
             size="sm"
             :icon="ellipsisVerticalOutline"
             class="action-menu-trigger-btn"
             title="Event Options"
+            aria-label="Event Options"
             @click="showActionsMenu = true"
           />
         </div>
@@ -423,8 +838,8 @@ async function handleAddSession() {
               title="No Attendance Sessions"
               description="Add an attendance session to start tracking student check-ins."
               :icon="calendarOutline"
-              action-text="Add Session"
-              @action="showAddSessionModal = true"
+              :action-text="canAddSession ? 'Add Session' : undefined"
+              @action="canAddSession && (showAddSessionModal = true)"
             />
           </div>
 
@@ -441,13 +856,25 @@ async function handleAddSession() {
                   </div>
                   <div v-if="occ.checkpoints && occ.checkpoints.length > 0" class="occ-checkpoints-row">
                     <span v-for="cp in occ.checkpoints" :key="cp.id" class="occ-cp-badge" :class="{ 'type-out': cp.type === 'OUT' }">
-                      {{ cp.label }} ({{ cp.type }})
+                      {{ cp.label }} ({{ cp.type }}): {{ formatTime(cp.opensAt || cp.startTime) }} – {{ formatTime(cp.closesAt || cp.endTime) }}
                     </span>
                   </div>
                 </div>
-                <span class="status-badge" :class="occ.status === 'OPEN' ? 'badge-success' : 'badge-neutral'">
-                  {{ occ.status }}
-                </span>
+                <div class="occ-top-trailing">
+                  <span class="status-badge" :class="occ.status === 'OPEN' ? 'badge-success' : 'badge-neutral'">
+                    {{ occ.status }}
+                  </span>
+                  <UniButton
+                    v-if="!isStudent && (canEditSession || isDevAdmin)"
+                    variant="ghost"
+                    size="sm"
+                    :icon="ellipsisVerticalOutline"
+                    class="action-menu-trigger-btn session-menu-trigger-btn"
+                    title="Session Options"
+                    aria-label="Session Options"
+                    @click="openSessionActionsMenu(occ)"
+                  />
+                </div>
               </div>
 
               <!-- STUDENT VIEW: Personal Attendance Record -->
@@ -531,6 +958,7 @@ async function handleAddSession() {
 
                   <!-- Checkpoints button -->
                   <button 
+                    v-if="canManageCheckpoints"
                     class="action-btn btn-subtle"
                     @click="openCheckpointsModal(occ)"
                   >
@@ -679,7 +1107,10 @@ async function handleAddSession() {
             >
               <div class="cp-info-group">
                 <span class="cp-type-tag" :class="{ 'type-out': cp.type === 'OUT' }">{{ cp.type }}</span>
-                <span class="cp-label-name">{{ cp.label }}</span>
+                <div class="cp-text-group">
+                  <span class="cp-label-name">{{ cp.label }}</span>
+                  <span class="cp-time-window font-mono">{{ formatTime(cp.opensAt || cp.startTime) }} – {{ formatTime(cp.closesAt || cp.endTime) }}</span>
+                </div>
               </div>
               <button
                 v-if="editingCheckpoints.length > 1"
@@ -698,10 +1129,18 @@ async function handleAddSession() {
             <h5 class="add-cp-title">Add Checkpoint</h5>
             <div class="add-cp-grid">
               <UniFormField label="Checkpoint Label" :required="true">
-                <UniInput v-model="newCpLabel" placeholder="e.g. Morning OUT" />
+                <UniInput v-model="newCpLabel" placeholder="e.g. Morning IN" />
               </UniFormField>
               <UniFormField label="Type" :required="true">
                 <UniSelect v-model="newCpType" :options="checkpointTypeOptions" />
+              </UniFormField>
+            </div>
+            <div class="time-grid" style="margin-top: 8px; margin-bottom: 12px;">
+              <UniFormField label="Opens At" :required="true">
+                <UniInput v-model="newCpOpensAt" type="time" />
+              </UniFormField>
+              <UniFormField label="Closes At" :required="true">
+                <UniInput v-model="newCpClosesAt" type="time" />
               </UniFormField>
             </div>
             <UniButton
@@ -768,28 +1207,66 @@ async function handleAddSession() {
         </div>
       </UniSheet>
 
-      <!-- Delete Event Dialog -->
+      <!-- Delete Event Confirmation Modal (DEVADMIN Only) -->
       <UniDialog
+        v-if="isDevAdmin"
         v-model:is-open="showDeleteEventDialog"
         title="Delete Event?"
-        :description="`Are you sure you want to permanently delete event '${event?.title}'? All event sessions, attendance logs, and unpaid absence fines will be removed. If paid absence fines exist, deletion will be blocked.`"
-        :confirm-text="isDeletingEvent ? 'Deleting...' : 'Delete Event'"
+        confirm-text="Delete Event"
         cancel-text="Cancel"
         :destructive="true"
         type="destructive"
+        :loading="isDeletingEvent"
+        :prevent-auto-close="true"
         @confirm="handleDeleteEvent"
-        @cancel="showDeleteEventDialog = false"
-      />
+        @cancel="handleCancelDeleteEvent"
+      >
+        <div v-if="event" class="delete-event-dialog-body">
+          <p class="dialog-instruction">
+            Are you sure you want to permanently delete this event? This action cannot be undone.
+          </p>
+
+          <div class="dialog-summary-card">
+            <div class="summary-line">
+              <span class="summary-key">Event:</span>
+              <strong class="summary-val">{{ event.title }}</strong>
+            </div>
+            <div class="summary-line">
+              <span class="summary-key">Type:</span>
+              <span class="summary-val">{{ event.type }}</span>
+            </div>
+            <div class="summary-line">
+              <span class="summary-key">Sessions:</span>
+              <span class="summary-val">{{ occurrences.length }} attendance session(s)</span>
+            </div>
+          </div>
+
+          <div v-if="deleteEventError" class="dialog-error-callout">
+            <ion-icon :icon="alertCircleOutline" class="error-callout-icon" />
+            <div class="callout-body">
+              <strong>Cannot Delete:</strong> {{ deleteEventError }}
+            </div>
+          </div>
+
+          <div v-else class="dialog-warning-callout">
+            <ion-icon :icon="alertCircleOutline" class="callout-icon" />
+            <div class="callout-body">
+              <strong>Warning:</strong> All attendance sessions, scan records, and associated unpaid student absence fines will also be permanently deleted. If paid absence fines exist, deletion will be blocked by Supabase to protect audit history.
+            </div>
+          </div>
+        </div>
+      </UniDialog>
 
       <!-- Event Options Action Sheet -->
       <UniSheet
-        :is-open="showActionsMenu"
+        v-model:is-open="showActionsMenu"
         title="Event Options"
         subtitle="Manage event details and administrative actions"
         @close="showActionsMenu = false"
       >
         <div v-if="event" class="actions-menu-list">
           <button
+            v-if="canEditEvent"
             type="button"
             class="menu-item-row"
             @click="
@@ -812,6 +1289,7 @@ async function handleAddSession() {
             class="menu-item-row menu-item-destructive"
             @click="
               showActionsMenu = false;
+              deleteEventError = null;
               showDeleteEventDialog = true;
             "
           >
@@ -825,6 +1303,211 @@ async function handleAddSession() {
           </button>
         </div>
       </UniSheet>
+
+      <!-- Session Options Action Sheet -->
+      <UniSheet
+        v-model:is-open="showSessionActionsSheet"
+        title="Session Options"
+        :subtitle="selectedSessionForMenu ? `${selectedSessionForMenu.title} • ${formatDate(selectedSessionForMenu.date)}` : 'Manage session'"
+        @close="showSessionActionsSheet = false"
+      >
+        <div v-if="selectedSessionForMenu" class="actions-menu-list">
+          <button
+            v-if="canEditSession"
+            type="button"
+            class="menu-item-row"
+            @click="handleOpenEditFromMenu"
+          >
+            <div class="menu-icon-box">
+              <ion-icon :icon="createOutline" />
+            </div>
+            <div class="menu-item-text">
+              <strong>Edit Session</strong>
+              <span>Update title, date, times, grace period, and checkpoints</span>
+            </div>
+          </button>
+
+          <button
+            v-if="isDevAdmin"
+            type="button"
+            class="menu-item-row menu-item-destructive"
+            @click="handleOpenDeleteFromMenu"
+          >
+            <div class="menu-icon-box menu-icon-destructive">
+              <ion-icon :icon="trashOutline" />
+            </div>
+            <div class="menu-item-text">
+              <strong>Delete Session</strong>
+              <span>Permanently remove this attendance session (DEVADMIN only)</span>
+            </div>
+          </button>
+        </div>
+      </UniSheet>
+
+      <!-- Edit Session Sheet -->
+      <UniSheet
+        :is-open="showEditSessionModal"
+        title="Edit Attendance Session"
+        :subtitle="editingSessionOccurrence ? `${editingSessionOccurrence.title}` : 'Update session details'"
+        size="expanded"
+        @close="showEditSessionModal = false"
+      >
+        <div class="sheet-form-wrap">
+          <UniFormField label="Session Name" :required="true">
+            <UniInput v-model="editSessionTitle" placeholder="e.g. Afternoon Session" />
+          </UniFormField>
+
+          <UniFormField label="Date" :required="true">
+            <UniInput v-model="editSessionDate" type="date" />
+          </UniFormField>
+
+          <div class="time-grid">
+            <UniFormField label="Start Time" :required="true">
+              <UniInput v-model="editSessionStartTime" type="time" />
+            </UniFormField>
+            <UniFormField label="End Time" :required="true">
+              <UniInput v-model="editSessionEndTime" type="time" />
+            </UniFormField>
+          </div>
+
+          <UniFormField label="Grace Period (Minutes)">
+            <UniInput v-model="editSessionGrace" type="number" />
+          </UniFormField>
+
+          <!-- Checkpoints Configuration in Edit Session -->
+          <div class="edit-session-checkpoints-section">
+            <div class="section-subheading">
+              <span>Attendance Checkpoints</span>
+              <span class="metadata-text">{{ editSessionCheckpoints.length }} Checkpoint(s)</span>
+            </div>
+
+            <div class="checkpoints-list-box minimal-card">
+              <div
+                v-for="(cp, idx) in editSessionCheckpoints"
+                :key="cp.id"
+                class="checkpoint-manage-row"
+              >
+                <div class="cp-info-group">
+                  <span class="cp-type-tag" :class="{ 'type-out': cp.type === 'OUT' }">{{ cp.type }}</span>
+                  <div class="cp-text-group">
+                    <span class="cp-label-name">{{ cp.label }}</span>
+                    <span class="cp-time-window font-mono">{{ formatTime(cp.opensAt || cp.startTime) }} – {{ formatTime(cp.closesAt || cp.endTime) }}</span>
+                  </div>
+                </div>
+                <button
+                  v-if="editSessionCheckpoints.length > 1"
+                  type="button"
+                  class="cp-delete-btn"
+                  @click="removeEditSessionCheckpoint(idx)"
+                  aria-label="Remove Checkpoint"
+                >
+                  <ion-icon :icon="trashOutline" />
+                </button>
+              </div>
+            </div>
+
+            <div class="add-cp-box">
+              <h5 class="add-cp-title">Add Checkpoint</h5>
+              <div class="add-cp-grid">
+                <UniFormField label="Checkpoint Label" :required="true">
+                  <UniInput v-model="editSessionNewCpLabel" placeholder="e.g. Afternoon IN" />
+                </UniFormField>
+                <UniFormField label="Type" :required="true">
+                  <UniSelect v-model="editSessionNewCpType" :options="checkpointTypeOptions" />
+                </UniFormField>
+              </div>
+              <div class="time-grid" style="margin-top: 8px; margin-bottom: 12px;">
+                <UniFormField label="Opens At" :required="true">
+                  <UniInput v-model="editSessionNewCpOpensAt" type="time" />
+                </UniFormField>
+                <UniFormField label="Closes At" :required="true">
+                  <UniInput v-model="editSessionNewCpClosesAt" type="time" />
+                </UniFormField>
+              </div>
+              <UniButton
+                variant="outline"
+                size="sm"
+                :icon="addOutline"
+                @click="addEditSessionCheckpoint"
+              >
+                Add Checkpoint
+              </UniButton>
+            </div>
+          </div>
+
+          <div v-if="editSessionError" class="dialog-error-callout" style="margin-top: 16px;">
+            <ion-icon :icon="alertCircleOutline" class="error-callout-icon" />
+            <div class="callout-body">
+              <strong>Error:</strong> {{ editSessionError }}
+            </div>
+          </div>
+
+          <div style="margin-top: 20px;">
+            <UniButton
+              variant="primary"
+              :full-width="true"
+              :disabled="isSavingSession"
+              @click="handleSaveSessionChanges"
+            >
+              {{ isSavingSession ? 'Saving Changes...' : 'Save Session Changes' }}
+            </UniButton>
+          </div>
+        </div>
+      </UniSheet>
+
+      <!-- Delete Session Confirmation Modal (DEVADMIN Only) -->
+      <UniDialog
+        v-if="isDevAdmin"
+        v-model:is-open="showDeleteSessionDialog"
+        title="Delete Attendance Session?"
+        confirm-text="Delete Session"
+        cancel-text="Cancel"
+        :destructive="true"
+        type="destructive"
+        :loading="isDeletingSession"
+        :prevent-auto-close="true"
+        @confirm="handleConfirmDeleteSession"
+        @cancel="handleCancelDeleteSession"
+      >
+        <div v-if="sessionToDelete" class="delete-event-dialog-body">
+          <p class="dialog-instruction">
+            Are you sure you want to permanently delete this attendance session? This action cannot be undone.
+          </p>
+
+          <div class="dialog-summary-card">
+            <div class="summary-line">
+              <span class="summary-key">Session:</span>
+              <strong class="summary-val">{{ sessionToDelete.title }}</strong>
+            </div>
+            <div class="summary-line">
+              <span class="summary-key">Date:</span>
+              <span class="summary-val">{{ formatDate(sessionToDelete.date) }}</span>
+            </div>
+            <div class="summary-line">
+              <span class="summary-key">Time:</span>
+              <span class="summary-val font-sans">{{ formatTime(sessionToDelete.startTime) }} - {{ formatTime(sessionToDelete.endTime) }}</span>
+            </div>
+            <div class="summary-line">
+              <span class="summary-key">Status:</span>
+              <span class="summary-val">{{ sessionToDelete.status }}</span>
+            </div>
+          </div>
+
+          <div v-if="deleteSessionError" class="dialog-error-callout">
+            <ion-icon :icon="alertCircleOutline" class="error-callout-icon" />
+            <div class="callout-body">
+              <strong>Cannot Delete:</strong> {{ deleteSessionError }}
+            </div>
+          </div>
+
+          <div v-else class="dialog-warning-callout">
+            <ion-icon :icon="alertCircleOutline" class="callout-icon" />
+            <div class="callout-body">
+              <strong>Warning:</strong> All attendance scan records and associated unpaid student absence fines for this session will be permanently deleted. If paid absence fines exist, deletion will be blocked by Supabase to protect financial audit history.
+            </div>
+          </div>
+        </div>
+      </UniDialog>
     </ion-content>
   </ion-page>
 </template>
@@ -1124,6 +1807,36 @@ async function handleAddSession() {
   align-items: flex-start;
   justify-content: space-between;
   gap: 8px;
+}
+
+.occ-top-trailing {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.session-menu-trigger-btn {
+  --padding-start: 6px;
+  --padding-end: 6px;
+  min-width: 32px;
+  height: 32px;
+  margin: -4px 0 -4px 0;
+}
+
+.edit-session-checkpoints-section {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.section-subheading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--app-text-primary);
 }
 
 .occ-title-group {
@@ -1454,6 +2167,17 @@ async function handleAddSession() {
   color: var(--app-text-primary);
 }
 
+.cp-text-group {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.cp-time-window {
+  font-size: 11px;
+  color: var(--app-text-muted);
+}
+
 .cp-delete-btn {
   background: none;
   border: none;
@@ -1485,5 +2209,110 @@ async function handleAddSession() {
   grid-template-columns: 2fr 1fr;
   gap: 10px;
   margin-bottom: 10px;
+}
+
+/* Delete Event Dialog Styles */
+.delete-event-dialog-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  text-align: left;
+}
+
+.dialog-instruction {
+  font-size: 0.9rem;
+  color: var(--uni-text-secondary, #cbd5e1);
+  margin: 0;
+  line-height: 1.45;
+}
+
+.dialog-summary-card {
+  background: var(--uni-surface-subtle, rgba(255, 255, 255, 0.04));
+  border: 1px solid var(--uni-border, rgba(255, 255, 255, 0.1));
+  border-radius: 8px;
+  padding: 10px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.dialog-summary-card .summary-line {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.85rem;
+}
+
+.dialog-summary-card .summary-key {
+  color: var(--uni-text-muted, #94a3b8);
+}
+
+.dialog-summary-card .summary-val {
+  color: var(--uni-text-primary, #ffffff);
+  text-align: right;
+  word-break: break-word;
+}
+
+.dialog-warning-callout {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  padding: 10px 12px;
+  background: rgba(239, 68, 68, 0.08);
+  border: 1px solid rgba(239, 68, 68, 0.25);
+  border-radius: 8px;
+  font-size: 0.82rem;
+  line-height: 1.4;
+  color: #fca5a5;
+}
+
+.dialog-warning-callout .callout-icon {
+  font-size: 1.15rem;
+  color: #ef4444;
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+
+.dialog-error-callout {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  padding: 10px 12px;
+  background: rgba(239, 68, 68, 0.14);
+  border: 1px solid rgba(239, 68, 68, 0.45);
+  border-radius: 8px;
+  font-size: 0.82rem;
+  line-height: 1.4;
+  color: #fca5a5;
+}
+
+.dialog-error-callout .error-callout-icon {
+  font-size: 1.15rem;
+  color: #f87171;
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+
+.callout-body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.callout-body strong {
+  color: #ef4444;
+}
+
+@media (max-width: 440px) {
+  .actions-menu-list {
+    gap: 4px;
+  }
+  .menu-item-row {
+    padding: 10px 12px;
+  }
+  .dialog-summary-card {
+    padding: 8px 10px;
+  }
 }
 </style>

@@ -16,7 +16,7 @@ import { eventService } from './event.service';
 import { studentService } from './student.service';
 import { localEventRepository, type IEventRepository } from '@/storage/event-storage.service';
 import { formatFullName } from '@/utilities/student-formatters';
-import { isPastTime } from '@/utilities/date-formatters';
+import { isPastTime, formatTime } from '@/utilities/date-formatters';
 import { AttendanceRepository } from '../database/repositories/attendance.repository';
 import { CardsRepository } from '../database/repositories/cards.repository';
 import { StudentsRepository } from '../database/repositories/students.repository';
@@ -101,6 +101,44 @@ export class AttendanceService {
     const targetCheckpointId = activeCheckpoint.id;
     const targetCheckpointLabel = activeCheckpoint.label;
     const targetCheckpointType = activeCheckpoint.type;
+
+    // Checkpoint scanning window pre-check
+    const opensAtStr = activeCheckpoint.opensAt;
+    const closesAtStr = activeCheckpoint.closesAt;
+
+    if (occurrence.occurs_on && opensAtStr && closesAtStr) {
+      const now = new Date();
+      const windowStart = new Date(`${occurrence.occurs_on}T${opensAtStr}:00`);
+      const windowEnd = new Date(`${occurrence.occurs_on}T${closesAtStr}:00`);
+
+      if (now < windowStart) {
+        return {
+          type: 'CHECKPOINT_NOT_OPEN',
+          message: `Checkpoint "${targetCheckpointLabel}" is not open for scanning yet. Scanning window opens at ${formatTime(opensAtStr)}.`,
+          occurrenceId,
+          rfidUid: cleanUid,
+          checkpointId: targetCheckpointId,
+          checkpointLabel: targetCheckpointLabel,
+          checkpointType: targetCheckpointType,
+          suggestedStatus: 'PRESENT',
+          eligible: false,
+        };
+      }
+
+      if (now > windowEnd) {
+        return {
+          type: 'CHECKPOINT_CLOSED',
+          message: `Checkpoint "${targetCheckpointLabel}" scanning window has closed. Window closed at ${formatTime(closesAtStr)}.`,
+          occurrenceId,
+          rfidUid: cleanUid,
+          checkpointId: targetCheckpointId,
+          checkpointLabel: targetCheckpointLabel,
+          checkpointType: targetCheckpointType,
+          suggestedStatus: 'PRESENT',
+          eligible: false,
+        };
+      }
+    }
 
     // 2. Resolve Card & Student on Supabase
     const { data: cards } = await supabase
@@ -256,13 +294,13 @@ export class AttendanceService {
       throw new Error(`Direct attendance recording failed: ${rpcErr.message}`);
     }
 
-    if (rpcRes?.status === 'REJECTED') {
-      throw new Error(`Attendance rejected by server: ${rpcRes?.reason || 'Validation error'}`);
+    if (rpcRes?.status && rpcRes.status !== 'RECORDED') {
+      throw new Error(rpcRes.message || `Attendance rejected by server: ${rpcRes.status}`);
     }
 
     return {
       status: rpcRes?.status || 'RECORDED',
-      message: 'Attendance confirmed successfully on Supabase!',
+      message: rpcRes?.message || 'Attendance confirmed successfully on Supabase!',
       recordId: rpcRes?.record_id || rpcRes?.attendance_id,
     };
   }
@@ -338,6 +376,44 @@ export class AttendanceService {
     const targetCheckpointId = activeCheckpoint.id;
     const targetCheckpointLabel = activeCheckpoint.label;
     const targetCheckpointType = activeCheckpoint.type;
+
+    // Checkpoint scanning window pre-check
+    const opensAtStr = activeCheckpoint.opensAt;
+    const closesAtStr = activeCheckpoint.closesAt;
+
+    if (occurrence.occurs_on && opensAtStr && closesAtStr) {
+      const now = new Date();
+      const windowStart = new Date(`${occurrence.occurs_on}T${opensAtStr}:00`);
+      const windowEnd = new Date(`${occurrence.occurs_on}T${closesAtStr}:00`);
+
+      if (now < windowStart) {
+        return {
+          type: 'CHECKPOINT_NOT_OPEN',
+          message: `Checkpoint "${targetCheckpointLabel}" is not open for scanning yet. Scanning window opens at ${formatTime(opensAtStr)}.`,
+          occurrenceId,
+          rfidUid: cleanUid,
+          checkpointId: targetCheckpointId,
+          checkpointLabel: targetCheckpointLabel,
+          checkpointType: targetCheckpointType,
+          suggestedStatus: 'PRESENT',
+          eligible: false,
+        };
+      }
+
+      if (now > windowEnd) {
+        return {
+          type: 'CHECKPOINT_CLOSED',
+          message: `Checkpoint "${targetCheckpointLabel}" scanning window has closed. Window closed at ${formatTime(closesAtStr)}.`,
+          occurrenceId,
+          rfidUid: cleanUid,
+          checkpointId: targetCheckpointId,
+          checkpointLabel: targetCheckpointLabel,
+          checkpointType: targetCheckpointType,
+          suggestedStatus: 'PRESENT',
+          eligible: false,
+        };
+      }
+    }
 
     // 2. Resolve Card & Student
     const card = await CardsRepository.getCardByNormalizedUid(cleanUid);
@@ -525,11 +601,35 @@ export class AttendanceService {
     const now = clientScannedAt || new Date().toISOString();
     const occurrence = await EventsRepository.getOccurrenceById(occurrenceId);
     const effectiveCheckpoint = checkpointId || occurrence?.active_checkpoint_id || 'default_in';
+    const checkpoints = eventService.parseCheckpoints(occurrence?.checkpoints_json);
+    const activeCheckpoint = checkpoints.find(c => c.id === effectiveCheckpoint) || checkpoints[0];
+    const opensAtStr = activeCheckpoint?.opensAt;
+    const closesAtStr = activeCheckpoint?.closesAt;
+
+    if (occurrence?.occurs_on && opensAtStr && closesAtStr) {
+      const windowStart = new Date(`${occurrence.occurs_on}T${opensAtStr}:00`);
+      const windowEnd = new Date(`${occurrence.occurs_on}T${closesAtStr}:00`);
+      const nowDate = new Date(now);
+
+      if (nowDate < windowStart) {
+        throw new Error(`Checkpoint "${activeCheckpoint?.label || effectiveCheckpoint}" is not yet open for scanning. Window opens at ${formatTime(opensAtStr)}.`);
+      }
+      if (nowDate > windowEnd) {
+        throw new Error(`Checkpoint "${activeCheckpoint?.label || effectiveCheckpoint}" scanning window has closed. Window closed at ${formatTime(closesAtStr)}.`);
+      }
+    }
+
     let status: AttendanceStatus = statusOverride || 'PRESENT';
 
-    if (!statusOverride && occurrence?.occurs_on && occurrence?.starts_at) {
-      if (isPastTime(occurrence.occurs_on, occurrence.starts_at, occurrence.grace_minutes || 15, now)) {
-        status = 'LATE';
+    if (!statusOverride) {
+      if (activeCheckpoint?.type === 'IN' && occurrence?.occurs_on && opensAtStr) {
+        if (isPastTime(occurrence.occurs_on, opensAtStr, activeCheckpoint?.graceMinutes ?? occurrence?.grace_minutes ?? 15, now)) {
+          status = 'LATE';
+        } else {
+          status = 'PRESENT';
+        }
+      } else {
+        status = 'PRESENT';
       }
     }
 

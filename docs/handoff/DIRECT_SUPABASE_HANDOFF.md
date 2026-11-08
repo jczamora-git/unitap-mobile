@@ -1253,16 +1253,20 @@ Prior to this update, parent records across UniTap (such as obligation rules, ev
 
 ### 18.5. Delete Collection Confirmation Modal & Resilient Two-Phase Deletion
 - **Issue**:
-  - In `ContributionsPage.vue`, clicking the red trash icon failed to delete contribution collections, and the dialog lacked detailed contextual metadata.
-  - If the database migration `20261108160000` had not yet been executed in the live Supabase project, `student_obligations.rule_id` foreign key defaulted to `ON DELETE SET NULL`. Calling `DELETE FROM obligation_rules` left child obligations with `rule_id = NULL`, which caused them to immediately reappear as an unlinked collection after page refresh.
-  - Event propagation and dialog dismissal could fire prematurely before the asynchronous deletion request completed or reported an error.
+  - In `ContributionsPage.vue`, clicking the red trash icon rendered confirmation text inline below the contribution card in the page flow rather than in a centered modal overlay. Confirm and Cancel buttons were missing because `UniDialog` was missing from the component imports list in `ContributionsPage.vue`, causing the browser to treat `<UniDialog>` as an unknown inline custom HTML element.
+  - Furthermore, `UniDialog.vue` previously lacked a `:loading` prop and automatically emitted `update:isOpen = false` on confirm, which would close asynchronous deletion modals prematurely before Supabase operations succeeded or reported errors.
 - **Fix**:
-  - **Confirmation Dialog (`UniDialog`)**:
-    - Clicking the red trash icon prompts a confirmation modal displaying the contribution name, amount per student (`formatPeso`), number of assigned students, and a clear warning that unpaid student obligations will also be permanently deleted.
-    - Added loading state (`isDeletingCollection`) with button text changing to "Deleting..." and buttons disabled to prevent duplicate submissions.
-    - Cancel dismisses the dialog cleanly without any database changes.
-    - On success: closes modal, clears selection, refreshes collections and student records directly via `loadData()`, and shows a success toast.
-    - On failure: displays the actual Supabase error in toast and keeps records intact.
+  - **Component Import & Overlay Teleportation (`ContributionsPage.vue`)**:
+    - Added `UniDialog` to the `@/components/ui` import list in `ContributionsPage.vue`, restoring full Vue `<Teleport to="body">` modal overlay rendering and centered backdrop behavior.
+  - **Asynchronous Modal Controls & Protection (`UniDialog.vue`)**:
+    - Added `:loading` and `:prevent-auto-close` props to `UniDialog.vue`.
+    - When `:loading` is true:
+      - Confirm button displays `ion-spinner` and both Cancel and Confirm buttons are disabled.
+      - Backdrop clicks (`handleCancel`), Escape keydown, and mobile hardware back-button dismissals are completely ignored while deletion is in progress.
+    - When `:prevent-auto-close` is true:
+      - The dialog does not automatically close on confirm; it remains open until the parent component explicitly closes it after confirmed database success.
+  - **Failure Preservation & Error Callout**:
+    - If deletion fails (e.g. obligations have payment allocations), `ContributionsPage.vue` keeps the dialog open and displays the actual error in a `.dialog-error-callout` inside the modal as well as a toast.
   - **Two-Phase Resilient Deletion**:
     - In `financeService.deleteContributionCollection(col)`:
       - Validates that zero payment allocations exist across all obligations in this collection. If any payments exist, immediately throws an error: `Cannot delete contribution collection because payments have already been collected for it. Archive or deactivate instead.`
@@ -1297,17 +1301,65 @@ Prior to this update, parent records across UniTap (such as obligation rules, ev
     - `StudentPassPage.vue`: CSG Student Pass avatar with photo and initials fallback.
     - `AttendanceScanPage.vue`: Displays the student's photo during visual identity verification and in the confirmed attendance result card.
 
-### 18.7. Minimal Events Detail UI Redesign (`src/views/EventDetailPage.vue`)
-- **Compact Mobile Header**:
-  - Displays back navigation, event title, category, and status.
-  - Retained `Add Session` as the prominent primary action.
-  - Moved `Edit Event` and `Delete Event` into a compact options menu (`UniSheet`) triggered via an ellipsis (`⋯`) icon button.
-  - Preserved `isDevAdmin` restriction for the Delete action and maintained the existing confirmation modal.
-- **Simplified Event Information**:
-  - Reorganized the event summary into a streamlined card featuring category badge, status badge (`UniStatusBadge`), description, audience breakdown, and event date.
-- **Clean Attendance Sessions & Empty State**:
-  - Added an intuitive empty state (`UniEmptyState`) with an `Add Session` quick action when no occurrences exist.
-  - Maintained accessible checkpoint configuration (`UniSheet`), NFC scanning, and session close workflows.
+### 18.7. Minimal Events Detail UI & Action Permissions (`src/views/EventDetailPage.vue`)
+- **Action Access Matrix**:
+  - **DEVADMIN**:
+    - **Edit Event**: ALLOWED (unconditional).
+    - **Delete Event**: ALLOWED (exclusive to DEVADMIN; protected against paid absence fines).
+    - **Add Session**: ALLOWED.
+    - **Edit Session**: ALLOWED (title, date, start/end time, grace period, configured checkpoints).
+    - **Delete Session**: ALLOWED (exclusive to DEVADMIN; protected against paid absence fines).
+    - **Manage Checkpoints**: ALLOWED.
+  - **OFFICER**:
+    - **Edit Event**: ALLOWED for authorized officers with active appointments and `FULL` preset or `CUSTOM` permission `events.edit_assigned`, within assigned event/organization scope and semester.
+    - **Delete Event**: STRICTLY NOT ALLOWED. Completely hidden from the action menu, dialog modal unmounted (`v-if="isDevAdmin"`), and guarded at the action handler level (`handleDeleteEvent`). Enforced at the database level by Supabase DELETE RLS (`public.get_current_user_role() = 'DEVADMIN'`).
+    - **Add Session**: Subject to appointment permissions (`events.create` or `FULL` preset within scope/semester). Button and empty state quick action hidden if unauthorized.
+    - **Edit Session**: ALLOWED for authorized officers with `events.edit_assigned` permission or `FULL` preset within scope and semester.
+    - **Delete Session**: STRICTLY NOT ALLOWED. Completely hidden from the session action sheet, confirmation dialog unmounted (`v-if="isDevAdmin"`), and guarded at the action handler level (`handleConfirmDeleteSession`).
+    - **Manage Checkpoints**: Subject to appointment permissions (`events.edit_assigned` or `FULL` preset within scope/semester). Checkpoints button on occurrences hidden if unauthorized.
+- **Attendance Session Management UI & Workflow**:
+  - **Compact Session Action Menu (`UniSheet`)**:
+    - Each attendance session card displays a three-dot button in its trailing header (`.occ-top-trailing`), visible to DEVADMIN and authorized officers with `events.edit_assigned`.
+    - Triggers a bottom sheet with options:
+      - **Edit Session**: Opens full session configuration sheet.
+      - **Delete Session**: Visible to DEVADMIN only (red destructive option).
+  - **Edit Session Sheet (`UniSheet`, expanded)**:
+    - Allows editing session title, session date, start time, end time, grace period, and attendance checkpoints (IN/OUT labels and order).
+    - Validates required inputs before submission.
+    - Calls `eventService.updateOccurrence(dto)` updating fields in Direct Supabase or SQLite offline mode.
+    - Preserves existing attendance records and occurrence UUID.
+    - Refreshes session details immediately upon success.
+  - **Centered Delete Session Confirmation Modal (`UniDialog`)**:
+    - Rendered strictly for DEVADMIN (`v-if="isDevAdmin"`).
+    - Displays session title, scheduled date, time window, and current status.
+    - Clearly warns that operational attendance scan records and associated unpaid student absence fines will be deleted.
+    - Clarifies that if paid absence fines exist, Supabase trigger `trg_protect_event_occurrence_deletion` blocks deletion to safeguard financial audit immutability.
+    - Displays loading state (`:loading="isDeletingSession"`) and keeps modal open (`:prevent-auto-close="true"`) to present any Supabase error messages.
+    - Refreshes attendance sessions immediately after confirmed deletion.
+- **Scope & Semester Restrictions**:
+  - Mirrored PostgreSQL security definer helper `public.can_user_manage_event(p_event_id, p_semester_id, p_required_permission)` in `OfficerManagementService.userCanManageEvent()`:
+    - Validates active status, start/end dates, and lack of suspension/revocation.
+    - Respects `ORGANIZATION` scope (all events) and `EVENT` scope (`scope_id` matching targeted event UUID).
+    - Respects appointment semester restrictions when `semester_id` is specified on the appointment.
+- **Centered Delete Event Confirmation Dialog (`UniDialog`)**:
+  - Displays event title, event category/type, and attendance session count.
+  - Clarifies that attendance sessions, scan records, and unpaid absence fines will be deleted.
+  - Highlights that Supabase delete protection prevents deletion if paid absence fines exist.
+  - Features `:loading="isDeletingEvent"` spinner feedback and `:prevent-auto-close="true"` so that errors remain visible.
+  - Displays in-modal Supabase error callout if deletion fails, keeping dialog open for user review.
+  - Upon confirmed deletion, displays a success toast and redirects to `/tabs/events`.
+- **Verification**:
+  - Unit tests in `tests/unit/event-detail-actions.spec.ts` (20/20 tests passed) verify:
+    - DEVADMIN edit/delete authority for events and occurrences.
+    - Authorized OFFICER edit access under `FULL` and `CUSTOM` presets.
+    - Strict OFFICER exclusion from event and session deletion across UI and action handlers.
+    - STUDENT exclusion from all management actions.
+    - Scope boundary enforcement (`ORGANIZATION` vs `EVENT`).
+    - Semester boundary enforcement.
+    - Unauthorized or expired officer appointment denial.
+    - Session deletion confirmation safety specifications.
+    - Session update validation rules.
+  - Unit tests in `tests/unit/event.service.spec.ts` (5/5 tests passed) verify `updateOccurrence` and `deleteOccurrence` operations in `EventService`.
 
 ### 18.8 Direct PDF Downloading in Financial Reports (`/finance/reports`)
 
@@ -1325,12 +1377,224 @@ Prior to this update, parent records across UniTap (such as obligation rules, ev
   - Unit tests in `tests/unit/filters-and-reports-ui.spec.ts` verify filename formatting, PDF 1.4 byte stream structure (`%PDF-1.4`, `%%EOF`), multi-page distribution, and empty state handling (8/8 tests passed).
   - Both `vue-tsc --noEmit` and production build (`npm run build`) passed with zero errors.
 
+### 18.9 Student Self-Service Profile Photo Upload & Storage Permissions
+
+- **Student Portal Polished Integrated Avatar & Upload UI (`src/components/student/StudentHomeView.vue`)**:
+  - Integrated photo editing directly into the student avatar (`.student-hero-avatar-btn`) without creating an extra button row:
+    - Entire 56×56px avatar functions as an accessible, clickable button (`:title` / `:aria-label="hasProfilePhoto ? 'Change profile photo' : 'Add profile photo'"`).
+    - Features a small circular camera badge overlay (`.avatar-photo-edit-badge`) in the bottom-right corner with UniTap teal styling and subtle hover/active states.
+    - When no photo exists, initials are displayed with the camera badge, inviting students to upload.
+    - When photo exists, the photo displays cleanly with the camera badge overlay.
+    - Stops event propagation (`@click.stop`) to prevent bubbling to the Student Pass navigation.
+    - Perfectly aligns student name, School ID, program, year level, and section beside the avatar without vertical crowding or unbalanced extra rows.
+  - Automatically processes selected images through client-side compression (`compressStudentPhoto`), validating dimensions (max 640×640 px), format (WebP with JPEG fallback), and stripping metadata.
+  - Displays a preview sheet (`UniSheet`) detailing original file size, compressed size, compression savings percentage, and image preview before confirming upload.
+  - Re-fetches portal data and immediately updates the reactive `student.photoUrl` and `student.photoStoragePath` across both Student Portal and Digital Pass views without requiring logout.
+- **Forward-Only Database Migration (`supabase/migrations/20261108180000_student_self_service_photo_permissions.sql`)**:
+  - **Storage Policies on `student-profile-photos`**:
+    - Tightened Authenticated Student `INSERT`, `UPDATE`, and `DELETE` policies to permit strictly authorized profile filenames matching their own UUID:
+      `name IN (<student_uuid>/profile.webp, <student_uuid>/profile.jpg, <student_uuid>/profile.jpeg, <student_uuid>/profile.png)`
+    - Both `USING` and `WITH CHECK` clauses are enforced on `UPDATE` to prevent path tampering or arbitrary file storage.
+    - Preserves existing DEVADMIN and active OFFICER management policies and keeps bucket private.
+  - **Secure SECURITY DEFINER RPC (`public.update_student_profile_photo_path`)**:
+    - Allows authenticated students to update only their own `students.photo_storage_path` column, preventing broad table-level UPDATE grants.
+    - Resolves student UUID strictly via `public.get_current_user_student_id()`.
+    - Enforces path validation (`<student_uuid>/profile.(webp|jpg|jpeg|png)`) or `NULL` for photo removal, preventing cross-student manipulation or arbitrary column alterations.
+    - Configured with `SET search_path = ''` to prevent search_path hijacking.
+- **Service Integration (`src/services/student.service.ts`)**:
+  - For `isSelfService = true`, `uploadStudentPhoto` calls `update_student_profile_photo_path` RPC directly without relying on catching PostgreSQL `42501` (preventing silent 0-row RLS updates).
+  - For `isSelfService = false`, preserves direct table UPDATE for DEVADMIN and active OFFICERs.
+  - Guarantees Storage upload succeeds before updating the database path.
+  - Cleans up any previous photo only after both Storage upload and database update succeed.
+  - In `deleteStudentPhoto`, clears the database path to `NULL` before deleting the object from Storage.
+- **Verification**:
+  - Unit tests in `tests/unit/student-photo-compression-and-storage.spec.ts` (16/16 passing) verify direct RPC invocation, DEVADMIN/OFFICER direct table update preservation, cross-student update rejection, unapproved filename rejection, correct call order, and photo removal.
+  - Regression test suites passed (39 tests total), `vue-tsc --noEmit` passed with 0 errors, and `npm run build` compiled cleanly.
+
+#### Complete Migration SQL for Manual Execution
+
+```sql
+-- ==============================================================================
+-- UniTap 2.0: Student Self-Service Photo Permissions & Secure Storage RPC
+-- Migration: 20261108180000_student_self_service_photo_permissions.sql
+-- ==============================================================================
+
+BEGIN;
+
+-- ------------------------------------------------------------------------------
+-- 1. STORAGE POLICIES: student-profile-photos
+-- ------------------------------------------------------------------------------
+
+-- 1.1. Drop any previous student mutation policies if they exist
+DROP POLICY IF EXISTS "Students upload own profile photo" ON storage.objects;
+DROP POLICY IF EXISTS "Students update own profile photo" ON storage.objects;
+DROP POLICY IF EXISTS "Students delete own profile photo" ON storage.objects;
+
+-- 1.2. Authenticated Students can INSERT their own profile photo
+-- Restricted strictly to approved profile filenames within their own student UUID folder:
+-- {student_uuid}/profile.webp, {student_uuid}/profile.jpg, {student_uuid}/profile.jpeg, {student_uuid}/profile.png
+CREATE POLICY "Students upload own profile photo"
+  ON storage.objects FOR INSERT
+  TO authenticated
+  WITH CHECK (
+    bucket_id = 'student-profile-photos'
+    AND public.get_current_user_student_id() IS NOT NULL
+    AND name IN (
+      public.get_current_user_student_id()::text || '/profile.webp',
+      public.get_current_user_student_id()::text || '/profile.jpg',
+      public.get_current_user_student_id()::text || '/profile.jpeg',
+      public.get_current_user_student_id()::text || '/profile.png'
+    )
+  );
+
+-- 1.3. Authenticated Students can UPDATE their own profile photo
+CREATE POLICY "Students update own profile photo"
+  ON storage.objects FOR UPDATE
+  TO authenticated
+  USING (
+    bucket_id = 'student-profile-photos'
+    AND public.get_current_user_student_id() IS NOT NULL
+    AND name IN (
+      public.get_current_user_student_id()::text || '/profile.webp',
+      public.get_current_user_student_id()::text || '/profile.jpg',
+      public.get_current_user_student_id()::text || '/profile.jpeg',
+      public.get_current_user_student_id()::text || '/profile.png'
+    )
+  )
+  WITH CHECK (
+    bucket_id = 'student-profile-photos'
+    AND public.get_current_user_student_id() IS NOT NULL
+    AND name IN (
+      public.get_current_user_student_id()::text || '/profile.webp',
+      public.get_current_user_student_id()::text || '/profile.jpg',
+      public.get_current_user_student_id()::text || '/profile.jpeg',
+      public.get_current_user_student_id()::text || '/profile.png'
+    )
+  );
+
+-- 1.4. Authenticated Students can DELETE their own previous profile photo
+CREATE POLICY "Students delete own profile photo"
+  ON storage.objects FOR DELETE
+  TO authenticated
+  USING (
+    bucket_id = 'student-profile-photos'
+    AND public.get_current_user_student_id() IS NOT NULL
+    AND name IN (
+      public.get_current_user_student_id()::text || '/profile.webp',
+      public.get_current_user_student_id()::text || '/profile.jpg',
+      public.get_current_user_student_id()::text || '/profile.jpeg',
+      public.get_current_user_student_id()::text || '/profile.png'
+    )
+  );
+
+-- ------------------------------------------------------------------------------
+-- 2. SECURE RPC: update_student_profile_photo_path
+-- ------------------------------------------------------------------------------
+
+CREATE OR REPLACE FUNCTION public.update_student_profile_photo_path(p_storage_path text)
+RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+  v_student_id uuid;
+  v_expected_prefix text;
+  v_filename text;
+BEGIN
+  -- 1. Require authenticated session
+  IF auth.uid() IS NULL THEN
+    RAISE EXCEPTION 'Authentication required.' USING ERRCODE = '42501';
+  END IF;
+
+  -- 2. Resolve authenticated student UUID via trusted helper
+  v_student_id := public.get_current_user_student_id();
+  IF v_student_id IS NULL THEN
+    RAISE EXCEPTION 'No linked student profile found for authenticated user.' USING ERRCODE = '42501';
+  END IF;
+
+  -- 3. Handle removal (NULL or empty string)
+  IF p_storage_path IS NULL OR trim(p_storage_path) = '' THEN
+    UPDATE public.students
+    SET photo_storage_path = NULL,
+        updated_at = now()
+    WHERE id = v_student_id;
+
+    RETURN jsonb_build_object(
+      'success', true,
+      'student_id', v_student_id,
+      'photo_storage_path', NULL
+    );
+  END IF;
+
+  -- 4. Validate prefix against authenticated student UUID
+  v_expected_prefix := v_student_id::text || '/';
+  IF NOT (p_storage_path LIKE (v_expected_prefix || '%')) THEN
+    RAISE EXCEPTION 'Cross-student upload denied: storage path must match authenticated student UUID.' USING ERRCODE = '42501';
+  END IF;
+
+  -- 5. Validate approved filename (profile.webp, profile.jpg, profile.jpeg, profile.png)
+  v_filename := substring(p_storage_path from (length(v_expected_prefix) + 1));
+  IF v_filename NOT IN ('profile.webp', 'profile.jpg', 'profile.jpeg', 'profile.png') THEN
+    RAISE EXCEPTION 'Invalid profile photo filename. Only approved profile filenames are allowed.' USING ERRCODE = '22023';
+  END IF;
+
+  -- 6. Update only photo_storage_path and updated_at
+  UPDATE public.students
+  SET photo_storage_path = p_storage_path,
+      updated_at = now()
+  WHERE id = v_student_id;
+
+  RETURN jsonb_build_object(
+    'success', true,
+    'student_id', v_student_id,
+    'photo_storage_path', p_storage_path
+  );
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.update_student_profile_photo_path(text) FROM public, anon;
+GRANT EXECUTE ON FUNCTION public.update_student_profile_photo_path(text) TO authenticated;
+
+COMMIT;
+```
+
+---
+
+### 18.10. Attendance Checkpoints Individual Scan Time Windows & Server-Authoritative Verification
+
+#### Feature Overview
+To prevent premature or late attendance scans across multi-session events (such as morning assemblies followed by afternoon breakout sessions), each attendance checkpoint now supports dedicated `opensAt` and `closesAt` scan time windows.
+
+1. **Checkpoint Configuration UI (`EventDetailPage.vue`)**:
+   - The "Configure Checkpoints" and "Edit Session" sheets provide dedicated `Opens At` and `Closes At` inputs for every checkpoint.
+   - Validation ensures:
+     - Checkpoint closing time is strictly later than opening time.
+     - Checkpoint scanning window fits within the parent attendance session hours (`starts_at` to `ends_at`).
+     - Validation warnings and errors are clearly presented prior to saving.
+   - Occurrence cards and checkpoint lists display scan time windows (e.g. `8:00 AM – 8:30 AM`).
+
+2. **Client & Offline First Enforcement (`attendance.service.ts`)**:
+   - `prepareNfcVerification` and `confirmStudentAttendance` enforce scan windows when configured on the active checkpoint.
+   - Attempts before the window opens return or throw `CHECKPOINT_NOT_OPEN` (`"Checkpoint is not open for scanning yet. Scanning window opens at..."`).
+   - Attempts after the window closes return or throw `CHECKPOINT_CLOSED` (`"Checkpoint scanning window has closed. Window closed at..."`).
+
+3. **Server-Authoritative Enforcement (`20261108190000_checkpoint_scan_time_windows.sql`)**:
+   - Upgrades `record_attendance_scan` RPC.
+   - Resolves active checkpoint from `event_occurrences.checkpoints_json`.
+   - When `opensAt` and `closesAt` are configured on the active checkpoint, computes window bounds against `(occurs_on || ' ' || opensAt)::timestamp AT TIME ZONE 'Asia/Manila'`.
+   - Compares against authoritative server timestamp `now()`.
+   - Logs rejection attempt to `attendance_attempts` and returns status `CHECKPOINT_NOT_OPEN` or `CHECKPOINT_CLOSED`.
+   - Preserves appointment authorization, event scope, idempotent scanning, and duplicate-scan protection.
+
 ---
 
 ## 19. Supabase Migration Deployment History & Status
 
 | Migration File | Description | Deployment Method | Deployed Date | Status |
 |---|---|---|---|---|
+| `20261108190000_checkpoint_scan_time_windows.sql` | Server-Side Attendance Checkpoint Scanning Window Enforcement (`record_attendance_scan`) | Supabase Dashboard SQL Editor | Pending Manual Execution | **STAGED / READY** |
+| `20261108180000_student_self_service_photo_permissions.sql` | Student Self-Service Photo Storage RLS & Secure Path Update RPC (`update_student_profile_photo_path`) | Supabase Dashboard SQL Editor | Pending Manual Execution | **STAGED / READY** |
 | `20261108160000_devadmin_cascades_and_delete_protection.sql` | DEVADMIN FK Cascades, Orphan Precondition, RLS Helper & Deletion Protection | Supabase Dashboard SQL Editor | November 8, 2026 | **DEPLOYED** (User-confirmed) |
 | `20261108170000_attendance_checkpoints_and_storage.sql` | Configurable Attendance Checkpoints IN/OUT, Unique Checkpoint Constraint & Private Profile Photo Storage Bucket | Supabase Dashboard SQL Editor | November 8, 2026 | **DEPLOYED** (User-confirmed) |
 | `20261108150000_fix_student_obligations_rls.sql` | Student Obligations RLS Fix for DEVADMIN & ACTIVE Officers | Supabase Dashboard SQL Editor | November 8, 2026 | **DEPLOYED** (User-confirmed) |
@@ -1358,6 +1622,13 @@ The following items should be exercised during live user acceptance testing:
   - Verify that tapping a student NFC card identifies the active checkpoint and logs the correct audit entry (`CHECK_IN` or `CHECK_OUT`).
   - Verify that a second tap against the same active checkpoint reports duplicate scan and prevents double-marking.
   - Verify switching to the second checkpoint allows the student to scan once for that specific checkpoint.
+
+- [ ] **Attendance Checkpoint Individual Scan Time Windows**:
+  - Configure an attendance session with individual checkpoint windows (e.g. Morning IN: 8:00 AM – 8:30 AM, Morning OUT: 11:30 AM – 12:00 PM).
+  - Verify scans attempted prior to 8:00 AM are rejected with `CHECKPOINT_NOT_OPEN`.
+  - Verify scans between 8:00 AM and 8:30 AM succeed and mark status appropriately (`PRESENT` or `LATE` if past grace minutes).
+  - Verify scans after 8:30 AM are rejected with `CHECKPOINT_CLOSED`.
+  - Verify switching the active checkpoint to Morning OUT enforces its 11:30 AM – 12:00 PM window independently.
 
 - [ ] **Private Student Photo Storage Upload & Signed URL Retrieval**:
   - Upload a profile photo from the Student Profile page; verify that client-side image compression converts it to optimized WebP/JPEG under 150 KB.

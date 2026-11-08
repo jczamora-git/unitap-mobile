@@ -24,6 +24,7 @@ export interface Event {
   description: string;
   type: EventType;
   categoryId?: string;
+  semesterId?: string;
   audience: AudienceConfig;
   attendanceRequired: boolean;
   status: EventStatus;
@@ -41,6 +42,8 @@ export interface AttendanceCheckpoint {
   type: CheckpointType; // 'IN' | 'OUT'
   startTime?: string; // "08:00"
   endTime?: string; // "10:00"
+  opensAt?: string; // "08:00" (Scan window opening time)
+  closesAt?: string; // "08:30" (Scan window closing time)
   graceMinutes?: number;
   orderIndex?: number;
 }
@@ -95,4 +98,15 @@ export interface CreateOccurrenceDto {
   startTime: string;
   endTime: string;
   gracePeriodMinutes?: number;
+}
+
+export interface UpdateOccurrenceDto {
+  occurrenceId: string;
+  title?: string;
+  date?: string;
+  startTime?: string;
+  endTime?: string;
+  gracePeriodMinutes?: number;
+  checkpoints?: AttendanceCheckpoint[];
+  activeCheckpointId?: string | null;
 }

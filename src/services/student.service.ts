@@ -168,7 +168,8 @@ export class StudentService {
 
   async uploadStudentPhoto(
     studentId: string,
-    file: File | Blob
+    file: File | Blob,
+    isSelfService: boolean = false
   ): Promise<{ photoStoragePath: string; photoUrl: string }> {
     await OperationPolicyService.assertPermitted('STUDENTS_CREATE_UPDATE_DEACTIVATE');
     if (!studentId) throw new Error('Student ID is required for photo upload.');
@@ -209,16 +210,27 @@ export class StudentService {
       }
 
       // 3. Update database with new photo_storage_path
-      const { error: updateErr } = await supabase
-        .from('students')
-        .update({
-          photo_storage_path: storagePath,
-          updated_at: new Date().toISOString(),
-        })
-        .eq('id', studentId);
+      // Students update photo path directly via secure SECURITY DEFINER RPC.
+      // Officers/DevAdmin update directly using their permitted UPDATE RLS policy.
+      if (isSelfService) {
+        const { error: rpcErr } = await supabase.rpc('update_student_profile_photo_path', {
+          p_storage_path: storagePath,
+        });
+        if (rpcErr) {
+          throw new Error(`Failed to save student photo path: ${rpcErr.message}`);
+        }
+      } else {
+        const { error: directErr } = await supabase
+          .from('students')
+          .update({
+            photo_storage_path: storagePath,
+            updated_at: new Date().toISOString(),
+          })
+          .eq('id', studentId);
 
-      if (updateErr) {
-        throw new Error(`Failed to save student photo path: ${updateErr.message}`);
+        if (directErr) {
+          throw new Error(`Failed to save student photo path: ${directErr.message}`);
+        }
       }
 
       // 4. Only remove old photo after the replacement upload and database update succeed
@@ -268,30 +280,49 @@ export class StudentService {
     return { photoStoragePath: storagePath, photoUrl: base64Url };
   }
 
-  async deleteStudentPhoto(studentId: string): Promise<void> {
+  async deleteStudentPhoto(studentId: string, isSelfService: boolean = false): Promise<void> {
     await OperationPolicyService.assertPermitted('STUDENTS_CREATE_UPDATE_DEACTIVATE');
     if (DataModeService.isDirectSupabase()) {
+      // 1. Fetch current student's existing photo_storage_path
       const { data: s } = await supabase
         .from('students')
         .select('photo_storage_path')
         .eq('id', studentId)
         .maybeSingle();
 
-      if (s?.photo_storage_path) {
+      const oldStoragePath = s?.photo_storage_path;
+
+      // 2. Clear photo_storage_path in database first
+      // Students update photo path directly via secure SECURITY DEFINER RPC.
+      // Officers/DevAdmin update directly using their permitted UPDATE RLS policy.
+      if (isSelfService) {
+        const { error: rpcErr } = await supabase.rpc('update_student_profile_photo_path', {
+          p_storage_path: null,
+        });
+        if (rpcErr) {
+          throw new Error(`Failed to remove student photo: ${rpcErr.message}`);
+        }
+      } else {
+        const { error: directErr } = await supabase
+          .from('students')
+          .update({ photo_storage_path: null, updated_at: new Date().toISOString() })
+          .eq('id', studentId);
+
+        if (directErr) {
+          throw new Error(`Failed to remove photo on Supabase: ${directErr.message}`);
+        }
+      }
+
+      // 3. Only remove old photo from Storage after database update succeeds
+      if (oldStoragePath) {
         try {
-          await supabase.storage.from(STUDENT_PHOTOS_BUCKET).remove([s.photo_storage_path]);
-          StudentService.photoUrlCache.delete(s.photo_storage_path);
+          await supabase.storage.from(STUDENT_PHOTOS_BUCKET).remove([oldStoragePath]);
+          StudentService.photoUrlCache.delete(oldStoragePath);
         } catch (e) {
           console.warn('[StudentService] Remote storage delete warning:', e);
         }
       }
 
-      const { error } = await supabase
-        .from('students')
-        .update({ photo_storage_path: null, updated_at: new Date().toISOString() })
-        .eq('id', studentId);
-
-      if (error) throw new Error(`Failed to remove photo on Supabase: ${error.message}`);
       return;
     }
 

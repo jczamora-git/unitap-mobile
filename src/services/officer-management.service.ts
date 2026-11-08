@@ -763,11 +763,46 @@ export class OfficerManagementService {
     userId: string,
     permission: string
   ): Promise<boolean> {
+    if (DataModeService.isDirectSupabase()) {
+      try {
+        const { supabase } = await import('@/integrations/supabase/client');
+        const { data: appt, error } = await supabase
+          .from('officer_appointments')
+          .select('status, appointment_end, permission_preset, custom_permissions')
+          .eq('user_id', userId)
+          .in('status', ['ACTIVE', 'SUSPENDED'])
+          .order('created_at', { ascending: false })
+          .limit(1)
+          .maybeSingle();
+
+        if (!error && appt && appt.status === 'ACTIVE') {
+          if (appt.appointment_end && new Date() > new Date(appt.appointment_end)) return false;
+          if (appt.permission_preset === 'FULL') {
+            return (PRESET_DEFINITIONS.FULL as readonly string[]).includes(permission);
+          }
+          let perms: string[] = [];
+          if (Array.isArray(appt.custom_permissions)) {
+            perms = appt.custom_permissions;
+          } else if (typeof appt.custom_permissions === 'string') {
+            try { perms = JSON.parse(appt.custom_permissions); } catch { perms = []; }
+          }
+          return perms.includes(permission);
+        }
+        if (appt && appt.status !== 'ACTIVE') return false;
+      } catch (err) {
+        console.warn('Direct Supabase userHasPermission error, falling back to local repository:', err);
+      }
+    }
+
     const appt = await OfficerRepository.getAppointmentByUserId(userId);
     if (!appt || appt.status !== 'ACTIVE') return false;
 
     // Check expiration
     if (new Date() > new Date(appt.appointment_end)) return false;
+
+    if (appt.permission_preset === 'FULL') {
+      return (PRESET_DEFINITIONS.FULL as readonly string[]).includes(permission);
+    }
 
     let perms: string[] = [];
     try {
@@ -777,6 +812,94 @@ export class OfficerManagementService {
     }
 
     return perms.includes(permission);
+  }
+
+  /**
+   * Check if a given officer user has management authority over a specific event,
+   * respecting event scope (ORGANIZATION vs specific EVENT) and semester boundaries.
+   * Mirrors PostgreSQL security definer helper `public.can_user_manage_event()`.
+   */
+  public static async userCanManageEvent(
+    userId: string,
+    eventId: string,
+    semesterId?: string | null,
+    permission: string = OFFICER_PERMISSIONS.EVENTS_EDIT
+  ): Promise<boolean> {
+    const cleanEventUuid = eventId.startsWith('evt_') ? eventId.replace(/^evt_/, '') : eventId;
+
+    if (DataModeService.isDirectSupabase()) {
+      try {
+        const { supabase } = await import('@/integrations/supabase/client');
+        const { data: appt, error } = await supabase
+          .from('officer_appointments')
+          .select('status, appointment_start, appointment_end, revoked_at, suspended_at, permission_preset, custom_permissions, scope_type, scope_id, semester_id')
+          .eq('user_id', userId)
+          .in('status', ['ACTIVE', 'SUSPENDED'])
+          .order('created_at', { ascending: false })
+          .limit(1)
+          .maybeSingle();
+
+        if (!error && appt && appt.status === 'ACTIVE' && !appt.revoked_at && !appt.suspended_at) {
+          const now = new Date();
+          if (appt.appointment_start && new Date(appt.appointment_start) > now) return false;
+          if (appt.appointment_end && new Date(appt.appointment_end) < now) return false;
+
+          let hasPerm = appt.permission_preset === 'FULL';
+          if (!hasPerm && appt.permission_preset === 'CUSTOM') {
+            let perms: string[] = [];
+            if (Array.isArray(appt.custom_permissions)) {
+              perms = appt.custom_permissions;
+            } else if (typeof appt.custom_permissions === 'string') {
+              try { perms = JSON.parse(appt.custom_permissions); } catch { perms = []; }
+            }
+            hasPerm = perms.includes(permission) || perms.includes(OFFICER_PERMISSIONS.EVENTS_EDIT);
+          }
+          if (!hasPerm) return false;
+
+          const matchesScope = appt.scope_type === 'ORGANIZATION' || 
+            (appt.scope_type === 'EVENT' && (appt.scope_id === eventId || appt.scope_id === cleanEventUuid));
+          if (!matchesScope) return false;
+
+          if (appt.semester_id && semesterId && appt.semester_id !== semesterId) {
+            return false;
+          }
+
+          return true;
+        }
+        return false;
+      } catch (err) {
+        console.warn('Direct Supabase userCanManageEvent error, falling back to local repository:', err);
+      }
+    }
+
+    const appt = await OfficerRepository.getAppointmentByUserId(userId);
+    if (!appt || appt.status !== 'ACTIVE' || (appt as any).revoked_at || (appt as any).suspended_at) return false;
+
+    const now = new Date();
+    if (appt.appointment_start && new Date(appt.appointment_start) > now) return false;
+    if (appt.appointment_end && new Date(appt.appointment_end) < now) return false;
+
+    let hasPerm = appt.permission_preset === 'FULL';
+    if (!hasPerm && appt.permission_preset === 'CUSTOM') {
+      let perms: string[] = [];
+      try {
+        perms = JSON.parse(appt.custom_permissions_json || '[]');
+      } catch {
+        perms = [];
+      }
+      hasPerm = perms.includes(permission) || perms.includes(OFFICER_PERMISSIONS.EVENTS_EDIT);
+    }
+    if (!hasPerm) return false;
+
+    const matchesScope = appt.scope_type === 'ORGANIZATION' || 
+      (appt.scope_type === 'EVENT' && (appt.scope_id === eventId || appt.scope_id === cleanEventUuid));
+    if (!matchesScope) return false;
+
+    if (appt.semester_id && semesterId && appt.semester_id !== semesterId) {
+      return false;
+    }
+
+    return true;
   }
 
   /**
