@@ -330,16 +330,15 @@ function promptDeleteCollection(col: ContributionCollectionItem) {
 
 async function confirmDeleteCollection() {
   if (!collectionToDelete.value) return;
-  const targetRuleId = collectionToDelete.value.ruleId || collectionToDelete.value.id;
-  if (!targetRuleId) return;
   isDeletingCollection.value = true;
   try {
-    await financeService.deleteObligationRule(targetRuleId);
+    await financeService.deleteContributionCollection(collectionToDelete.value);
     await showToast('Contribution collection deleted successfully.', 'success');
     showDeleteCollectionDialog.value = false;
     collectionToDelete.value = null;
     await loadData();
   } catch (err: any) {
+    console.error('Delete collection error:', err);
     await showToast(err?.message || 'Cannot delete contribution collection because payments have already been collected for it. Archive or deactivate instead.', 'error');
   } finally {
     isDeletingCollection.value = false;
@@ -1020,25 +1019,25 @@ onIonViewWillEnter(loadData);
                 >
                   View Students
                 </UniButton>
-                <UniButton
-                  v-if="isDevAdmin"
-                  variant="destructive"
-                  size="sm"
-                  :icon="trashOutline"
-                  class="action-btn"
-                  title="Delete Collection"
-                  @click="promptDeleteCollection(col)"
-                >
-                  Delete
-                </UniButton>
-                <UniButton
-                  variant="ghost"
-                  size="sm"
-                  :icon="informationCircleOutline"
-                  class="action-btn-icon-only"
-                  title="Collection Details"
-                  @click="viewCollectionDetails(col)"
-                />
+                <div class="card-icon-actions">
+                  <UniButton
+                    variant="ghost"
+                    size="sm"
+                    :icon="informationCircleOutline"
+                    class="action-btn-icon"
+                    title="Collection Details"
+                    @click="viewCollectionDetails(col)"
+                  />
+                  <UniButton
+                    v-if="isDevAdmin"
+                    variant="destructive"
+                    size="sm"
+                    :icon="trashOutline"
+                    class="action-btn-icon delete-icon-btn"
+                    title="Delete Collection"
+                    @click.stop="promptDeleteCollection(col)"
+                  />
+                </div>
               </div>
             </div>
           </div>
@@ -1498,6 +1497,18 @@ onIonViewWillEnter(loadData);
             >
               Record Payment
             </UniButton>
+            <UniButton
+              v-if="isDevAdmin"
+              variant="destructive"
+              size="sm"
+              :icon="trashOutline"
+              @click="
+                isCollectionDetailsSheetOpen = false;
+                promptDeleteCollection(selectedCollectionDetails);
+              "
+            >
+              Delete Collection
+            </UniButton>
           </div>
         </div>
       </UniSheet>
@@ -1843,21 +1854,51 @@ onIonViewWillEnter(loadData);
 
 .collection-card-actions {
   display: flex;
-  gap: 6px;
+  gap: 8px;
   align-items: center;
-  padding-top: 10px;
+  padding-top: 12px;
   border-top: 1px dashed var(--uni-border);
 }
 
 .action-btn {
   flex: 1;
+  min-width: 0;
 }
 
-.action-btn-icon-only {
+.card-icon-actions {
+  display: flex;
+  gap: 6px;
+  align-items: center;
   flex-shrink: 0;
+}
+
+.action-btn-icon {
   width: 36px;
   height: 36px;
+  min-width: 36px;
   padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8px;
+  flex-shrink: 0;
+}
+
+.delete-icon-btn {
+  background: rgba(239, 68, 68, 0.12) !important;
+  color: #ef4444 !important;
+  border: 1px solid rgba(239, 68, 68, 0.3) !important;
+  transition: all 0.2s ease;
+}
+
+.delete-icon-btn:hover {
+  background: rgba(239, 68, 68, 0.22) !important;
+  border-color: rgba(239, 68, 68, 0.5) !important;
+  color: #f87171 !important;
+}
+
+.delete-icon-btn:active {
+  transform: scale(0.95);
 }
 
 /* Records Stack */

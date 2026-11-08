@@ -758,5 +758,34 @@ describe('Phase 5: Continuous NFC Finance Recording', () => {
       });
       expect(searchNone.length).toBe(0);
     });
+
+    it('deletes unpaid contribution collection and removes all assigned student obligations', async () => {
+      // 1. Create a contribution collection with assigned students
+      const { rule } = await service.createContributionCollection({
+        name: 'Test Deletion Fee 2026',
+        amountCentavos: 10000,
+        dueDate: '2026-11-30',
+        semesterId,
+        targetScope: 'INDIVIDUAL',
+        studentIds: [student1Id, student2Id],
+        actorUserId: officerId,
+      });
+
+      // 2. Verify collection exists and obligations exist
+      let cols = await service.getContributionCollections(semesterId);
+      const targetCol = cols.find((c) => c.ruleId === rule.id)!;
+      expect(targetCol).toBeDefined();
+      expect(targetCol.totalStudentsAssigned).toBe(2);
+
+      // 3. Delete the contribution collection
+      await service.deleteContributionCollection(targetCol);
+
+      // 4. Verify collection and assigned obligations are completely gone
+      cols = await service.getContributionCollections(semesterId);
+      expect(cols.some((c) => c.ruleId === rule.id || c.name === 'Test Deletion Fee 2026')).toBe(false);
+
+      const obs = await service.getObligationsBySemester(semesterId, 'CONTRIBUTION');
+      expect(obs.some((o) => o.ruleId === rule.id || o.title === 'Test Deletion Fee 2026')).toBe(false);
+    });
   });
 });

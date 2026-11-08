@@ -1220,6 +1220,18 @@ Prior to this update, parent records across UniTap (such as obligation rules, ev
   - Automatically refreshes eligible students when switching to Find Student search tab and after successful payment recording.
   - Added empty state handling when no students owe obligations for the selected template/category.
 
+### 18.3. Contribution Collection Deletion & UI Alignment Fix
+- **Root Cause**:
+  - In `ContributionsPage.vue`, deleting a collection invoked `deleteObligationRule(ruleId)`. In Direct Supabase mode, it only deleted from `obligation_rules`.
+  - Because `student_obligations.rule_id` foreign key defaults to `ON DELETE SET NULL`, the 12 assigned child student obligations remained in the database with `rule_id = NULL`.
+  - Upon reloading, `getContributionCollections()` detected the unlinked student obligations and re-grouped them under `legacy_test`, making it appear that delete did nothing. Furthermore, subsequent delete calls failed because `legacy_test` is not a valid UUID.
+  - Squeezed 4 buttons (`Record Payment`, `View Students`, text `Delete`, and `(i)`) into one row caused awkward button truncation and visual crowding.
+- **Fix**:
+  - Implemented `financeService.deleteContributionCollection(col)` which safely checks for existing payments in `payment_allocations`. If 0 payments exist, it deletes all assigned child `student_obligations` first, and then deletes the parent `obligation_rules` record. Works for both canonical UUID collections and legacy unlinked collections.
+  - Also updated `deleteStudentObligation(obligationId)` to check for payment allocations before deleting.
+  - Restyled `collection-card-actions`: Primary operational actions (`Record Payment` and `View Students`) take `flex: 1`, while secondary actions (`(i)` Details and `🗑` Delete) are clean, responsive 36x36 icon action buttons with clear danger styling (`#ef4444`) and tooltips.
+  - Added a Delete button inside the Collection Details sheet for convenient management.
+
 ---
 
 ## 19. Remaining Tasks & Manual Deployment Checklist

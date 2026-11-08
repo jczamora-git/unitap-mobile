@@ -1535,4 +1535,65 @@ describe('Direct Supabase Student Reading Diagnostic & Integrity', () => {
     expect(eligibleStudents.length).toBe(1);
     expect(eligibleStudents[0].id).toBe('stu-1');
   });
+
+  it('24. FinanceService cleanly deletes contribution collection and child obligations in Direct Supabase mode', async () => {
+    const { financeService } = await import('@/services/finance.service');
+
+    let mockRules = [{ id: 'rule-del-1', name: 'Test Fee', type: 'CONTRIBUTION' }];
+    let mockObs = [
+      { id: 'ob-del-1', rule_id: 'rule-del-1', title: 'Test Fee', semester_id: 'sem-1', amount_centavos: 10000 },
+      { id: 'ob-del-2', rule_id: 'rule-del-1', title: 'Test Fee', semester_id: 'sem-1', amount_centavos: 10000 },
+    ];
+    let mockAllocs: any[] = [];
+
+    supabase.from = vi.fn().mockImplementation((table: string) => {
+      if (table === 'student_obligations') {
+        const handler: any = {
+          select: vi.fn().mockImplementation(() => handler),
+          eq: vi.fn().mockImplementation((col: string, val: any) => {
+            const filtered = mockObs.filter((o: any) => (o as any)[col] === val);
+            return Promise.resolve({ data: filtered, error: null });
+          }),
+          delete: vi.fn().mockImplementation(() => ({
+            in: vi.fn().mockImplementation((col: string, ids: string[]) => {
+              mockObs = mockObs.filter((o: any) => !ids.includes(o.id));
+              return Promise.resolve({ error: null });
+            }),
+          })),
+        };
+        return handler;
+      }
+      if (table === 'obligation_rules') {
+        return {
+          delete: vi.fn().mockImplementation(() => ({
+            eq: vi.fn().mockImplementation((col: string, val: any) => {
+              mockRules = mockRules.filter((r: any) => (r as any)[col] !== val);
+              return Promise.resolve({ error: null });
+            }),
+          })),
+        };
+      }
+      if (table === 'payment_allocations') {
+        return {
+          select: vi.fn().mockReturnValue({
+            in: vi.fn().mockReturnValue({
+              limit: vi.fn().mockResolvedValue({ data: mockAllocs, error: null }),
+            }),
+          }),
+        };
+      }
+      return createChainableMock({ data: [], error: null });
+    });
+
+    const colItem = {
+      id: 'rule-del-1',
+      ruleId: 'rule-del-1',
+      name: 'Test Fee',
+      semesterId: 'sem-1',
+    } as any;
+
+    await financeService.deleteContributionCollection(colItem);
+    expect(mockRules.length).toBe(0);
+    expect(mockObs.length).toBe(0);
+  });
 });

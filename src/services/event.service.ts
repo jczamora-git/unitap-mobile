@@ -1,8 +1,8 @@
-import type { 
-  Event, 
-  EventOccurrence, 
-  OccurrenceParticipant, 
-  CreateEventDto, 
+import type {
+  Event,
+  EventOccurrence,
+  OccurrenceParticipant,
+  CreateEventDto,
   CreateOccurrenceDto,
   AttendanceStatus,
   AttendanceCheckpoint,
@@ -96,7 +96,7 @@ function generateId(prefix: string): string {
 }
 
 export class EventService {
-  constructor(private repo: IEventRepository = localEventRepository) {}
+  constructor(private repo: IEventRepository = localEventRepository) { }
 
   async getEvents(): Promise<Event[]> {
     if (DataModeService.isDirectSupabase()) {
@@ -396,8 +396,8 @@ export class EventService {
     // 2. Preserve offline-first SQLite ID behavior
     const occurrenceId = isDirect ? generateUuid() : generateId('occ');
     // Ensure event_id references the clean raw UUID of the parent event
-    const rawEventId = (isDirect && dto.eventId.startsWith('evt_')) 
-      ? dto.eventId.replace(/^evt_/, '') 
+    const rawEventId = (isDirect && dto.eventId.startsWith('evt_'))
+      ? dto.eventId.replace(/^evt_/, '')
       : dto.eventId;
 
     const occurrence: EventOccurrence = {
@@ -596,8 +596,8 @@ export class EventService {
   }
 
   async updateParticipantStatus(
-    participantId: string, 
-    status: AttendanceStatus, 
+    participantId: string,
+    status: AttendanceStatus,
     note?: string
   ): Promise<OccurrenceParticipant> {
     const all = await this.getParticipants();

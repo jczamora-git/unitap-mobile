@@ -1638,9 +1638,140 @@ export class FinanceService {
   // DEVADMIN DELETION & SAFE ARCHIVING
   // ============================================================================
 
+  async deleteContributionCollection(col: ContributionCollectionItem): Promise<void> {
+    await OperationPolicyService.assertPermitted('FINANCE_ASSESSMENTS_AND_RULES');
+
+    const ruleId = col.ruleId && !col.ruleId.startsWith('legacy_')
+      ? col.ruleId
+      : (col.id && !col.id.startsWith('legacy_') ? col.id : undefined);
+
+    if (DataModeService.isDirectSupabase()) {
+      // 1. Identify all student obligations for this collection
+      let obQuery = supabase.from('student_obligations').select('id');
+      if (ruleId) {
+        obQuery = obQuery.eq('rule_id', ruleId);
+      } else {
+        obQuery = obQuery.eq('title', col.name).eq('semester_id', col.semesterId);
+      }
+
+      const { data: obligations, error: obFetchErr } = await obQuery;
+      if (obFetchErr) {
+        throw new Error(`Failed to check student obligations: ${obFetchErr.message}`);
+      }
+
+      const obIds = (obligations || []).map((o: any) => o.id);
+
+      // 2. Check if ANY payment allocations exist for these obligations
+      if (obIds.length > 0) {
+        const { data: allocs, error: allocErr } = await supabase
+          .from('payment_allocations')
+          .select('id')
+          .in('obligation_id', obIds)
+          .limit(1);
+
+        if (allocErr) {
+          throw new Error(`Failed to check payments: ${allocErr.message}`);
+        }
+
+        if (allocs && allocs.length > 0) {
+          throw new Error('Cannot delete contribution collection because payments have already been collected for it. Archive or deactivate instead.');
+        }
+
+        // 3. Delete the student obligations
+        const { error: delObErr } = await supabase
+          .from('student_obligations')
+          .delete()
+          .in('id', obIds);
+
+        if (delObErr) {
+          throw new Error(`Failed to delete student obligations: ${delObErr.message}`);
+        }
+      }
+
+      // 4. Delete the obligation rule if it exists
+      if (ruleId) {
+        const { error: delRuleErr } = await supabase
+          .from('obligation_rules')
+          .delete()
+          .eq('id', ruleId);
+
+        if (delRuleErr) {
+          throw new Error(`Failed to delete obligation rule: ${delRuleErr.message}`);
+        }
+      }
+
+      return;
+    }
+
+    // Offline-First / SQLite Mode
+    const db = await getDatabase();
+    let obIds: string[] = [];
+    if (ruleId) {
+      const rows = await db.query<{ id: string }>('SELECT id FROM student_obligations WHERE rule_id = ?', [ruleId]);
+      obIds = rows.map((r) => r.id);
+    } else {
+      const rows = await db.query<{ id: string }>(
+        'SELECT id FROM student_obligations WHERE title = ? AND semester_id = ?',
+        [col.name, col.semesterId]
+      );
+      obIds = rows.map((r) => r.id);
+    }
+
+    if (obIds.length > 0) {
+      const placeholders = obIds.map(() => '?').join(',');
+      const payments = await db.query<{ count: number }>(
+        `SELECT COUNT(*) as count FROM payment_allocations WHERE obligation_id IN (${placeholders})`,
+        obIds
+      );
+      if ((payments[0]?.count || 0) > 0) {
+        throw new Error('Cannot delete contribution collection because payments have already been collected for it. Archive or deactivate instead.');
+      }
+      await db.execute(`DELETE FROM student_obligations WHERE id IN (${placeholders})`, obIds);
+    }
+
+    if (ruleId) {
+      await db.execute('DELETE FROM obligation_rules WHERE id = ?', [ruleId]);
+    }
+  }
+
   async deleteObligationRule(ruleId: string): Promise<void> {
     await OperationPolicyService.assertPermitted('FINANCE_ASSESSMENTS_AND_RULES');
     if (DataModeService.isDirectSupabase()) {
+      const { data: obligations, error: obFetchErr } = await supabase
+        .from('student_obligations')
+        .select('id')
+        .eq('rule_id', ruleId);
+
+      if (obFetchErr) {
+        throw new Error(`Failed to check student obligations: ${obFetchErr.message}`);
+      }
+
+      const obIds = (obligations || []).map((o: any) => o.id);
+      if (obIds.length > 0) {
+        const { data: allocs, error: allocErr } = await supabase
+          .from('payment_allocations')
+          .select('id')
+          .in('obligation_id', obIds)
+          .limit(1);
+
+        if (allocErr) {
+          throw new Error(`Failed to check payments: ${allocErr.message}`);
+        }
+
+        if (allocs && allocs.length > 0) {
+          throw new Error('Cannot delete contribution collection because payments have already been collected for it. Archive or deactivate instead.');
+        }
+
+        const { error: delObErr } = await supabase
+          .from('student_obligations')
+          .delete()
+          .in('id', obIds);
+
+        if (delObErr) {
+          throw new Error(`Failed to delete student obligations: ${delObErr.message}`);
+        }
+      }
+
       const { error } = await supabase.from('obligation_rules').delete().eq('id', ruleId);
       if (error) {
         throw new Error(error.message || 'Cannot delete contribution collection because payments have already been collected for it.');
@@ -1675,9 +1806,23 @@ export class FinanceService {
   async deleteStudentObligation(obligationId: string): Promise<void> {
     await OperationPolicyService.assertPermitted('FINANCE_ASSESSMENTS_AND_RULES');
     if (DataModeService.isDirectSupabase()) {
+      const { data: allocs, error: allocErr } = await supabase
+        .from('payment_allocations')
+        .select('id')
+        .eq('obligation_id', obligationId)
+        .limit(1);
+
+      if (allocErr) {
+        throw new Error(`Failed to check payments: ${allocErr.message}`);
+      }
+
+      if (allocs && allocs.length > 0) {
+        throw new Error('Cannot delete student obligation because payments have already been allocated to it. Reversal or adjustment is required.');
+      }
+
       const { error } = await supabase.from('student_obligations').delete().eq('id', obligationId);
       if (error) {
-        throw new Error(error.message || 'Cannot delete student obligation because payments have already been allocated to it.');
+        throw new Error(error.message || 'Cannot delete student obligation.');
       }
       return;
     }
