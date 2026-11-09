@@ -32,7 +32,16 @@ import { AttendanceRepository } from '@/database/repositories/attendance.reposit
 import { eventService } from '@/services/event.service';
 import { studentService } from '@/services/student.service';
 import { ReportService } from '@/services/report.service';
-import type { Event, EventOccurrence, OccurrenceParticipant, AttendanceStatus, AttendanceCheckpoint, CheckpointType } from '@/types/event';
+import {
+  CHECKPOINT_PRESETS,
+  type Event,
+  type EventOccurrence,
+  type OccurrenceParticipant,
+  type AttendanceStatus,
+  type AttendanceCheckpoint,
+  type CheckpointType,
+  type CheckpointPreset,
+} from '@/types/event';
 import type { AttendanceStats } from '@/types/attendance';
 import type { Student } from '@/types/student';
 import { formatDate, formatTime } from '@/utilities/date-formatters';
@@ -242,8 +251,8 @@ function timeToMinutes(t?: string | null): number {
 function validateCheckpointWindow(
   opensAt: string,
   closesAt: string,
-  sessionStart?: string,
-  sessionEnd?: string,
+  _sessionStart?: string,
+  _sessionEnd?: string,
   label: string = 'Checkpoint'
 ): string | null {
   if (!opensAt || !closesAt) {
@@ -259,20 +268,8 @@ function validateCheckpointWindow(
     return `${label}: Closing time (${formatTime(closesAt)}) must be later than opening time (${formatTime(opensAt)}).`;
   }
 
-  if (sessionStart && sessionEnd) {
-    const sessionStartMin = timeToMinutes(sessionStart);
-    const sessionEndMin = timeToMinutes(sessionEnd);
-
-    if (sessionStartMin >= 0 && sessionEndMin >= 0) {
-      if (openMin < sessionStartMin) {
-        return `${label}: Opening time (${formatTime(opensAt)}) cannot be earlier than session start (${formatTime(sessionStart)}).`;
-      }
-      if (closeMin > sessionEndMin) {
-        return `${label}: Closing time (${formatTime(closesAt)}) cannot be later than session end (${formatTime(sessionEnd)}).`;
-      }
-    }
-  }
-
+  // Checkpoints represent independent attendance scanning windows.
+  // Early IN (before official session start) and late OUT (after official session end) are explicitly permitted.
   return null;
 }
 
@@ -299,9 +296,37 @@ function openCheckpointsModal(occ: EventOccurrence) {
   showCheckpointsModal.value = true;
 }
 
+function applyCheckpointPreset(preset: CheckpointPreset) {
+  newCpLabel.value = preset.label;
+  newCpType.value = preset.type;
+  newCpOpensAt.value = preset.opensAt;
+  newCpClosesAt.value = preset.closesAt;
+}
+
+function isPresetAdded(preset: CheckpointPreset, checkpoints: AttendanceCheckpoint[]): boolean {
+  return checkpoints.some(c => c.label.trim().toLowerCase() === preset.label.trim().toLowerCase());
+}
+
+function isPresetSelected(preset: CheckpointPreset): boolean {
+  return (
+    newCpLabel.value.trim() === preset.label &&
+    newCpType.value === preset.type &&
+    newCpOpensAt.value === preset.opensAt &&
+    newCpClosesAt.value === preset.closesAt
+  );
+}
+
 function addCheckpoint() {
-  if (!newCpLabel.value.trim()) {
+  const trimmedLabel = newCpLabel.value.trim();
+  if (!trimmedLabel) {
     showToast('Please enter a checkpoint label', 'warning');
+    return;
+  }
+  const isDuplicate = editingCheckpoints.value.some(
+    c => c.label.trim().toLowerCase() === trimmedLabel.toLowerCase()
+  );
+  if (isDuplicate) {
+    showToast(`Checkpoint "${trimmedLabel}" has already been added to this session.`, 'warning');
     return;
   }
   const err = validateCheckpointWindow(
@@ -309,7 +334,7 @@ function addCheckpoint() {
     newCpClosesAt.value,
     editingOccurrence.value?.startTime,
     editingOccurrence.value?.endTime,
-    newCpLabel.value.trim()
+    trimmedLabel
   );
   if (err) {
     showToast(err, 'warning');
@@ -318,7 +343,7 @@ function addCheckpoint() {
   const id = 'cp_' + Math.random().toString(36).substring(2, 9);
   editingCheckpoints.value.push({
     id,
-    label: newCpLabel.value.trim(),
+    label: trimmedLabel,
     type: newCpType.value,
     opensAt: newCpOpensAt.value,
     closesAt: newCpClosesAt.value,
@@ -444,9 +469,33 @@ function openEditSessionModal(occ: EventOccurrence) {
   showEditSessionModal.value = true;
 }
 
+function applyEditSessionCheckpointPreset(preset: CheckpointPreset) {
+  editSessionNewCpLabel.value = preset.label;
+  editSessionNewCpType.value = preset.type;
+  editSessionNewCpOpensAt.value = preset.opensAt;
+  editSessionNewCpClosesAt.value = preset.closesAt;
+}
+
+function isEditSessionPresetSelected(preset: CheckpointPreset): boolean {
+  return (
+    editSessionNewCpLabel.value.trim() === preset.label &&
+    editSessionNewCpType.value === preset.type &&
+    editSessionNewCpOpensAt.value === preset.opensAt &&
+    editSessionNewCpClosesAt.value === preset.closesAt
+  );
+}
+
 function addEditSessionCheckpoint() {
-  if (!editSessionNewCpLabel.value.trim()) {
+  const trimmedLabel = editSessionNewCpLabel.value.trim();
+  if (!trimmedLabel) {
     showToast('Please enter a checkpoint label', 'warning');
+    return;
+  }
+  const isDuplicate = editSessionCheckpoints.value.some(
+    c => c.label.trim().toLowerCase() === trimmedLabel.toLowerCase()
+  );
+  if (isDuplicate) {
+    showToast(`Checkpoint "${trimmedLabel}" has already been added to this session.`, 'warning');
     return;
   }
   const err = validateCheckpointWindow(
@@ -454,7 +503,7 @@ function addEditSessionCheckpoint() {
     editSessionNewCpClosesAt.value,
     editSessionStartTime.value,
     editSessionEndTime.value,
-    editSessionNewCpLabel.value.trim()
+    trimmedLabel
   );
   if (err) {
     showToast(err, 'warning');
@@ -463,7 +512,7 @@ function addEditSessionCheckpoint() {
   const id = 'cp_' + Math.random().toString(36).substring(2, 9);
   editSessionCheckpoints.value.push({
     id,
-    label: editSessionNewCpLabel.value.trim(),
+    label: trimmedLabel,
     type: editSessionNewCpType.value,
     opensAt: editSessionNewCpOpensAt.value,
     closesAt: editSessionNewCpClosesAt.value,
@@ -1124,6 +1173,39 @@ async function handleAddSession() {
             </div>
           </div>
 
+          <!-- Quick Templates -->
+          <div class="quick-templates-section">
+            <div class="quick-templates-header">
+              <span class="quick-templates-title">Quick Templates</span>
+              <span class="quick-templates-hint">Tap to autofill scan window</span>
+            </div>
+            <div class="quick-templates-grid">
+              <button
+                v-for="preset in CHECKPOINT_PRESETS"
+                :key="preset.label"
+                type="button"
+                class="template-chip"
+                :class="{
+                  'is-selected': isPresetSelected(preset),
+                  'is-added': isPresetAdded(preset, editingCheckpoints)
+                }"
+                @click="applyCheckpointPreset(preset)"
+                :title="`Apply ${preset.label} (${preset.displayTime || preset.opensAt + ' – ' + preset.closesAt})`"
+              >
+                <div class="template-chip-top">
+                  <span class="template-chip-type" :class="{ 'type-out': preset.type === 'OUT' }">{{ preset.type }}</span>
+                  <span class="template-chip-name">{{ preset.label }}</span>
+                  <ion-icon
+                    v-if="isPresetAdded(preset, editingCheckpoints)"
+                    :icon="checkmarkCircle"
+                    class="template-added-icon"
+                  />
+                </div>
+                <span class="template-chip-time font-mono">{{ preset.opensAt }} – {{ preset.closesAt }}</span>
+              </button>
+            </div>
+          </div>
+
           <!-- Add Checkpoint Form -->
           <div class="add-cp-box">
             <h5 class="add-cp-title">Add Checkpoint</h5>
@@ -1402,6 +1484,39 @@ async function handleAddSession() {
                   aria-label="Remove Checkpoint"
                 >
                   <ion-icon :icon="trashOutline" />
+                </button>
+              </div>
+            </div>
+
+            <!-- Quick Templates -->
+            <div class="quick-templates-section">
+              <div class="quick-templates-header">
+                <span class="quick-templates-title">Quick Templates</span>
+                <span class="quick-templates-hint">Tap to autofill scan window</span>
+              </div>
+              <div class="quick-templates-grid">
+                <button
+                  v-for="preset in CHECKPOINT_PRESETS"
+                  :key="preset.label"
+                  type="button"
+                  class="template-chip"
+                  :class="{
+                    'is-selected': isEditSessionPresetSelected(preset),
+                    'is-added': isPresetAdded(preset, editSessionCheckpoints)
+                  }"
+                  @click="applyEditSessionCheckpointPreset(preset)"
+                  :title="`Apply ${preset.label} (${preset.displayTime || preset.opensAt + ' – ' + preset.closesAt})`"
+                >
+                  <div class="template-chip-top">
+                    <span class="template-chip-type" :class="{ 'type-out': preset.type === 'OUT' }">{{ preset.type }}</span>
+                    <span class="template-chip-name">{{ preset.label }}</span>
+                    <ion-icon
+                      v-if="isPresetAdded(preset, editSessionCheckpoints)"
+                      :icon="checkmarkCircle"
+                      class="template-added-icon"
+                    />
+                  </div>
+                  <span class="template-chip-time font-mono">{{ preset.opensAt }} – {{ preset.closesAt }}</span>
                 </button>
               </div>
             </div>
@@ -2186,6 +2301,118 @@ async function handleAddSession() {
   padding: 4px;
   display: flex;
   align-items: center;
+}
+
+/* Quick Templates Section */
+.quick-templates-section {
+  margin-top: 14px;
+  margin-bottom: 4px;
+}
+
+.quick-templates-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.quick-templates-title {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--app-text-secondary);
+}
+
+.quick-templates-hint {
+  font-size: 11px;
+  color: var(--app-text-muted);
+}
+
+.quick-templates-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 8px;
+}
+
+.template-chip {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--uni-surface-subtle, rgba(255, 255, 255, 0.04));
+  border: 1px solid var(--uni-border, rgba(255, 255, 255, 0.1));
+  color: var(--app-text-primary);
+  cursor: pointer;
+  text-align: left;
+  transition: all 0.18s ease;
+  width: 100%;
+}
+
+.template-chip:hover {
+  background: rgba(20, 184, 166, 0.08);
+  border-color: rgba(20, 184, 166, 0.4);
+}
+
+.template-chip.is-selected {
+  background: rgba(20, 184, 166, 0.15);
+  border-color: var(--ion-color-primary, #14b8a6);
+  box-shadow: 0 0 0 1px var(--ion-color-primary, #14b8a6);
+}
+
+.template-chip.is-added {
+  border-style: dashed;
+  opacity: 0.9;
+}
+
+.template-chip-top {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+}
+
+.template-chip-type {
+  font-size: 9px;
+  font-weight: 800;
+  padding: 1px 4px;
+  border-radius: 3px;
+  background: rgba(20, 184, 166, 0.18);
+  color: #14b8a6;
+}
+
+.template-chip-type.type-out {
+  background: rgba(225, 29, 72, 0.18);
+  color: #fb7185;
+}
+
+.template-chip-name {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--app-text-primary);
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.template-added-icon {
+  font-size: 13px;
+  color: #10b981;
+  flex-shrink: 0;
+}
+
+.template-chip-time {
+  font-size: 10.5px;
+  color: var(--app-text-muted);
+}
+
+@media (max-width: 340px) {
+  .quick-templates-grid {
+    grid-template-columns: 1fr;
+  }
 }
 
 .add-cp-box {

@@ -131,6 +131,24 @@ async function refreshSessionData() {
   recentLogs.value = await attendanceService.getScanLogs(selectedOccurrenceId.value);
 }
 
+function formatScanErrorMessage(err: unknown): string {
+  if (!err) return 'An unexpected error occurred during scan.';
+  const msg = err instanceof Error ? err.message : String(err);
+  if (msg.includes('787') || msg.toLowerCase().includes('foreign key')) {
+    if (msg.includes('Event occurrence') || msg.toLowerCase().includes('occurrence')) {
+      return 'Attendance session is not available in local database. Please sync events online before offline scanning.';
+    }
+    if (msg.includes('Student') || msg.toLowerCase().includes('student')) {
+      return 'Student record is not available in local database. Please sync student directory online.';
+    }
+    if (msg.includes('Officer') || msg.toLowerCase().includes('officer') || msg.toLowerCase().includes('user')) {
+      return 'Officer credentials missing locally. Please log in online to initialize offline scanning access.';
+    }
+    return 'Local database reference error. Please connect to internet to sync reference data.';
+  }
+  return msg;
+}
+
 // Watch tag changes from useNfc
 watch(lastTag, async (newTag) => {
   if (!newTag?.id || isProcessing.value) return;
@@ -178,11 +196,17 @@ watch(lastTag, async (newTag) => {
     }
     await refreshSessionData();
   } catch (err: unknown) {
-    console.error('Error in verification scan:', err);
+    const errorMsg = formatScanErrorMessage(err);
+    console.error('[AttendanceScan] Error in verification scan:', {
+      error: err instanceof Error ? err.message : String(err),
+      formatted: errorMsg,
+      occurrenceId: selectedOccurrenceId.value,
+      tagId: newTag.id,
+    });
     await haptics.error();
     lastResult.value = {
       type: 'INVALID',
-      message: err instanceof Error ? err.message : 'Error processing NFC tag',
+      message: errorMsg,
       timestamp: new Date().toISOString(),
       rfidUid: newTag.id
     };
@@ -202,7 +226,7 @@ async function handleConfirmStudent() {
       officerId,
       pv.suggestedStatus,
       undefined,
-      undefined,
+      pv.rfidUid,
       undefined,
       undefined,
       'NFC',
@@ -222,7 +246,14 @@ async function handleConfirmStudent() {
     pendingVerification.value = null;
     await refreshSessionData();
   } catch (err: unknown) {
-    await showToast((err as Error).message, 'error');
+    const errorMsg = formatScanErrorMessage(err);
+    console.error('[AttendanceScan] Error confirming student attendance:', {
+      error: err instanceof Error ? err.message : String(err),
+      formatted: errorMsg,
+      occurrenceId: pv.occurrenceId,
+      studentId: pv.student.id,
+    });
+    await showToast(errorMsg, 'error');
   }
 }
 

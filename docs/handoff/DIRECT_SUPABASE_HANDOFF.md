@@ -1589,6 +1589,56 @@ To prevent premature or late attendance scans across multi-session events (such 
 
 ---
 
+### 18.11. Resolution of Android NFC Scanner Foreign Key Error 787 & Independent Scanning Windows
+
+#### 1. Root Cause Analysis: SQLite Foreign Key Error 787
+During Android NFC attendance scanning, `@capacitor-community/sqlite` threw native unhandled exception `Run: FOREIGN KEY constraint failed (code 787)`:
+1. **Mandatory Audit Actor Foreign Key (`attendance_audit.actor_user_id`)**:
+   - The SQLite `attendance_audit` table specifies `actor_user_id TEXT NOT NULL REFERENCES users(id)`.
+   - When officers logged in via Supabase Auth without a pre-existing row in local SQLite `users` table (or when `officerId` defaulted to `'officer_user'`), `AttendanceRepository.recordAttendance` attempted an audit log insertion referencing a non-existent `users(id)`, triggering native constraint violation 787.
+2. **Missing Local Parent Records in Offline Scanning (`attendance_records`)**:
+   - `attendance_records` enforces strict foreign keys: `occurrence_id REFERENCES event_occurrences(id)` and `student_id REFERENCES students(id)`.
+   - In offline-first mode, attempting to record attendance for an occurrence or student not yet downloaded or cached locally triggered raw code 787 failures.
+3. **Attempt Logging Foreign Key Failures (`attendance_attempts`)**:
+   - `attendance_attempts` requires `occurrence_id TEXT NOT NULL REFERENCES event_occurrences(id)`.
+   - When scanning an invalid NFC tag or an occurrence not present in SQLite, `AttendanceRepository.logAttempt` attempted an INSERT that immediately failed foreign key validation.
+4. **Direct Supabase Mode Leakage**:
+   - `attendanceService.rejectStudentScan` called `AttendanceRepository.logAttempt` unconditionally on SQLite rather than inserting into remote Supabase `attendance_attempts`.
+
+#### 2. Implemented Fixes
+1. **Direct Supabase Mode Protection (`attendance.service.ts`)**:
+   - `rejectStudentScan` now branches on `DataModeService.isDirectSupabase()`, writing directly to Supabase `attendance_attempts` and bypassing local SQLite completely.
+   - `confirmStudentAttendanceDirect` ensures normalized RFID UIDs are passed to the remote `record_attendance_scan` RPC.
+2. **Local SQLite Referential Pre-Checks (`attendance.repository.ts`)**:
+   - `recordAttendance` pre-validates occurrence existence against `event_occurrences` (matching canonical UUIDs and `occ_` prefixes) and student existence against `students`.
+   - `recordAttendance` resolves `actor_user_id` against active provisioned users in SQLite `users` to guarantee referential validity.
+   - If referenced parent records are missing, it throws clear, descriptive errors (e.g. `"[AttendanceRepository] Cannot record attendance offline: Event occurrence ... not found in local database. Please sync events first."`) instead of crashing the native SQLite engine.
+3. **Resilient Attempt Logging (`attendance.repository.ts`)**:
+   - `logAttempt` pre-verifies `occurrence_id` in SQLite; if absent, it logs a diagnostic warning rather than attempting an invalid INSERT.
+   - Optional foreign keys (`student_id`, `card_id`, `actor_user_id`) are verified; if unresolvable, they are safely nullified.
+   - `devices` default record (`dev_default`) is idempotently ensured.
+4. **User-Friendly Error Mapping (`AttendanceScanPage.vue`)**:
+   - Intercepts raw code 787 and foreign key errors, presenting actionable guidance:
+     - `"Attendance session is not available in local database. Please sync events online before offline scanning."`
+     - `"Student record is not available in local database. Please sync student directory online."`
+     - `"Officer credentials missing locally. Please log in online to initialize offline scanning access."`
+   - Logs non-sensitive diagnostic telemetry (`error`, `formatted`, `occurrenceId`, `tagId`).
+5. **Independent Checkpoint Scanning Windows (`EventDetailPage.vue`)**:
+   - Removed restrictions binding checkpoint windows inside official event hours (`starts_at` to `ends_at`).
+   - Checkpoints now fully allow early IN (e.g., 7:00 AM for an 8:00 AM event) and late OUT (e.g., 5:30 PM for a 5:00 PM event), validated against server-authoritative Asia/Manila time in Direct Supabase mode while preserving start/end ordering (`closeMin > openMin`).
+6. **Quick Checkpoint Templates & Duplicate Prevention (`EventDetailPage.vue`)**:
+   - Added 4 client-side presets to "Configure Checkpoints" and "Edit Session" sheets:
+     - Morning IN (IN, 7:00 AM – 8:30 AM)
+     - Morning OUT (OUT, 11:30 AM – 12:30 PM)
+     - Afternoon IN (IN, 12:30 PM – 1:30 PM)
+     - Afternoon OUT (OUT, 4:30 PM – 5:30 PM)
+   - One-tap autofill for label, type, opening time, and closing time.
+   - Allows full manual editing before adding.
+   - Preserves manual workflow, existing saved checkpoints, and unique checkpoint IDs.
+   - Prevents duplicate checkpoints by label (case-insensitive deduplication check with toast notification).
+
+---
+
 ## 19. Supabase Migration Deployment History & Status
 
 | Migration File | Description | Deployment Method | Deployed Date | Status |

@@ -48,6 +48,21 @@ export interface AttendanceCheckpoint {
   orderIndex?: number;
 }
 
+export interface CheckpointPreset {
+  label: string;
+  type: CheckpointType;
+  opensAt: string;
+  closesAt: string;
+  displayTime?: string;
+}
+
+export const CHECKPOINT_PRESETS: readonly CheckpointPreset[] = [
+  { label: 'Morning IN', type: 'IN', opensAt: '07:00', closesAt: '08:30', displayTime: '7:00 AM – 8:30 AM' },
+  { label: 'Morning OUT', type: 'OUT', opensAt: '11:30', closesAt: '12:30', displayTime: '11:30 AM – 12:30 PM' },
+  { label: 'Afternoon IN', type: 'IN', opensAt: '12:30', closesAt: '13:30', displayTime: '12:30 PM – 1:30 PM' },
+  { label: 'Afternoon OUT', type: 'OUT', opensAt: '16:30', closesAt: '17:30', displayTime: '4:30 PM – 5:30 PM' },
+] as const;
+
 export interface EventOccurrence {
   id: string;
   eventId: string;

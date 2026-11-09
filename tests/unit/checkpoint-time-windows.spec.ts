@@ -7,7 +7,7 @@ import { CardsRepository } from '@/database/repositories/cards.repository';
 import { EventsRepository } from '@/database/repositories/events.repository';
 import { AcademicRepository } from '@/database/repositories/academic.repository';
 import { AttendanceRepository } from '@/database/repositories/attendance.repository';
-import type { AttendanceCheckpoint } from '@/types/event';
+import { CHECKPOINT_PRESETS, type AttendanceCheckpoint, type CheckpointPreset } from '@/types/event';
 
 describe('Configurable Attendance Checkpoints with Individual Scan Windows', () => {
   const semesterId = 'sem_window_test';
@@ -33,8 +33,8 @@ describe('Configurable Attendance Checkpoints with Individual Scan Windows', () 
   function validateCheckpointWindow(
     opensAt: string,
     closesAt: string,
-    sessionStart?: string,
-    sessionEnd?: string,
+    _sessionStart?: string,
+    _sessionEnd?: string,
     label: string = 'Checkpoint'
   ): string | null {
     if (!opensAt || !closesAt) {
@@ -50,20 +50,8 @@ describe('Configurable Attendance Checkpoints with Individual Scan Windows', () 
       return `${label}: Closing time (${closesAt}) must be later than opening time (${opensAt}).`;
     }
 
-    if (sessionStart && sessionEnd) {
-      const sessionStartMin = timeToMinutes(sessionStart);
-      const sessionEndMin = timeToMinutes(sessionEnd);
-
-      if (sessionStartMin >= 0 && sessionEndMin >= 0) {
-        if (openMin < sessionStartMin) {
-          return `${label}: Opening time (${opensAt}) cannot be earlier than session start (${sessionStart}).`;
-        }
-        if (closeMin > sessionEndMin) {
-          return `${label}: Closing time (${closesAt}) cannot be later than session end (${sessionEnd}).`;
-        }
-      }
-    }
-
+    // Checkpoints represent independent attendance scanning windows.
+    // Early IN (before official session start) and late OUT (after official session end) are explicitly permitted.
     return null;
   }
 
@@ -105,14 +93,14 @@ describe('Configurable Attendance Checkpoints with Individual Scan Windows', () 
       expect(errEarlier).toContain('Closing time (08:30) must be later than opening time (09:00)');
     });
 
-    it('rejects checkpoint when opening time is earlier than session start', () => {
-      const err = validateCheckpointWindow('07:45', '08:30', sessionStart, sessionEnd, 'Early Bird');
-      expect(err).toContain('Opening time (07:45) cannot be earlier than session start (08:00)');
+    it('allows early IN checkpoint window opening earlier than official session start (e.g. 7:00 AM for 8:00 AM event)', () => {
+      const err = validateCheckpointWindow('07:00', '08:30', sessionStart, sessionEnd, 'Early Bird IN');
+      expect(err).toBeNull();
     });
 
-    it('rejects checkpoint when closing time is later than session end', () => {
-      const err = validateCheckpointWindow('16:30', '17:30', sessionStart, sessionEnd, 'Late Exit');
-      expect(err).toContain('Closing time (17:30) cannot be later than session end (17:00)');
+    it('allows late OUT checkpoint window closing later than official session end (e.g. 5:30 PM for 5:00 PM event)', () => {
+      const err = validateCheckpointWindow('16:30', '17:30', sessionStart, sessionEnd, 'Extended OUT');
+      expect(err).toBeNull();
     });
 
     it('detects overlapping checkpoint schedules', () => {
@@ -126,9 +114,10 @@ describe('Configurable Attendance Checkpoints with Individual Scan Windows', () 
 
     it('accepts consecutive non-overlapping checkpoints', () => {
       const validSeq: AttendanceCheckpoint[] = [
-        { id: 'cp1', label: 'Morning IN', type: 'IN', opensAt: '08:00', closesAt: '08:30' },
-        { id: 'cp2', label: 'Morning OUT', type: 'OUT', opensAt: '11:30', closesAt: '12:00' },
-        { id: 'cp3', label: 'Afternoon IN', type: 'IN', opensAt: '13:00', closesAt: '13:30' },
+        { id: 'cp1', label: 'Morning IN', type: 'IN', opensAt: '07:30', closesAt: '08:30' },
+        { id: 'cp2', label: 'Morning OUT', type: 'OUT', opensAt: '11:30', closesAt: '12:30' },
+        { id: 'cp3', label: 'Afternoon IN', type: 'IN', opensAt: '12:30', closesAt: '13:30' },
+        { id: 'cp4', label: 'Afternoon OUT', type: 'OUT', opensAt: '16:30', closesAt: '17:30' },
       ];
       const overlapErr = validateOverlappingCheckpoints(validSeq);
       expect(overlapErr).toBeNull();
@@ -143,7 +132,6 @@ describe('Configurable Attendance Checkpoints with Individual Scan Windows', () 
       const opensAt = '08:00';
       const closesAt = '08:30';
 
-      // Simulating SQL: (occurs_on || ' ' || opensAt)::timestamp AT TIME ZONE 'Asia/Manila'
       const manilaOpeningIso = `${occursOn}T${opensAt}:00+08:00`;
       const manilaClosingIso = `${occursOn}T${closesAt}:00+08:00`;
 
@@ -210,22 +198,22 @@ describe('Configurable Attendance Checkpoints with Individual Scan Windows', () 
         updated_at: new Date().toISOString(),
       });
 
-      // Checkpoints:
-      // Session: 08:00 - 17:00
-      // Morning IN: 08:00 - 08:30 (grace: 15 min -> 08:15)
-      // Morning OUT: 11:30 - 12:00
-      // Afternoon IN: 13:00 - 13:30 (grace: 15 min -> 13:15)
-      // Afternoon OUT: 16:30 - 17:00
+      // Checkpoints with early IN and late OUT:
+      // Session Official Hours: 08:00 - 17:00
+      // Morning IN: 07:00 - 08:30 (opens 1 hour BEFORE session start, grace until 08:15)
+      // Morning OUT: 11:30 - 12:30
+      // Afternoon IN: 12:30 - 13:30
+      // Afternoon OUT: 16:30 - 17:30 (closes 30 min AFTER session end)
       const checkpoints: AttendanceCheckpoint[] = [
         {
           id: 'cp_morning_in',
           label: 'Morning IN',
           type: 'IN',
-          opensAt: '08:00',
+          opensAt: '07:00',
           closesAt: '08:30',
-          startTime: '08:00',
+          startTime: '07:00',
           endTime: '08:30',
-          graceMinutes: 15,
+          graceMinutes: 75, // Grace period until 08:15
           orderIndex: 0,
         },
         {
@@ -233,18 +221,18 @@ describe('Configurable Attendance Checkpoints with Individual Scan Windows', () 
           label: 'Morning OUT',
           type: 'OUT',
           opensAt: '11:30',
-          closesAt: '12:00',
+          closesAt: '12:30',
           startTime: '11:30',
-          endTime: '12:00',
+          endTime: '12:30',
           orderIndex: 1,
         },
         {
           id: 'cp_afternoon_in',
           label: 'Afternoon IN',
           type: 'IN',
-          opensAt: '13:00',
+          opensAt: '12:30',
           closesAt: '13:30',
-          startTime: '13:00',
+          startTime: '12:30',
           endTime: '13:30',
           graceMinutes: 15,
           orderIndex: 2,
@@ -254,9 +242,9 @@ describe('Configurable Attendance Checkpoints with Individual Scan Windows', () 
           label: 'Afternoon OUT',
           type: 'OUT',
           opensAt: '16:30',
-          closesAt: '17:00',
+          closesAt: '17:30',
           startTime: '16:30',
-          endTime: '17:00',
+          endTime: '17:30',
           orderIndex: 3,
         },
       ];
@@ -301,18 +289,18 @@ describe('Configurable Attendance Checkpoints with Individual Scan Windows', () 
       await db.execute('DELETE FROM attendance_records WHERE occurrence_id = ?', [occurrenceId]);
     });
 
-    it('allows scan within the allowed window (PRESENT within grace period)', async () => {
-      // Morning IN window: 08:00 - 08:30, grace period: 15 min (until 08:15)
-      // Scan at 08:10:00 (inside grace period -> PRESENT)
-      const scanTime = '2026-11-10T08:10:00';
+    it('allows early IN scan before official session start (e.g. 7:15 AM for 8:00 AM session)', async () => {
+      // Session starts at 08:00, but Morning IN window opens at 07:00
+      // Scan at 07:15:00 (inside window, inside grace period -> PRESENT)
+      const scanTime = '2026-11-10T07:15:00';
       const result = await attendanceService.confirmStudentAttendance(
         occurrenceId,
         testStudent.id,
         'officer_window_1',
-        undefined, // auto status
+        undefined,
         undefined,
         testStudent.cardUid,
-        'idem_scan_inside_1',
+        'idem_scan_early_in',
         scanTime,
         'NFC',
         'cp_morning_in'
@@ -327,7 +315,7 @@ describe('Configurable Attendance Checkpoints with Individual Scan Windows', () 
     });
 
     it('marks attendance as LATE when scanned within window but after grace period', async () => {
-      // Scan at 08:20:00 (between 08:15 grace limit and 08:30 window close)
+      // Scan at 08:20:00 (after 08:15 grace limit and before 08:30 window close)
       const scanTime = '2026-11-10T08:20:00';
       const result = await attendanceService.confirmStudentAttendance(
         occurrenceId,
@@ -348,8 +336,8 @@ describe('Configurable Attendance Checkpoints with Individual Scan Windows', () 
     });
 
     it('rejects scan before opening time with clear reason (CHECKPOINT_NOT_OPEN)', async () => {
-      // Morning IN window opens at 08:00. Attempt scan at 07:45:00
-      const earlyScanTime = '2026-11-10T07:45:00';
+      // Morning IN window opens at 07:00. Attempt scan at 06:45:00
+      const earlyScanTime = '2026-11-10T06:45:00';
 
       await expect(
         attendanceService.confirmStudentAttendance(
@@ -396,7 +384,7 @@ describe('Configurable Attendance Checkpoints with Individual Scan Windows', () 
     });
 
     it('supports independent attendance for Morning OUT checkpoint with its own window', async () => {
-      // First, set active checkpoint to Morning OUT (11:30 - 12:00)
+      // First, set active checkpoint to Morning OUT (11:30 - 12:30)
       await eventService.setActiveCheckpoint(occurrenceId, 'cp_morning_out');
 
       // Scan at 08:15 against Morning OUT -> MUST FAIL (window not open yet)
@@ -416,7 +404,7 @@ describe('Configurable Attendance Checkpoints with Individual Scan Windows', () 
         )
       ).rejects.toThrow(/not yet open for scanning|Window opens at 11:30 AM/i);
 
-      // Scan at 11:45 within Morning OUT window (11:30 - 12:00) -> MUST SUCCEED
+      // Scan at 11:45 within Morning OUT window (11:30 - 12:30) -> MUST SUCCEED
       const outWindowTime = '2026-11-10T11:45:00';
       const outResult = await attendanceService.confirmStudentAttendance(
         occurrenceId,
@@ -433,8 +421,8 @@ describe('Configurable Attendance Checkpoints with Individual Scan Windows', () 
 
       expect(outResult.status).toBe('RECORDED');
 
-      // Scan at 12:15 after Morning OUT closed -> MUST FAIL
-      const postCloseTime = '2026-11-10T12:15:00';
+      // Scan at 12:45 after Morning OUT closed -> MUST FAIL
+      const postCloseTime = '2026-11-10T12:45:00';
       await expect(
         attendanceService.confirmStudentAttendance(
           occurrenceId,
@@ -448,7 +436,30 @@ describe('Configurable Attendance Checkpoints with Individual Scan Windows', () 
           'NFC',
           'cp_morning_out'
         )
-      ).rejects.toThrow(/scanning window has closed|Window closed at 12:00 PM/i);
+      ).rejects.toThrow(/scanning window has closed|Window closed at 12:30 PM/i);
+    });
+
+    it('allows late OUT scan after official session end (e.g. 5:15 PM for 5:00 PM session)', async () => {
+      // Official session ends at 17:00, but Afternoon OUT window runs 16:30 - 17:30
+      await eventService.setActiveCheckpoint(occurrenceId, 'cp_afternoon_out');
+
+      const lateOutScanTime = '2026-11-10T17:15:00';
+      const outResult = await attendanceService.confirmStudentAttendance(
+        occurrenceId,
+        testStudent.id,
+        'officer_window_1',
+        undefined,
+        undefined,
+        testStudent.cardUid,
+        'idem_late_out_valid',
+        lateOutScanTime,
+        'NFC',
+        'cp_afternoon_out'
+      );
+
+      expect(outResult.status).toBe('RECORDED');
+      const record = await AttendanceRepository.getRecord(occurrenceId, testStudent.id, 'cp_afternoon_out');
+      expect(record?.status).toBe('PRESENT');
     });
 
     it('enforces that checkpoints preserve their unique IDs during editing', async () => {
@@ -470,6 +481,198 @@ describe('Configurable Attendance Checkpoints with Individual Scan Windows', () 
 
       expect(refreshedIds).toEqual(originalIds);
       expect(refreshedCheckpoints[0].label).toBe('Morning IN (Revised)');
+    });
+  });
+
+  describe('5. Foreign Key Protection & Missing Parent Reference Handling', () => {
+    it('throws meaningful error when occurrence does not exist in local database instead of raw code 787', async () => {
+      await expect(
+        AttendanceRepository.recordAttendance(
+          {
+            id: 'att_invalid_occ',
+            occurrence_id: 'occ_nonexistent_9999',
+            student_id: testStudent.id,
+            checkpoint_id: 'default_in',
+            status: 'PRESENT' as any,
+            checked_in_at: new Date().toISOString(),
+            method: 'NFC',
+            identity_verified_by_user_id: 'officer_window_1',
+            photo_checked: 1,
+            updated_at: new Date().toISOString(),
+          },
+          'officer_window_1'
+        )
+      ).rejects.toThrow(/Cannot record attendance offline: Event occurrence.*not found in local database/i);
+    });
+
+    it('throws meaningful error when student does not exist in local database instead of raw code 787', async () => {
+      await expect(
+        AttendanceRepository.recordAttendance(
+          {
+            id: 'att_invalid_stu',
+            occurrence_id: occurrenceId,
+            student_id: 'stu_nonexistent_9999',
+            checkpoint_id: 'default_in',
+            status: 'PRESENT' as any,
+            checked_in_at: new Date().toISOString(),
+            method: 'NFC',
+            identity_verified_by_user_id: 'officer_window_1',
+            photo_checked: 1,
+            updated_at: new Date().toISOString(),
+          },
+          'officer_window_1'
+        )
+      ).rejects.toThrow(/Cannot record attendance offline: Student.*not found in local database/i);
+    });
+
+    it('gracefully skips or nullifies missing optional foreign keys in logAttempt without throwing code 787', async () => {
+      // Calling logAttempt with a non-existent occurrence_id should safely log a warning and not throw
+      await expect(
+        AttendanceRepository.logAttempt({
+          id: 'log_test_nonexistent',
+          occurrence_id: 'occ_nonexistent_xyz',
+          uid_normalized: '04FFFFFFFFFF',
+          actor_user_id: 'officer_unknown_xyz',
+          result: 'ERROR',
+          photo_displayed: 0,
+          notes: 'Test missing occurrence',
+          occurred_at: new Date().toISOString(),
+        })
+      ).resolves.not.toThrow();
+    });
+  });
+
+  describe('Quick Checkpoint Templates and Duplicate Prevention', () => {
+    it('defines exactly four client-side presets with expected scanning windows', () => {
+      expect(CHECKPOINT_PRESETS).toHaveLength(4);
+
+      const morningIn = CHECKPOINT_PRESETS.find(p => p.label === 'Morning IN');
+      expect(morningIn).toBeDefined();
+      expect(morningIn?.type).toBe('IN');
+      expect(morningIn?.opensAt).toBe('07:00');
+      expect(morningIn?.closesAt).toBe('08:30');
+
+      const morningOut = CHECKPOINT_PRESETS.find(p => p.label === 'Morning OUT');
+      expect(morningOut).toBeDefined();
+      expect(morningOut?.type).toBe('OUT');
+      expect(morningOut?.opensAt).toBe('11:30');
+      expect(morningOut?.closesAt).toBe('12:30');
+
+      const afternoonIn = CHECKPOINT_PRESETS.find(p => p.label === 'Afternoon IN');
+      expect(afternoonIn).toBeDefined();
+      expect(afternoonIn?.type).toBe('IN');
+      expect(afternoonIn?.opensAt).toBe('12:30');
+      expect(afternoonIn?.closesAt).toBe('13:30');
+
+      const afternoonOut = CHECKPOINT_PRESETS.find(p => p.label === 'Afternoon OUT');
+      expect(afternoonOut).toBeDefined();
+      expect(afternoonOut?.type).toBe('OUT');
+      expect(afternoonOut?.opensAt).toBe('16:30');
+      expect(afternoonOut?.closesAt).toBe('17:30');
+    });
+
+    it('passes window schedule validation for all presets', () => {
+      for (const preset of CHECKPOINT_PRESETS) {
+        const error = validateCheckpointWindow(preset.opensAt, preset.closesAt, '08:00', '17:00', preset.label);
+        expect(error).toBeNull();
+      }
+    });
+
+    it('simulates autofilling template and supports manual overrides before adding', () => {
+      // Simulating reactive form state
+      let formState = {
+        label: '',
+        type: 'IN' as 'IN' | 'OUT',
+        opensAt: '',
+        closesAt: '',
+      };
+
+      // 1. Apply preset
+      const preset = CHECKPOINT_PRESETS[0]; // Morning IN
+      formState = {
+        label: preset.label,
+        type: preset.type,
+        opensAt: preset.opensAt,
+        closesAt: preset.closesAt,
+      };
+
+      expect(formState.label).toBe('Morning IN');
+      expect(formState.opensAt).toBe('07:00');
+      expect(formState.closesAt).toBe('08:30');
+
+      // 2. Manual override
+      formState.opensAt = '06:45';
+      formState.closesAt = '08:45';
+      formState.label = 'Early Morning IN';
+
+      expect(formState.label).toBe('Early Morning IN');
+      expect(formState.opensAt).toBe('06:45');
+      expect(formState.closesAt).toBe('08:45');
+
+      const validationError = validateCheckpointWindow(formState.opensAt, formState.closesAt, undefined, undefined, formState.label);
+      expect(validationError).toBeNull();
+    });
+
+    it('switching preset replaces only unsaved form inputs without mutating existing checkpoints', () => {
+      const existingCheckpoints: AttendanceCheckpoint[] = [
+        {
+          id: 'cp_existing_1',
+          label: 'Morning IN',
+          type: 'IN',
+          opensAt: '07:00',
+          closesAt: '08:30',
+        },
+      ];
+
+      let formState = {
+        label: 'Morning IN',
+        type: 'IN' as 'IN' | 'OUT',
+        opensAt: '07:00',
+        closesAt: '08:30',
+      };
+
+      // Switch to Morning OUT preset
+      const presetOut = CHECKPOINT_PRESETS[1];
+      formState = {
+        label: presetOut.label,
+        type: presetOut.type,
+        opensAt: presetOut.opensAt,
+        closesAt: presetOut.closesAt,
+      };
+
+      // Unsaved form is updated
+      expect(formState.label).toBe('Morning OUT');
+      expect(formState.type).toBe('OUT');
+      expect(formState.opensAt).toBe('11:30');
+      expect(formState.closesAt).toBe('12:30');
+
+      // Existing checkpoints list remains untouched
+      expect(existingCheckpoints).toHaveLength(1);
+      expect(existingCheckpoints[0].label).toBe('Morning IN');
+    });
+
+    it('detects duplicate checkpoint labels case-insensitively', () => {
+      const existingCheckpoints: AttendanceCheckpoint[] = [
+        {
+          id: 'cp_1',
+          label: 'Morning IN',
+          type: 'IN',
+          opensAt: '07:00',
+          closesAt: '08:30',
+        },
+      ];
+
+      function checkDuplicate(newLabel: string): boolean {
+        return existingCheckpoints.some(
+          c => c.label.trim().toLowerCase() === newLabel.trim().toLowerCase()
+        );
+      }
+
+      expect(checkDuplicate('Morning IN')).toBe(true);
+      expect(checkDuplicate('morning in')).toBe(true);
+      expect(checkDuplicate('  MORNING IN  ')).toBe(true);
+      expect(checkDuplicate('Morning OUT')).toBe(false);
+      expect(checkDuplicate('Afternoon IN')).toBe(false);
     });
   });
 });

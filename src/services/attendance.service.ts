@@ -711,6 +711,27 @@ export class AttendanceService {
     const timestamp = new Date().toISOString();
     const cleanUid = (rawRfidUid || '').trim().toUpperCase().replace(/[^0-9A-F]/g, '');
 
+    if (DataModeService.isDirectSupabase()) {
+      try {
+        const rawOccId = occurrenceId.startsWith('occ_') ? occurrenceId.replace(/^occ_/, '') : occurrenceId;
+        await supabase.from('attendance_attempts').insert({
+          id: generateLogId(),
+          occurrence_id: rawOccId,
+          student_id: studentId || null,
+          uid_normalized: cleanUid,
+          actor_user_id: officerUserId && officerUserId !== 'officer_user' && officerUserId !== 'officer_auto' ? officerUserId : null,
+          device_id: 'dev_direct',
+          result: 'IDENTITY_REJECTED',
+          photo_displayed: 1,
+          notes: reason,
+          occurred_at: timestamp,
+        });
+      } catch (e) {
+        console.warn('[AttendanceService] Could not log rejected scan to Supabase:', e);
+      }
+      return;
+    }
+
     await AttendanceRepository.logAttempt({
       id: generateLogId(),
       occurrence_id: occurrenceId,
