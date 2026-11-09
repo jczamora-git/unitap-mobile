@@ -254,14 +254,12 @@ export class PullSyncService {
 
           if (res.status === 'FAILED') {
             allSucceeded = false;
-            // If v2 RPC is missing, network is offline, or RPC call fails, break immediately to avoid repeated timeouts
+            // Only fall back to legacy if the v2 RPC is truly missing or client is completely offline
             if (
-              res.errorMessage?.includes('does not exist') ||
+              (res.errorMessage?.includes('sync_pull_entity_v2') && res.errorMessage?.includes('does not exist')) ||
               res.errorMessage?.includes('404') ||
-              res.errorMessage?.includes('fetch') ||
-              res.errorMessage?.includes('network') ||
-              res.errorMessage?.includes('failed') ||
-              res.errorMessage?.includes('Failed')
+              res.errorMessage?.includes('Failed to fetch') ||
+              res.errorMessage?.includes('NetworkError')
             ) {
               v2Available = false;
               break;

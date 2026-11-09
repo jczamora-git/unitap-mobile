@@ -62,31 +62,140 @@ export class CardsRepository {
   }
 
   public static async getCardByNormalizedUid(uid: string, adapter?: DatabaseAdapter): Promise<NfcCardRecord | null> {
+    const clean = (uid || '').trim().toUpperCase();
+    const compact = clean.replace(/[^0-9A-F]/g, '');
+
     if (!adapter && DataModeService.isDirectSupabase()) {
+      const variants = [clean];
+      if (compact && compact !== clean) variants.push(compact);
+      if (!clean.includes(':') && compact.length % 2 === 0 && compact.length >= 8) {
+        const colonSeparated = compact.match(/.{1,2}/g)?.join(':');
+        if (colonSeparated && !variants.includes(colonSeparated)) {
+          variants.push(colonSeparated);
+        }
+      }
+
       const { data, error } = await supabase
         .from('nfc_cards')
         .select('*')
-        .eq('uid_normalized', uid)
-        .eq('status', 'ACTIVE')
-        .maybeSingle();
-      if (error || !data) return null;
+        .in('uid_normalized', variants)
+        .eq('status', 'ACTIVE');
+
+      if (error) {
+        throw new Error(`Failed to query card from Supabase: ${error.message}`);
+      }
+
+      let matched = (data || []).find((c) => {
+        const u = (c.uid_normalized || '').toUpperCase();
+        const comp = u.replace(/[^0-9A-F]/g, '');
+        return u === clean || (compact.length > 0 && comp === compact);
+      });
+
+      if (!matched) {
+        const { data: allActive, error: allErr } = await supabase
+          .from('nfc_cards')
+          .select('*')
+          .eq('status', 'ACTIVE');
+
+        if (allErr) {
+          throw new Error(`Failed to query cards from Supabase: ${allErr.message}`);
+        }
+
+        matched = (allActive || []).find((c) => {
+          const u = (c.uid_normalized || '').toUpperCase();
+          const comp = u.replace(/[^0-9A-F]/g, '');
+          return u === clean || (compact.length > 0 && comp === compact);
+        });
+      }
+
+      if (!matched) return null;
       return {
-        id: data.id,
-        student_id: data.student_id,
-        uid_normalized: data.uid_normalized,
-        status: data.status,
-        assigned_at: data.assigned_at,
-        assigned_by_user_id: data.assigned_by_user_id || null,
-        revoked_at: data.deactivated_at || null,
+        id: matched.id,
+        student_id: matched.student_id,
+        uid_normalized: matched.uid_normalized,
+        status: matched.status,
+        assigned_at: matched.assigned_at,
+        assigned_by_user_id: matched.assigned_by_user_id || null,
+        revoked_at: matched.deactivated_at || null,
         revoked_by_user_id: null,
-        reason: data.note || null,
+        reason: matched.note || null,
       };
     }
 
     const db = await this.getDb(adapter);
     return db.queryOne<NfcCardRecord>(
-      'SELECT * FROM nfc_cards WHERE uid_normalized = ? AND status = ?',
-      [uid, 'ACTIVE']
+      `SELECT * FROM nfc_cards 
+       WHERE (uid_normalized = ? OR replace(replace(uid_normalized, ':', ''), ' ', '') = ?) 
+         AND status = ?`,
+      [clean, compact, 'ACTIVE']
+    );
+  }
+
+  public static async lookupCardRecord(uid: string, adapter?: DatabaseAdapter): Promise<NfcCardRecord | null> {
+    const clean = (uid || '').trim().toUpperCase();
+    const compact = clean.replace(/[^0-9A-F]/g, '');
+
+    if (!adapter && DataModeService.isDirectSupabase()) {
+      const variants = [clean];
+      if (compact && compact !== clean) variants.push(compact);
+      if (!clean.includes(':') && compact.length % 2 === 0 && compact.length >= 8) {
+        const colonSeparated = compact.match(/.{1,2}/g)?.join(':');
+        if (colonSeparated && !variants.includes(colonSeparated)) {
+          variants.push(colonSeparated);
+        }
+      }
+
+      const { data, error } = await supabase
+        .from('nfc_cards')
+        .select('*')
+        .in('uid_normalized', variants);
+
+      if (error) {
+        throw new Error(`Failed to query card from Supabase: ${error.message}`);
+      }
+
+      let matched = (data || []).find((c) => {
+        const u = (c.uid_normalized || '').toUpperCase();
+        const comp = u.replace(/[^0-9A-F]/g, '');
+        return u === clean || (compact.length > 0 && comp === compact);
+      });
+
+      if (!matched) {
+        const { data: allCards, error: allErr } = await supabase
+          .from('nfc_cards')
+          .select('*');
+
+        if (allErr) {
+          throw new Error(`Failed to query cards from Supabase: ${allErr.message}`);
+        }
+
+        matched = (allCards || []).find((c) => {
+          const u = (c.uid_normalized || '').toUpperCase();
+          const comp = u.replace(/[^0-9A-F]/g, '');
+          return u === clean || (compact.length > 0 && comp === compact);
+        });
+      }
+
+      if (!matched) return null;
+      return {
+        id: matched.id,
+        student_id: matched.student_id,
+        uid_normalized: matched.uid_normalized,
+        status: matched.status,
+        assigned_at: matched.assigned_at,
+        assigned_by_user_id: matched.assigned_by_user_id || null,
+        revoked_at: matched.deactivated_at || null,
+        revoked_by_user_id: null,
+        reason: matched.note || null,
+      };
+    }
+
+    const db = await this.getDb(adapter);
+    return db.queryOne<NfcCardRecord>(
+      `SELECT * FROM nfc_cards 
+       WHERE (uid_normalized = ? OR replace(replace(uid_normalized, ':', ''), ' ', '') = ?)
+       ORDER BY CASE WHEN status = 'ACTIVE' THEN 0 ELSE 1 END LIMIT 1`,
+      [clean, compact]
     );
   }
 

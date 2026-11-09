@@ -808,7 +808,7 @@ export class FinanceRepository {
       const [adjRes, allocRes] = await Promise.all([
         supabase
           .from('obligation_adjustments')
-          .select('obligation_id, kind, amount_centavos')
+          .select('obligation_id, adjustment_type, amount_centavos')
           .in('obligation_id', obIds),
         supabase
           .from('payment_allocations')
@@ -826,8 +826,13 @@ export class FinanceRepository {
       // Aggregate adjustments per obligation (ADDITION vs DEDUCTION)
       const adjustmentsByObId = new Map<string, number>();
       for (const adj of adjRes.data || []) {
-        const amt = Number(adj.amount_centavos || 0);
-        const change = adj.kind === 'ADDITION' ? amt : -amt;
+        const amt = Math.abs(Number(adj.amount_centavos || 0));
+        const rawType = String(adj.adjustment_type || (adj as any).kind || '').toUpperCase();
+        // Additions increase the obligation balance
+        // Deductions/waivers/discounts decrease the obligation balance
+        const isAddition = ['ADDITION', 'CHARGE', 'PENALTY', 'ADDITIONAL_CHARGE'].includes(rawType);
+        const isDeduction = ['DISCOUNT', 'WAIVE', 'WAIVER', 'REDUCTION', 'DEDUCTION'].includes(rawType);
+        const change = isAddition ? amt : isDeduction ? -amt : 0;
         adjustmentsByObId.set(
           adj.obligation_id,
           (adjustmentsByObId.get(adj.obligation_id) || 0) + change
@@ -868,7 +873,7 @@ export class FinanceRepository {
       // (amount_centavos + adjustments) > posted_paid_centavos
       const owingStudentIds = new Set<string>();
       for (const o of obs) {
-        if (o.status === 'PAID' || o.status === 'VOID') continue;
+        if (o.status === 'PAID' || o.status === 'VOID' || o.status === 'WAIVED') continue;
         const assessed = Number(o.amount_centavos || 0);
         const adj = adjustmentsByObId.get(o.id) || 0;
         const netAssessed = assessed + adj;

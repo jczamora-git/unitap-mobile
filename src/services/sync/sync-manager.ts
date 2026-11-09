@@ -100,7 +100,7 @@ export class SyncManager {
         "SELECT count(*) as count FROM sync_audit_logs WHERE direction = 'PUSH' AND status = 'SUCCESS'"
       );
       const checkpointRow = await db.queryOne<{ count: number }>(
-        "SELECT count(*) as count FROM entity_sync_checkpoints WHERE last_sync_status != 'SUCCESS' OR records_pulled = 0"
+        "SELECT count(*) as count FROM entity_sync_checkpoints WHERE last_sync_status != 'SUCCESS' OR last_pulled_at = '1970-01-01T00:00:00.000Z'"
       );
 
       SyncStatusService.setPendingCount(outboxRow?.count || 0);

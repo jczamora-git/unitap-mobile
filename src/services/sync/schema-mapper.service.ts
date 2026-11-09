@@ -254,10 +254,13 @@ export class SchemaMapperService {
           title: titleOrLabel,
           label: String(raw.label || titleOrLabel),
           occurs_on: occursOn,
-          starts_at: String(raw.starts_at),
-          ends_at: String(raw.ends_at),
+          starts_at: String(raw.starts_at || '08:00'),
+          ends_at: String(raw.ends_at || '17:00'),
           grace_minutes: Number(raw.grace_minutes) || 15,
           status: mappedStatus,
+          checkpoints_json: typeof raw.checkpoints === 'object'
+            ? JSON.stringify(raw.checkpoints)
+            : String(raw.checkpoints_json || '[]'),
           opened_at: this.toIsoString(raw.opened_at),
           closed_at: this.toIsoString(raw.closed_at),
           updated_at: this.toIsoString(raw.updated_at) || new Date().toISOString(),
@@ -617,6 +620,64 @@ export class SchemaMapperService {
         record.enrollment_id = enr.id;
         if (!keys.includes('enrollment_id')) {
           keys.push('enrollment_id');
+        }
+      }
+    }
+
+    // Resolve foreign keys for events to prevent SQLite FK constraint failure (code 787)
+    if (tableName === 'events') {
+      if (record.semester_id) {
+        const sem = await tx.queryOne<{ id: string }>(
+          'SELECT id FROM semesters WHERE id = ? LIMIT 1',
+          [record.semester_id]
+        );
+        if (!sem) {
+          const anySem = await tx.queryOne<{ id: string }>('SELECT id FROM semesters LIMIT 1');
+          if (anySem?.id) {
+            record.semester_id = anySem.id;
+          } else {
+            const now = new Date().toISOString();
+            await tx.execute(
+              `INSERT OR IGNORE INTO academic_years (id, label, starts_on, ends_on, status)
+               VALUES ('ay_default', '2026-2027', '2026-01-01', '2026-12-31', 'ACTIVE')`
+            );
+            await tx.execute(
+              `INSERT OR IGNORE INTO semesters (id, academic_year_id, term, starts_on, ends_on, status)
+               VALUES (?, 'ay_default', 'FIRST', '2026-01-01', '2026-06-30', 'ACTIVE')`,
+              [record.semester_id]
+            );
+          }
+        }
+      }
+      if (record.category_id) {
+        const cat = await tx.queryOne<{ id: string }>(
+          'SELECT id FROM event_categories WHERE id = ? LIMIT 1',
+          [record.category_id]
+        );
+        if (!cat) {
+          record.category_id = null;
+        }
+      }
+      if (record.created_by_user_id) {
+        const usr = await tx.queryOne<{ id: string }>(
+          'SELECT id FROM users WHERE id = ? LIMIT 1',
+          [record.created_by_user_id]
+        );
+        if (!usr) {
+          record.created_by_user_id = null;
+        }
+      }
+    }
+
+    // Sanitize event_occurrences check constraints
+    if (tableName === 'event_occurrences') {
+      if (record.starts_at && record.ends_at && record.starts_at >= record.ends_at) {
+        const [h, m] = String(record.starts_at).split(':').map(Number);
+        if (!isNaN(h) && !isNaN(m)) {
+          const endMin = (h * 60 + m + 60) % 1440;
+          const endH = String(Math.floor(endMin / 60)).padStart(2, '0');
+          const endM = String(endMin % 60).padStart(2, '0');
+          record.ends_at = `${endH}:${endM}`;
         }
       }
     }

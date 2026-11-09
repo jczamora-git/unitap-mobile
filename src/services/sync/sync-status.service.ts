@@ -40,6 +40,7 @@ export type UserFacingSyncStatus =
   | 'Offline'
   | 'Pending Uploads'
   | 'Waiting to Sync'
+  | 'Sync Incomplete'
   | 'Needs Attention'
   | 'Sync Error'
   | 'Update Failed'
@@ -428,9 +429,14 @@ export class SyncStatusService {
         case 'DIRECT_MODE':
           return 'Direct Supabase Mode';
         case 'OFFLINE_READY':
+          if (this.pendingCount.value > 0) return 'Pending Uploads';
+          if (this.pendingPullCount.value > 0) return 'Sync Incomplete';
           return 'Offline';
         case 'UP_TO_DATE':
         default:
+          if (this.failedOpsCount.value > 0) return 'Update Failed';
+          if (this.pendingCount.value > 0) return this.onlineStatus.value ? 'Waiting to Sync' : 'Pending Uploads';
+          if (this.pendingPullCount.value > 0) return this.onlineStatus.value ? 'Sync Incomplete' : 'Offline';
           return 'Up to Date';
       }
     });

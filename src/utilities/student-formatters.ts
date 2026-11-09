@@ -35,6 +35,31 @@ export function formatYearLevel(yearLevel?: YearLevel | number | null): string {
 }
 
 /**
+ * Generates uppercase 1- or 2-letter initials for avatar placeholders.
+ * Example: "Juan", "Dela Cruz" -> "JD"
+ * Example: "Juan Dela Cruz" -> "JD"
+ */
+export function getStudentInitials(
+  firstNameOrFullName?: string | null,
+  lastName?: string | null
+): string {
+  if (!firstNameOrFullName) return 'ST';
+  if (lastName) {
+    const f = firstNameOrFullName.trim()[0] || '';
+    const l = lastName.trim()[0] || '';
+    return (f + l).toUpperCase() || 'ST';
+  }
+  const clean = firstNameOrFullName.trim();
+  const parts = clean.split(/\s+/).filter(Boolean);
+  if (parts.length >= 2) {
+    const f = parts[0][0] || '';
+    const l = parts[parts.length - 1][0] || '';
+    return (f + l).toUpperCase() || 'ST';
+  }
+  return clean.substring(0, 2).toUpperCase() || 'ST';
+}
+
+/**
  * Returns a concise academic summary line for cards and headers.
  * Example: "BSIT • 3rd Year • Section A"
  */

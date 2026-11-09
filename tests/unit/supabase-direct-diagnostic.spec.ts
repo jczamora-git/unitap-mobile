@@ -1569,7 +1569,7 @@ describe('Direct Supabase Student Reading Diagnostic & Integrity', () => {
     expect(eligibleStudents[0].id).toBe('stu-1');
 
     // 6. Verifies obligation_adjustments affects outstanding balance (deduction settles ob-1)
-    mockAdjustments = [{ obligation_id: 'ob-1', kind: 'DEDUCTION', amount_centavos: 10000 }];
+    mockAdjustments = [{ obligation_id: 'ob-1', adjustment_type: 'DISCOUNT', amount_centavos: 10000 }];
     const afterAdjIds = await FinanceRepository.getStudentIdsWithOutstandingBalance({
       category: 'CONTRIBUTION',
       semesterId: 'sem-1',

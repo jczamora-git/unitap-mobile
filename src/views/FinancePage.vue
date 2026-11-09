@@ -20,6 +20,7 @@ import {
   alertCircle,
   alertCircleOutline,
   printOutline,
+  downloadOutline,
 } from 'ionicons/icons';
 
 import { financeService } from '@/services/finance.service';
@@ -277,15 +278,33 @@ async function viewReceipt(pay: PaymentItem) {
   isReceiptModalOpen.value = true;
 }
 
-function printReceipt() {
+const isDownloadingReceiptPdf = ref(false);
+
+async function downloadReceiptPdf() {
+  if (isDownloadingReceiptPdf.value) return;
   if (!paymentReceipt.value) return;
-  const html = financeService.generatePrintableReceiptHtml(paymentReceipt.value);
-  const printWindow = window.open('', '_blank');
-  if (printWindow) {
-    printWindow.document.write(html);
-    printWindow.document.close();
-    printWindow.focus();
-    printWindow.print();
+
+  isDownloadingReceiptPdf.value = true;
+  try {
+    const pdfBytes = financeService.generateReceiptPdf(paymentReceipt.value);
+    const filename = financeService.buildReceiptPdfFilename(paymentReceipt.value.referenceNumber);
+
+    const blob = new Blob([pdfBytes as any], { type: 'application/pdf' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+
+    await showToast(`Downloaded ${filename}`, 'success');
+  } catch (err: any) {
+    console.error('Failed to generate receipt PDF:', err);
+    await showToast(err?.message || 'Failed to download receipt PDF.', 'error');
+  } finally {
+    isDownloadingReceiptPdf.value = false;
   }
 }
 
@@ -942,9 +961,14 @@ onIonViewWillEnter(loadFinanceData);
           </div>
 
           <div class="sheet-actions">
-            <UniButton variant="outline" @click="printReceipt">
-              <ion-icon :icon="printOutline" slot="start" />
-              <span>Print PDF</span>
+            <UniButton
+              variant="outline"
+              :loading="isDownloadingReceiptPdf"
+              :disabled="isDownloadingReceiptPdf"
+              @click="downloadReceiptPdf"
+            >
+              <ion-icon :icon="downloadOutline" slot="start" />
+              <span>{{ isDownloadingReceiptPdf ? 'Generating PDF...' : 'Download PDF' }}</span>
             </UniButton>
             <UniButton variant="primary" @click="isReceiptModalOpen = false">
               <span>Close</span>

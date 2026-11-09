@@ -20,6 +20,8 @@ import {
   timeOutline
 } from 'ionicons/icons';
 import { eventService } from '@/services/event.service';
+import { DataModeService } from '@/services/data-mode.service';
+import { SelectiveSyncService } from '@/services/sync/selective-sync.service';
 import type { Event, EventOccurrence } from '@/types/event';
 import { formatDate } from '@/utilities/date-formatters';
 import { haptics } from '@/utilities/haptics';
@@ -62,6 +64,25 @@ async function loadEvents() {
       occMap[ev.id] = await eventService.getOccurrences(ev.id);
     }
     occurrencesByEvent.value = occMap;
+
+    // In offline-first mode, trigger background selective sync for events when online
+    if (!DataModeService.isDirectSupabase() && typeof navigator !== 'undefined' && navigator.onLine) {
+      SelectiveSyncService.refreshEvents()
+        .then(async (res) => {
+          if (res.refreshed && res.recordsPulled > 0) {
+            const freshList = await eventService.getEvents();
+            events.value = freshList;
+            const freshOccMap: Record<string, EventOccurrence[]> = {};
+            for (const ev of freshList) {
+              freshOccMap[ev.id] = await eventService.getOccurrences(ev.id);
+            }
+            occurrencesByEvent.value = freshOccMap;
+          }
+        })
+        .catch((err) => {
+          console.warn('[EventsPage] Background events refresh failed:', err);
+        });
+    }
   } catch (err) {
     console.error('Error loading events:', err);
   } finally {

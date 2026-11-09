@@ -129,6 +129,22 @@ const notificationsEnabled = ref(true);
 
 const isNetworkOnline = computed(() => NetworkService.isOnline.value);
 const isDirectSupabaseMode = computed(() => DataModeService.isDirectSupabase());
+const envInfo = computed(() => DataModeService.getEnvironmentInfo());
+
+async function handleToggleDataMode() {
+  haptics.medium();
+  const nextMode = isDirectSupabaseMode.value ? 'offline_first' : 'supabase_direct';
+  DataModeService.setMode(nextMode);
+  showToast(
+    nextMode === 'supabase_direct'
+      ? 'Switched to Direct Supabase Mode'
+      : 'Switched to Offline-First SQLite Mode',
+    'info'
+  );
+  if (nextMode === 'offline_first') {
+    await SyncManager.refreshCountsFromDatabase();
+  }
+}
 const networkConnType = computed(() => NetworkService.connectionType.value);
 const lastSyncAttemptTime = computed(() => SyncStatusService.lastAttempt.value);
 const unresolvedConflicts = computed(() => SyncStatusService.conflictCount.value);
@@ -424,7 +440,8 @@ const syncStatusClass = computed(() => {
     case 'Offline Mode':
     case 'Offline': return 'offline';
     case 'Pending Uploads':
-    case 'Waiting to Sync': return 'pending';
+    case 'Waiting to Sync':
+    case 'Sync Incomplete': return 'pending';
     case 'Needs Attention':
     case 'Sign-in Required': return 'attention';
     case 'Sync Error':
@@ -713,31 +730,54 @@ function toggleNotifications() {
           </div>
         </section>
 
-        <!-- 4. OFFLINE & SYNC CENTER (Hidden in Direct Supabase Mode) -->
-        <section v-if="!isDirectSupabaseMode" class="settings-group">
+        <!-- 4. DATA MODE, OFFLINE & SYNC CENTER -->
+        <section class="settings-group">
           <div class="group-header">
-            <span>Sync Center &amp; Synchronization Diagnostics</span>
+            <span>Data Mode, Sync Center &amp; Diagnostics</span>
           </div>
 
           <div class="grouped-list-card minimal-card">
+            <!-- Data Mode & Build Identity Selector -->
+            <div class="data-mode-control-card">
+              <div class="data-mode-control-header">
+                <div class="data-mode-title-col">
+                  <span class="data-mode-headline">Runtime Data Mode</span>
+                  <span class="data-mode-subheadline font-mono">{{ envInfo.modeLabel }} • v{{ envInfo.versionName }} (Build {{ envInfo.versionCode }})</span>
+                </div>
+                <button
+                  type="button"
+                  class="data-mode-toggle-btn font-mono"
+                  :class="{ 'btn-direct': isDirectSupabaseMode, 'btn-offline': !isDirectSupabaseMode }"
+                  @click="handleToggleDataMode"
+                >
+                  {{ isDirectSupabaseMode ? 'Switch to Offline SQLite' : 'Switch to Direct Supabase' }}
+                </button>
+              </div>
+              <div class="data-mode-env-details font-mono">
+                <span>Supabase: {{ envInfo.supabaseUrl }}</span>
+              </div>
+            </div>
+
             <!-- Direct Supabase Mode Alert Banner -->
             <div v-if="isDirectSupabaseMode" class="direct-mode-banner" style="background: rgba(16, 185, 129, 0.1); border: 1px solid rgba(16, 185, 129, 0.3); border-radius: 8px; padding: 10px 14px; margin-bottom: 12px; display: flex; align-items: center; gap: 8px; color: #10b981; font-size: 0.82rem; font-weight: 600;">
               <span class="status-indicator-dot dot-online" style="background: #10b981;"></span>
-              <span>Direct Supabase Mode Active — SQLite Sync Paused</span>
+              <span>Direct Supabase Mode Active — All reads/writes authoritative in cloud. SQLite sync paused.</span>
             </div>
 
-            <!-- Sync Status Header Row -->
-            <div class="sync-overview-row">
-              <div class="sync-status-indicator">
-                <span class="status-indicator-dot" :class="`dot-${syncStatusClass}`"></span>
-                <span class="status-indicator-text">{{ syncStatus }}</span>
+            <!-- Offline-First Sync Center (Active when in Offline-First Mode) -->
+            <div v-if="!isDirectSupabaseMode">
+              <!-- Sync Status Header Row -->
+              <div class="sync-overview-row">
+                <div class="sync-status-indicator">
+                  <span class="status-indicator-dot" :class="`dot-${syncStatusClass}`"></span>
+                  <span class="status-indicator-text">{{ syncStatus }}</span>
+                </div>
+                <div class="sync-timestamps font-mono">
+                  <span class="last-sync-caption">Last Sync: {{ formattedLastSync }}</span>
+                  <span class="last-sync-caption text-neutral">• Local Records: {{ formattedLocalRecords }}</span>
+                  <span v-if="lastReconcileTime" class="last-sync-caption text-neutral">• Compared: {{ lastReconcileTime }}</span>
+                </div>
               </div>
-              <div class="sync-timestamps font-mono">
-                <span class="last-sync-caption">Last Sync: {{ formattedLastSync }}</span>
-                <span class="last-sync-caption text-neutral">• Local Records: {{ formattedLocalRecords }}</span>
-                <span v-if="lastReconcileTime" class="last-sync-caption text-neutral">• Compared: {{ lastReconcileTime }}</span>
-              </div>
-            </div>
 
             <!-- Sync Overview KPI Grid (6 Distinct Separated Metrics) -->
             <div class="sync-kpi-grid">
@@ -1072,6 +1112,7 @@ function toggleNotifications() {
                 <span class="row-desc">Preflight preview &amp; cloud data refresh</span>
               </div>
               <ion-icon :icon="chevronForwardOutline" class="row-arrow" />
+            </div>
             </div>
           </div>
         </section>
@@ -2049,6 +2090,71 @@ function toggleNotifications() {
 .btn-spinner {
   width: 14px;
   height: 14px;
+}
+
+/* Data Mode & Environment Selector Styles */
+.data-mode-control-card {
+  background: var(--uni-surface-subtle, rgba(255, 255, 255, 0.04));
+  border: 1px solid var(--uni-border, rgba(255, 255, 255, 0.1));
+  border-radius: 8px;
+  padding: 12px 14px;
+  margin-bottom: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.data-mode-control-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+}
+
+.data-mode-title-col {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.data-mode-headline {
+  font-size: 0.88rem;
+  font-weight: 700;
+  color: var(--app-text-primary, #f8fafc);
+}
+
+.data-mode-subheadline {
+  font-size: 0.76rem;
+  color: var(--ion-color-primary, #14b8a6);
+}
+
+.data-mode-env-details {
+  font-size: 0.72rem;
+  color: var(--app-text-muted, #94a3b8);
+  word-break: break-all;
+}
+
+.data-mode-toggle-btn {
+  padding: 6px 12px;
+  border-radius: 6px;
+  font-size: 0.74rem;
+  font-weight: 600;
+  cursor: pointer;
+  border: 1px solid transparent;
+  transition: all 0.2s ease;
+  white-space: nowrap;
+}
+
+.data-mode-toggle-btn.btn-direct {
+  background: rgba(20, 184, 166, 0.15);
+  color: #14b8a6;
+  border-color: rgba(20, 184, 166, 0.3);
+}
+
+.data-mode-toggle-btn.btn-offline {
+  background: rgba(59, 130, 246, 0.15);
+  color: #60a5fa;
+  border-color: rgba(59, 130, 246, 0.3);
 }
 
 /* Offline & Sync Section Styles */

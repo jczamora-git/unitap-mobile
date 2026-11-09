@@ -2,6 +2,7 @@ import { ReportsRepository, type StudentObligationReportRow, type CategorySummar
 import { formatCentavosToPesos } from '@/utilities/finance-formatters';
 import { DataModeService } from './data-mode.service';
 import { supabase } from '@/integrations/supabase/client';
+import type { PaymentReceipt } from '@/types/finance';
 
 export interface ReportFilterOptions {
   semesterId: string;
@@ -396,6 +397,253 @@ export class ReportService {
       else termClean = sem.term.replace(/[^a-zA-Z0-9]/g, '_');
     }
     return `UniTap_Financial_Report_${yearClean}_${termClean}.pdf`;
+  }
+
+  /**
+   * Generates a descriptive filename for the downloaded official payment receipt PDF.
+   * Format: UniTap_Receipt_{receipt_reference}.pdf
+   */
+  public static buildReceiptPdfFilename(referenceNumber?: string): string {
+    const cleanRef = (referenceNumber || 'RECORD')
+      .replace(/[^a-zA-Z0-9_-]/g, '_');
+    return `UniTap_Receipt_${cleanRef}.pdf`;
+  }
+
+  /**
+   * Generates a fully compliant, self-contained binary PDF 1.4 document
+   * representing the official student payment receipt.
+   */
+  public static generateReceiptPdf(receipt: PaymentReceipt): Uint8Array {
+    const pageWidth = 595.28;
+    const pageHeight = 841.89;
+
+    const itemsPerPage = 8;
+    const items = receipt.items || [];
+    const totalPages = Math.max(1, Math.ceil(items.length / itemsPerPage));
+
+    const methodStr = receipt.paymentMethod === 'CASH'
+      ? 'Cash Collection'
+      : (receipt.notes && receipt.notes.toLowerCase().includes('gcash')
+          ? 'GCash Transfer'
+          : (receipt.notes && receipt.notes.toLowerCase().includes('bank')
+              ? 'Bank Transfer'
+              : (receipt.paymentMethod || 'Manual Record')));
+
+    const paymentDateStr = receipt.paymentDate
+      ? new Date(receipt.paymentDate).toLocaleString()
+      : new Date().toLocaleString();
+
+    const studentSectionStr = receipt.student?.yearLevel
+      ? `Year ${receipt.student.yearLevel} - ${receipt.student.section || 'N/A'}`
+      : (receipt.student?.section || 'N/A');
+
+    const semLabel = receipt.academicTerm?.semesterLabel || 'Current Term';
+    const ayLabel = receipt.academicTerm?.academicYearLabel || '';
+    const termStr = ayLabel ? `${semLabel} (${ayLabel})` : semLabel;
+
+    const pageStreamContents: string[] = [];
+
+    for (let p = 0; p < totalPages; p++) {
+      const isFirstPage = p === 0;
+      const isLastPage = p === totalPages - 1;
+      const pageItems = items.slice(p * itemsPerPage, (p + 1) * itemsPerPage);
+      const ops: string[] = [];
+
+      // Top brand accent bar: Teal #0F766E
+      ops.push('0.059 0.463 0.431 rg');
+      ops.push('40 806 515 4 re f');
+
+      if (isFirstPage) {
+        // Brand Title
+        ops.push('BT');
+        ops.push('/F2 18 Tf');
+        ops.push('0.059 0.463 0.431 rg');
+        ops.push('1 0 0 1 40 780 Tm');
+        ops.push(`(${this.escapePdfText('UniTap 2.0')}) Tj`);
+
+        // Subtitle
+        ops.push('/F1 9 Tf');
+        ops.push('0.392 0.455 0.545 rg');
+        ops.push('1 0 0 1 40 766 Tm');
+        ops.push(`(${this.escapePdfText('Computer Studies Government (CSG) - Official Payment Receipt')}) Tj`);
+        ops.push('ET');
+
+        // Status Badge
+        if (receipt.isLocallyRecordedPendingSync) {
+          ops.push('0.996 0.953 0.78 rg 345 762 210 20 re f');
+          ops.push('0.96 0.7 0.2 RG 0.5 w 345 762 210 20 re s');
+          ops.push('BT /F2 8 Tf 0.706 0.325 0.035 rg 1 0 0 1 355 768 Tm (Locally Recorded - Sync Pending) Tj ET');
+        } else {
+          ops.push('0.92 0.98 0.94 rg 345 762 210 20 re f');
+          ops.push('0.2 0.7 0.4 RG 0.5 w 345 762 210 20 re s');
+          ops.push('BT /F2 8 Tf 0.016 0.47 0.34 rg 1 0 0 1 355 768 Tm (Authoritatively Confirmed - Server Recorded) Tj ET');
+        }
+
+        // Divider
+        ops.push('0.85 0.88 0.92 RG 0.75 w 40 750 m 555 750 l S');
+
+        // Metadata Box
+        ops.push('0.973 0.98 0.988 rg 40 656 515 82 re f');
+        ops.push('0.88 0.91 0.94 RG 0.5 w 40 656 515 82 re s');
+
+        // Left Column (Receipt details)
+        ops.push('BT /F1 8.5 Tf 0.392 0.455 0.545 rg 1 0 0 1 52 720 Tm (Receipt Ref:) Tj /F2 9.5 Tf 0.059 0.09 0.165 rg 1 0 0 1 125 720 Tm (' + this.escapePdfText(receipt.referenceNumber) + ') Tj ET');
+        ops.push('BT /F1 8.5 Tf 0.392 0.455 0.545 rg 1 0 0 1 52 702 Tm (Payment Date:) Tj /F1 9 Tf 0.059 0.09 0.165 rg 1 0 0 1 125 702 Tm (' + this.escapePdfText(paymentDateStr) + ') Tj ET');
+        ops.push('BT /F1 8.5 Tf 0.392 0.455 0.545 rg 1 0 0 1 52 684 Tm (Academic Term:) Tj /F1 9 Tf 0.059 0.09 0.165 rg 1 0 0 1 125 684 Tm (' + this.escapePdfText(termStr) + ') Tj ET');
+        ops.push('BT /F1 8.5 Tf 0.392 0.455 0.545 rg 1 0 0 1 52 666 Tm (Received By:) Tj /F1 9 Tf 0.059 0.09 0.165 rg 1 0 0 1 125 666 Tm (' + this.escapePdfText(receipt.receivedByOfficer || 'Authorized Officer') + ') Tj ET');
+
+        // Right Column (Student & Payment Mode)
+        ops.push('BT /F1 8.5 Tf 0.392 0.455 0.545 rg 1 0 0 1 315 720 Tm (Student Name:) Tj /F2 9.5 Tf 0.059 0.09 0.165 rg 1 0 0 1 385 720 Tm (' + this.escapePdfText(receipt.student?.fullName || 'N/A') + ') Tj ET');
+        ops.push('BT /F1 8.5 Tf 0.392 0.455 0.545 rg 1 0 0 1 315 702 Tm (School ID:) Tj /F2 9.5 Tf 0.059 0.09 0.165 rg 1 0 0 1 385 702 Tm (' + this.escapePdfText(receipt.student?.schoolId || 'N/A') + ') Tj ET');
+        ops.push('BT /F1 8.5 Tf 0.392 0.455 0.545 rg 1 0 0 1 315 684 Tm (Section:) Tj /F1 9 Tf 0.059 0.09 0.165 rg 1 0 0 1 385 684 Tm (' + this.escapePdfText(studentSectionStr) + ') Tj ET');
+        ops.push('BT /F1 8.5 Tf 0.392 0.455 0.545 rg 1 0 0 1 315 666 Tm (Payment Mode:) Tj /F2 9 Tf 0.059 0.09 0.165 rg 1 0 0 1 385 666 Tm (' + this.escapePdfText(methodStr) + ') Tj ET');
+      } else {
+        // Subsequent page header
+        ops.push('BT /F2 12 Tf 0.059 0.463 0.431 rg 1 0 0 1 40 778 Tm (' + this.escapePdfText(`UniTap 2.0 Official Receipt - ${receipt.referenceNumber} (Cont.)`) + ') Tj ET');
+        ops.push('0.85 0.88 0.92 RG 0.5 w 40 766 m 555 766 l S');
+      }
+
+      // Items Table Header
+      const tableHeaderY = isFirstPage ? 624 : 740;
+      ops.push('0.059 0.463 0.431 rg 40 ' + tableHeaderY + ' 515 20 re f');
+      ops.push('BT /F2 8.5 Tf 1 1 1 rg');
+      ops.push('1 0 0 1 52 ' + (tableHeaderY + 6) + ' Tm (Obligation / Description) Tj');
+      ops.push('1 0 0 1 250 ' + (tableHeaderY + 6) + ' Tm (Type) Tj');
+      ops.push('1 0 0 1 340 ' + (tableHeaderY + 6) + ' Tm (Remaining Balance) Tj');
+      ops.push('1 0 0 1 475 ' + (tableHeaderY + 6) + ' Tm (Amount Paid) Tj');
+      ops.push('ET');
+
+      // Data Rows
+      let rowBaselineY = tableHeaderY - 26;
+      if (pageItems.length === 0) {
+        ops.push('BT /F1 9 Tf 0.392 0.455 0.545 rg 1 0 0 1 52 ' + (rowBaselineY + 6) + ' Tm (No itemized obligations recorded for this transaction.) Tj ET');
+        rowBaselineY -= 26;
+      } else {
+        for (let i = 0; i < pageItems.length; i++) {
+          const it = pageItems[i];
+          const rowY = rowBaselineY - 4;
+
+          if (i % 2 === 1) {
+            ops.push('0.985 0.988 0.995 rg 40 ' + rowY + ' 515 28 re f');
+          }
+
+          // Item Title
+          ops.push('BT /F2 9 Tf 0.059 0.09 0.165 rg 1 0 0 1 52 ' + (rowY + 15) + ' Tm (' + this.escapePdfText(it.title) + ') Tj ET');
+          // Item Obligation Subtext
+          const obIdShort = it.obligationId ? `ID: ${it.obligationId.slice(0, 8)}...` : '';
+          if (obIdShort) {
+            ops.push('BT /F1 7.5 Tf 0.5 0.55 0.62 rg 1 0 0 1 52 ' + (rowY + 5) + ' Tm (' + this.escapePdfText(obIdShort) + ') Tj ET');
+          }
+
+          // Type
+          ops.push('BT /F1 8.5 Tf 0.25 0.3 0.38 rg 1 0 0 1 250 ' + (rowY + 11) + ' Tm (' + this.escapePdfText(it.type) + ') Tj ET');
+
+          // Remaining Balance
+          const remStr = 'PHP ' + (Number(it.remainingBalanceCentavos || 0) / 100).toFixed(2);
+          ops.push('BT /F1 9 Tf 0.392 0.455 0.545 rg 1 0 0 1 340 ' + (rowY + 11) + ' Tm (' + this.escapePdfText(remStr) + ') Tj ET');
+
+          // Paid Amount
+          const paidStr = 'PHP ' + (Number(it.paidAmountCentavos || 0) / 100).toFixed(2);
+          ops.push('BT /F2 10 Tf 0.016 0.47 0.34 rg 1 0 0 1 475 ' + (rowY + 11) + ' Tm (' + this.escapePdfText(paidStr) + ') Tj ET');
+
+          // Divider
+          ops.push('0.88 0.91 0.94 RG 0.5 w 40 ' + rowY + ' m 555 ' + rowY + ' l S');
+
+          rowBaselineY -= 28;
+        }
+      }
+
+      // If last page: render Total Box, Notes, and Audit Stamp
+      if (isLastPage) {
+        const totalBoxY = Math.max(rowBaselineY - 24, 110);
+
+        // Total Box
+        ops.push('0.94 0.98 0.95 rg 40 ' + totalBoxY + ' 515 36 re f');
+        ops.push('0.059 0.463 0.431 RG 1 w 40 ' + totalBoxY + ' 515 36 re s');
+
+        const totalStr = 'PHP ' + (Number(receipt.totalPaidCentavos || 0) / 100).toFixed(2);
+        ops.push('BT /F2 11 Tf 0.059 0.09 0.165 rg 1 0 0 1 52 ' + (totalBoxY + 13) + ' Tm (TOTAL COLLECTED:) Tj ET');
+        ops.push('BT /F2 14 Tf 0.016 0.47 0.34 rg 1 0 0 1 445 ' + (totalBoxY + 12) + ' Tm (' + this.escapePdfText(totalStr) + ') Tj ET');
+
+        // Notes if any
+        if (receipt.notes) {
+          const notesY = totalBoxY - 20;
+          ops.push('BT /F1 8.5 Tf 0.392 0.455 0.545 rg 1 0 0 1 40 ' + notesY + ' Tm (' + this.escapePdfText('Payment Notes: ' + receipt.notes) + ') Tj ET');
+        }
+
+        // Receipt Security & Audit Notice
+        ops.push('0.85 0.88 0.92 RG 0.5 w 40 70 m 555 70 l S');
+        ops.push('BT /F2 8 Tf 0.25 0.3 0.38 rg 1 0 0 1 175 56 Tm (Thank you for supporting the CSG community.) Tj ET');
+        ops.push('BT /F1 7.5 Tf 0.5 0.55 0.62 rg 1 0 0 1 125 44 Tm (Official Computer Studies Government Electronic Receipt • Issued via UniTap 2.0) Tj ET');
+      }
+
+      // Page Footer
+      ops.push('0.85 0.88 0.92 RG 0.5 w 40 32 m 555 32 l S');
+      ops.push('BT /F1 7 Tf 0.5 0.55 0.62 rg 1 0 0 1 40 20 Tm (UniTap 2.0 - Official Student Payment Receipt) Tj ET');
+      ops.push('BT /F1 7 Tf 0.5 0.55 0.62 rg 1 0 0 1 485 20 Tm (' + this.escapePdfText(`Page ${p + 1} of ${totalPages}`) + ') Tj ET');
+
+      pageStreamContents.push(ops.join('\n'));
+    }
+
+    // Assemble PDF Object Hierarchy
+    let objIndex = 1;
+    const catalogObjNum = objIndex++;
+    const pagesObjNum = objIndex++;
+    const fontHelvNum = objIndex++;
+    const fontBoldNum = objIndex++;
+    const fontMonoNum = objIndex++;
+
+    const pageObjNums: number[] = [];
+    const streamObjNums: number[] = [];
+    for (let i = 0; i < totalPages; i++) {
+      pageObjNums.push(objIndex++);
+      streamObjNums.push(objIndex++);
+    }
+
+    const objects: string[] = [];
+
+    // Catalog
+    objects[catalogObjNum] = `<< /Type /Catalog /Pages ${pagesObjNum} 0 R >>`;
+
+    // Pages parent
+    const kidsStr = pageObjNums.map((n) => `${n} 0 R`).join(' ');
+    objects[pagesObjNum] = `<< /Type /Pages /Kids [${kidsStr}] /Count ${totalPages} >>`;
+
+    // Built-in Standard Type 1 Fonts
+    objects[fontHelvNum] = `<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>`;
+    objects[fontBoldNum] = `<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold /Encoding /WinAnsiEncoding >>`;
+    objects[fontMonoNum] = `<< /Type /Font /Subtype /Type1 /BaseFont /Courier /Encoding /WinAnsiEncoding >>`;
+
+    // Pages & Streams
+    for (let i = 0; i < totalPages; i++) {
+      const pNum = pageObjNums[i];
+      const sNum = streamObjNums[i];
+      const content = pageStreamContents[i];
+
+      objects[pNum] = `<< /Type /Page /Parent ${pagesObjNum} 0 R /MediaBox [0 0 ${pageWidth} ${pageHeight}] /Resources << /Font << /F1 ${fontHelvNum} 0 R /F2 ${fontBoldNum} 0 R /F3 ${fontMonoNum} 0 R >> >> /Contents ${sNum} 0 R >>`;
+      objects[sNum] = `<< /Length ${content.length} >>\nstream\n${content}\nendstream`;
+    }
+
+    // Assemble PDF file with exact byte offset indexing
+    let pdf = '%PDF-1.4\n%\xE2\xE3\xCF\xD3\n';
+    const offsets: number[] = [];
+
+    for (let i = 1; i < objIndex; i++) {
+      offsets[i] = pdf.length;
+      pdf += `${i} 0 obj\n${objects[i]}\nendobj\n`;
+    }
+
+    const xrefOffset = pdf.length;
+    pdf += `xref\n0 ${objIndex}\n`;
+    pdf += '0000000000 65535 f \n';
+    for (let i = 1; i < objIndex; i++) {
+      const offStr = String(offsets[i]).padStart(10, '0');
+      pdf += `${offStr} 00000 n \n`;
+    }
+
+    pdf += `trailer\n<< /Size ${objIndex} /Root ${catalogObjNum} 0 R >>\nstartxref\n${xrefOffset}\n%%EOF\n`;
+
+    return this.stringToUint8Array(pdf);
   }
 
   /**

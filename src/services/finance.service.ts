@@ -11,6 +11,7 @@ import { PushSyncService } from '@/services/sync/push-sync.service';
 import { generateReferenceNumber, formatCentavosToPesos } from '@/utilities/finance-formatters';
 import { OperationPolicyService } from './operation-policy.service';
 import { DataModeService } from './data-mode.service';
+import { ReportService } from './report.service';
 import { supabase } from '@/integrations/supabase/client';
 import { logDataSource } from '@/utilities/data-source-logger';
 import type {
@@ -1122,6 +1123,14 @@ export class FinanceService {
       totalPaidCentavos: payment.amount_centavos,
       isLocallyRecordedPendingSync: true,
     };
+  }
+
+  generateReceiptPdf(receipt: PaymentReceipt): Uint8Array {
+    return ReportService.generateReceiptPdf(receipt);
+  }
+
+  buildReceiptPdfFilename(referenceNumber?: string): string {
+    return ReportService.buildReceiptPdfFilename(referenceNumber);
   }
 
   generatePrintableReceiptHtml(receipt: PaymentReceipt): string {

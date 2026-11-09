@@ -14,6 +14,8 @@ import { OperationPolicyService } from './operation-policy.service';
 import { DataModeService } from './data-mode.service';
 import { supabase } from '@/integrations/supabase/client';
 import { AcademicRepository } from '@/database/repositories/academic.repository';
+import { StudentsRepository } from '@/database/repositories/students.repository';
+import { CardsRepository } from '@/database/repositories/cards.repository';
 import { getDatabase } from '@/database/database';
 import { logDataSource } from '@/utilities/data-source-logger';
 
@@ -90,7 +92,7 @@ export class StudentService {
     return null;
   }
 
-  async resolveStudentPhotoUrl(student?: Partial<Student> | any | null): Promise<string | null> {
+  async resolveStudentPhotoUrl(student?: Partial<Student> | any | null, forceRefresh = false): Promise<string | null> {
     if (!student) return null;
     if (student.photoLocalUri || student.photo_local_uri) {
       return student.photoLocalUri || student.photo_local_uri;
@@ -101,12 +103,14 @@ export class StudentService {
       return student.photoUrl || null;
     }
 
-    const cached = StudentService.photoUrlCache.get(storagePath);
-    if (cached && cached.expiresAt > Date.now() + 60000) {
-      return cached.url;
+    if (!forceRefresh) {
+      const cached = StudentService.photoUrlCache.get(storagePath);
+      if (cached && cached.expiresAt > Date.now() + 60000) {
+        return cached.url;
+      }
     }
 
-    if (DataModeService.isDirectSupabase()) {
+    if (DataModeService.isDirectSupabase() || (typeof navigator !== 'undefined' && navigator.onLine)) {
       try {
         const { data, error } = await supabase.storage
           .from(STUDENT_PHOTOS_BUCKET)
@@ -564,6 +568,9 @@ export class StudentService {
     }
 
     const studentModel = matchedCard.student_id ? await this.fetchStudentDirectById(matchedCard.student_id) : null;
+    if (studentModel && !studentModel.photoUrl) {
+      studentModel.photoUrl = await this.resolveStudentPhotoUrl(studentModel);
+    }
     const cardRecord: NfcCardRecord = {
       id: matchedCard.id,
       studentId: matchedCard.student_id,
@@ -724,6 +731,9 @@ export class StudentService {
           const cUid = activeCard.rfidUid.trim().toUpperCase();
           const cCompact = (activeCard.rfidUidCompact || cUid).replace(/[^0-9A-F]/g, '');
           if (cUid === cleanUid || cCompact === compactUid) {
+            if (!s.photoUrl) {
+              s.photoUrl = await this.resolveStudentPhotoUrl(s);
+            }
             return {
               status: 'ACTIVE',
               student: s,
@@ -738,6 +748,9 @@ export class StudentService {
         const sUid = s.rfidUid.trim().toUpperCase();
         const sCompact = (s.rfidUidCompact || sUid).replace(/[^0-9A-F]/g, '');
         if (sUid === cleanUid || sCompact === compactUid) {
+          if (!s.photoUrl) {
+            s.photoUrl = await this.resolveStudentPhotoUrl(s);
+          }
           return {
             status: 'ACTIVE',
             student: s,
@@ -757,6 +770,9 @@ export class StudentService {
           const cUid = c.rfidUid.trim().toUpperCase();
           const cCompact = (c.rfidUidCompact || cUid).replace(/[^0-9A-F]/g, '');
           if (cUid === cleanUid || cCompact === compactUid) {
+            if (!s.photoUrl) {
+              s.photoUrl = await this.resolveStudentPhotoUrl(s);
+            }
             return {
               status: c.status,
               student: s,
@@ -768,6 +784,60 @@ export class StudentService {
           }
         }
       }
+    }
+
+    // 3. Fallback: Query CardsRepository in case cards were not attached to student records
+    try {
+      const cardRecord = await CardsRepository.lookupCardRecord(cleanUid);
+      if (cardRecord && cardRecord.student_id) {
+        let s = await this.repo.getById(cardRecord.student_id);
+        if (!s) {
+          const rawStudent = await StudentsRepository.getStudentById(cardRecord.student_id);
+          if (rawStudent) {
+            s = {
+              id: rawStudent.id,
+              studentNumber: rawStudent.school_id,
+              firstName: rawStudent.first_name,
+              middleName: rawStudent.middle_name || undefined,
+              lastName: rawStudent.last_name,
+              yearLevel: 1,
+              section: '1A',
+              course: 'BSIT',
+              rfidUid: cardRecord.uid_normalized,
+              rfidUidCompact: cardRecord.uid_normalized ? cardRecord.uid_normalized.replace(/[^0-9A-Fa-f]/g, '').toUpperCase() : '',
+              photoStoragePath: rawStudent.photo_storage_path || null,
+              photoLocalUri: rawStudent.photo_local_uri || null,
+              photoUrl: null,
+              status: rawStudent.status as any,
+              createdAt: rawStudent.created_at,
+              updatedAt: rawStudent.updated_at,
+            };
+          }
+        }
+        if (s) {
+          if (!s.photoUrl) {
+            s.photoUrl = await this.resolveStudentPhotoUrl(s);
+          }
+          return {
+            status: cardRecord.status as any,
+            student: s,
+            card: {
+              id: cardRecord.id,
+              studentId: cardRecord.student_id,
+              rfidUid: cardRecord.uid_normalized,
+              rfidUidCompact: cardRecord.uid_normalized ? cardRecord.uid_normalized.replace(/[^0-9A-Fa-f]/g, '').toUpperCase() : '',
+              status: cardRecord.status,
+              assignedAt: cardRecord.assigned_at,
+              note: cardRecord.reason || undefined,
+            },
+            scannedUid: raw,
+            normalizedUid: cardRecord.uid_normalized,
+            maskedUid: maskRfidUid(cardRecord.uid_normalized),
+          };
+        }
+      }
+    } catch (e) {
+      console.warn('[StudentService] CardsRepository fallback check warning:', e);
     }
 
     return {

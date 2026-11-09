@@ -35,7 +35,7 @@ export interface VerificationPromptData {
   message: string;
   occurrenceId: string;
   rfidUid: string;
-  student?: StudentRecord | null;
+  student?: any | null;
   studentFullName?: string;
   photoLocalUri?: string | null;
   photoUrl?: string | null;
@@ -45,6 +45,8 @@ export interface VerificationPromptData {
   programCode?: string;
   yearLevel?: number;
   section?: string;
+  schoolId?: string;
+  nfcStatus?: string;
   suggestedStatus: AttendanceStatus;
   eligible: boolean;
   existingRecordId?: string;
@@ -140,19 +142,15 @@ export class AttendanceService {
       }
     }
 
-    // 2. Resolve Card & Student on Supabase
-    const { data: cards } = await supabase
-      .from('nfc_cards')
-      .select('*')
-      .eq('uid_normalized', cleanUid);
+    // 2. Resolve Card & Student via studentService.lookupCard (reuses unified NFC identification)
+    const lookup = await studentService.lookupCard(rawRfidUid);
 
-    const activeCard = (cards || []).find((c: any) => c.status === 'ACTIVE');
-    if (!activeCard || !activeCard.student_id) {
+    if (lookup.status === 'UNREGISTERED') {
       return {
         type: 'UNREGISTERED',
-        message: 'Unregistered card. Please register this card to a student first.',
+        message: `NFC card [${rawRfidUid}] is not registered to any student.`,
         occurrenceId,
-        rfidUid: cleanUid,
+        rfidUid: rawRfidUid,
         checkpointId: targetCheckpointId,
         checkpointLabel: targetCheckpointLabel,
         checkpointType: targetCheckpointType,
@@ -161,13 +159,27 @@ export class AttendanceService {
       };
     }
 
-    const studentModel = await studentService.getStudent(activeCard.student_id);
+    if (lookup.status !== 'ACTIVE' || !lookup.card) {
+      return {
+        type: 'INVALID',
+        message: `NFC card is ${lookup.status || 'INVALID'}. Only active cards can be used for attendance.`,
+        occurrenceId,
+        rfidUid: lookup.normalizedUid || rawRfidUid,
+        checkpointId: targetCheckpointId,
+        checkpointLabel: targetCheckpointLabel,
+        checkpointType: targetCheckpointType,
+        suggestedStatus: 'PRESENT',
+        eligible: false,
+      };
+    }
+
+    const studentModel = lookup.student;
     if (!studentModel || studentModel.status !== 'ACTIVE') {
       return {
         type: 'INVALID',
         message: 'Student account is inactive or not found.',
         occurrenceId,
-        rfidUid: cleanUid,
+        rfidUid: lookup.normalizedUid || rawRfidUid,
         checkpointId: targetCheckpointId,
         checkpointLabel: targetCheckpointLabel,
         checkpointType: targetCheckpointType,
@@ -178,15 +190,20 @@ export class AttendanceService {
 
     const fullName = formatFullName(studentModel.firstName, studentModel.middleName, studentModel.lastName);
     const photoUrl = studentModel.photoUrl || (await studentService.resolveStudentPhotoUrl(studentModel));
+    const effectiveUid = lookup.normalizedUid || rawRfidUid;
 
     // 3. Duplicate / revocation check on Supabase for this checkpoint
-    const { data: existingRecord } = await supabase
+    const { data: existingRecord, error: recErr } = await supabase
       .from('attendance_records')
       .select('*')
       .eq('occurrence_id', occurrenceId)
       .eq('student_id', studentModel.id)
       .eq('checkpoint_id', targetCheckpointId)
       .maybeSingle();
+
+    if (recErr) {
+      throw new Error(`Failed to check existing attendance on Supabase: ${recErr.message}`);
+    }
 
     if (existingRecord) {
       if (existingRecord.status === 'REVOKED' || existingRecord.status === 'VOID') {
@@ -195,14 +212,19 @@ export class AttendanceService {
           type: 'REVOKED_REVIEW_REQUIRED',
           message: `Attendance was revoked for ${targetCheckpointLabel}. Reason: "${reason}". An explicit recheck with reason is required.`,
           occurrenceId,
-          rfidUid: cleanUid,
+          rfidUid: effectiveUid,
           student: studentModel as any,
           studentFullName: fullName,
-          photoLocalUri: photoUrl || studentModel.photoLocalUri || null,
+          photoLocalUri: studentModel.photoLocalUri || null,
           photoUrl: photoUrl || null,
           checkpointId: targetCheckpointId,
           checkpointLabel: targetCheckpointLabel,
           checkpointType: targetCheckpointType,
+          programCode: studentModel.course || 'BSIT',
+          yearLevel: studentModel.yearLevel || 1,
+          section: studentModel.section || '1A',
+          schoolId: studentModel.studentNumber || (studentModel as any).school_id,
+          nfcStatus: lookup.status,
           suggestedStatus: 'REVOKED',
           eligible: false,
           existingRecordId: existingRecord.id,
@@ -216,14 +238,19 @@ export class AttendanceService {
           type: 'DUPLICATE',
           message: `${fullName} is already recorded as ${existingRecord.status} for ${targetCheckpointLabel}.`,
           occurrenceId,
-          rfidUid: cleanUid,
+          rfidUid: effectiveUid,
           student: studentModel as any,
           studentFullName: fullName,
-          photoLocalUri: photoUrl || studentModel.photoLocalUri || null,
+          photoLocalUri: studentModel.photoLocalUri || null,
           photoUrl: photoUrl || null,
           checkpointId: targetCheckpointId,
           checkpointLabel: targetCheckpointLabel,
           checkpointType: targetCheckpointType,
+          programCode: studentModel.course || 'BSIT',
+          yearLevel: studentModel.yearLevel || 1,
+          section: studentModel.section || '1A',
+          schoolId: studentModel.studentNumber || (studentModel as any).school_id,
+          nfcStatus: lookup.status,
           suggestedStatus: existingRecord.status as AttendanceStatus,
           eligible: true,
           existingRecordId: existingRecord.id,
@@ -244,10 +271,10 @@ export class AttendanceService {
       type: 'ACCEPTED',
       message: `Card matched: ${fullName}. Checkpoint: ${targetCheckpointLabel}. Please verify the student's photo.`,
       occurrenceId,
-      rfidUid: cleanUid,
+      rfidUid: effectiveUid,
       student: studentModel as any,
       studentFullName: fullName,
-      photoLocalUri: photoUrl || studentModel.photoLocalUri || null,
+      photoLocalUri: studentModel.photoLocalUri || null,
       photoUrl: photoUrl || null,
       checkpointId: targetCheckpointId,
       checkpointLabel: targetCheckpointLabel,
@@ -255,6 +282,8 @@ export class AttendanceService {
       programCode: studentModel.course || 'BSIT',
       yearLevel: studentModel.yearLevel || 1,
       section: studentModel.section || '1A',
+      schoolId: studentModel.studentNumber || (studentModel as any).school_id,
+      nfcStatus: 'ACTIVE',
       suggestedStatus,
       eligible: true,
     };
@@ -415,9 +444,10 @@ export class AttendanceService {
       }
     }
 
-    // 2. Resolve Card & Student
-    const card = await CardsRepository.getCardByNormalizedUid(cleanUid);
-    if (!card) {
+    // 2. Resolve Card & Student via studentService.lookupCard (unified across Direct and Offline modes)
+    const lookup = await studentService.lookupCard(rawRfidUid);
+
+    if (lookup.status === 'UNREGISTERED') {
       await AttendanceRepository.logAttempt({
         id: generateLogId(),
         occurrence_id: occurrenceId,
@@ -430,7 +460,7 @@ export class AttendanceService {
       });
       return {
         type: 'UNREGISTERED',
-        message: `NFC card [${cleanUid}] is not registered to any student.`,
+        message: `NFC card [${rawRfidUid}] is not registered to any student.`,
         occurrenceId,
         rfidUid: cleanUid,
         checkpointId: targetCheckpointId,
@@ -441,13 +471,39 @@ export class AttendanceService {
       };
     }
 
-    const student = await StudentsRepository.getStudentById(card.student_id);
-    if (!student || student.status !== 'ACTIVE') {
+    if (lookup.status !== 'ACTIVE') {
       await AttendanceRepository.logAttempt({
         id: generateLogId(),
         occurrence_id: occurrenceId,
-        student_id: card.student_id,
-        card_id: card.id,
+        student_id: lookup.student?.id,
+        card_id: lookup.card?.id,
+        uid_normalized: cleanUid,
+        actor_user_id: actorUserId || null,
+        result: 'INACTIVE_STUDENT',
+        photo_displayed: 0,
+        notes: `Card is ${lookup.status}`,
+        occurred_at: timestamp,
+      });
+      return {
+        type: 'INVALID',
+        message: `NFC card is ${lookup.status}. Only active cards can be used for attendance.`,
+        occurrenceId,
+        rfidUid: cleanUid,
+        checkpointId: targetCheckpointId,
+        checkpointLabel: targetCheckpointLabel,
+        checkpointType: targetCheckpointType,
+        suggestedStatus: 'PRESENT',
+        eligible: false,
+      };
+    }
+
+    const studentModel = lookup.student;
+    if (!studentModel || studentModel.status !== 'ACTIVE') {
+      await AttendanceRepository.logAttempt({
+        id: generateLogId(),
+        occurrence_id: occurrenceId,
+        student_id: lookup.student?.id,
+        card_id: lookup.card?.id,
         uid_normalized: cleanUid,
         actor_user_id: actorUserId || null,
         result: 'INACTIVE_STUDENT',
@@ -468,19 +524,31 @@ export class AttendanceService {
       };
     }
 
-    const fullName = formatFullName(student.first_name, student.middle_name, student.last_name);
-    const resolvedPhoto = student.photo_local_uri || (student.photo_storage_path ? (await studentService.resolveStudentPhotoUrl({ photoStoragePath: student.photo_storage_path } as any)) : null);
+    // Ensure student object has backwards compatible fields
+    const studentCompat: any = {
+      ...studentModel,
+      school_id: studentModel.studentNumber || (studentModel as any).school_id,
+      first_name: studentModel.firstName || (studentModel as any).first_name,
+      middle_name: studentModel.middleName || (studentModel as any).middle_name,
+      last_name: studentModel.lastName || (studentModel as any).last_name,
+      photo_local_uri: studentModel.photoLocalUri || (studentModel as any).photo_local_uri,
+      photo_storage_path: studentModel.photoStoragePath || (studentModel as any).photo_storage_path,
+    };
+
+    const fullName = formatFullName(studentCompat.first_name, studentCompat.middle_name, studentCompat.last_name);
+    const resolvedPhoto = studentModel.photoUrl || studentModel.photoLocalUri || (studentModel.photoStoragePath ? (await studentService.resolveStudentPhotoUrl(studentModel)) : null);
+    const effectiveUid = lookup.normalizedUid || cleanUid;
 
     // 3. Duplicate & Revocation check in attendance_records for target checkpoint
-    const existingRecord = await AttendanceRepository.getRecord(occurrenceId, student.id, targetCheckpointId);
+    const existingRecord = await AttendanceRepository.getRecord(occurrenceId, studentModel.id, targetCheckpointId);
     if (existingRecord) {
       if (existingRecord.status === 'REVOKED' || existingRecord.status === 'VOID') {
         const reason = existingRecord.revocation_reason || existingRecord.void_reason || 'Administrative revocation';
         await AttendanceRepository.logAttempt({
           id: generateLogId(),
           occurrence_id: occurrenceId,
-          student_id: student.id,
-          card_id: card.id,
+          student_id: studentModel.id,
+          card_id: lookup.card?.id || ('card_' + cleanUid),
           uid_normalized: cleanUid,
           actor_user_id: actorUserId || null,
           result: 'NOT_ELIGIBLE',
@@ -492,14 +560,19 @@ export class AttendanceService {
           type: 'REVOKED_REVIEW_REQUIRED',
           message: `Attendance was revoked for ${targetCheckpointLabel}. Reason: "${reason}". An explicit recheck with reason is required.`,
           occurrenceId,
-          rfidUid: cleanUid,
-          student,
+          rfidUid: effectiveUid,
+          student: studentCompat,
           studentFullName: fullName,
-          photoLocalUri: resolvedPhoto,
+          photoLocalUri: studentModel.photoLocalUri || resolvedPhoto,
           photoUrl: resolvedPhoto,
           checkpointId: targetCheckpointId,
           checkpointLabel: targetCheckpointLabel,
           checkpointType: targetCheckpointType,
+          programCode: studentModel.course || 'BSIT',
+          yearLevel: studentModel.yearLevel || 1,
+          section: studentModel.section || '1A',
+          schoolId: studentCompat.school_id,
+          nfcStatus: 'ACTIVE',
           suggestedStatus: 'REVOKED',
           eligible: false,
           existingRecordId: existingRecord.id,
@@ -512,8 +585,8 @@ export class AttendanceService {
         await AttendanceRepository.logAttempt({
           id: generateLogId(),
           occurrence_id: occurrenceId,
-          student_id: student.id,
-          card_id: card.id,
+          student_id: studentModel.id,
+          card_id: lookup.card?.id || ('card_' + cleanUid),
           uid_normalized: cleanUid,
           actor_user_id: actorUserId || null,
           result: 'DUPLICATE',
@@ -525,14 +598,19 @@ export class AttendanceService {
           type: 'DUPLICATE',
           message: `${fullName} is already recorded as ${existingRecord.status} for ${targetCheckpointLabel}.`,
           occurrenceId,
-          rfidUid: cleanUid,
-          student,
+          rfidUid: effectiveUid,
+          student: studentCompat,
           studentFullName: fullName,
-          photoLocalUri: resolvedPhoto,
+          photoLocalUri: studentModel.photoLocalUri || resolvedPhoto,
           photoUrl: resolvedPhoto,
           checkpointId: targetCheckpointId,
           checkpointLabel: targetCheckpointLabel,
           checkpointType: targetCheckpointType,
+          programCode: studentModel.course || 'BSIT',
+          yearLevel: studentModel.yearLevel || 1,
+          section: studentModel.section || '1A',
+          schoolId: studentCompat.school_id,
+          nfcStatus: 'ACTIVE',
           suggestedStatus: existingRecord.status as AttendanceStatus,
           eligible: true,
           existingRecordId: existingRecord.id,
@@ -553,14 +631,19 @@ export class AttendanceService {
       type: 'ACCEPTED',
       message: `Card matched: ${fullName}. Checkpoint: ${targetCheckpointLabel}. Please verify the student's photo.`,
       occurrenceId,
-      rfidUid: cleanUid,
-      student,
+      rfidUid: effectiveUid,
+      student: studentCompat,
       studentFullName: fullName,
-      photoLocalUri: resolvedPhoto,
+      photoLocalUri: studentModel.photoLocalUri || resolvedPhoto,
       photoUrl: resolvedPhoto,
       checkpointId: targetCheckpointId,
       checkpointLabel: targetCheckpointLabel,
       checkpointType: targetCheckpointType,
+      programCode: studentModel.course || 'BSIT',
+      yearLevel: studentModel.yearLevel || 1,
+      section: studentModel.section || '1A',
+      schoolId: studentCompat.school_id,
+      nfcStatus: 'ACTIVE',
       suggestedStatus,
       eligible: true,
     };

@@ -24,6 +24,7 @@ import {
   stopCircleOutline,
   personOutline,
   refreshOutline,
+  downloadOutline,
 } from 'ionicons/icons';
 import { useNfc } from '@/composables/useNfc';
 import { studentService } from '@/services/student.service';
@@ -84,6 +85,7 @@ const identificationTabs = [
 // --- Eligible Students for Payment (Filtered by Category & Template) ---
 const eligibleStudents = ref<Student[]>([]);
 const isEligibleLoading = ref<boolean>(false);
+const eligibleError = ref<string>('');
 const searchQuery = ref<string>('');
 const searchCurrentPage = ref(1);
 const searchPageSize = ref(5);
@@ -113,6 +115,7 @@ watch(searchQuery, () => {
 
 async function loadEligibleStudents() {
   isEligibleLoading.value = true;
+  eligibleError.value = '';
   try {
     const list = await financeService.getEligibleStudentsForPayment({
       category: selectedCategory.value,
@@ -120,8 +123,9 @@ async function loadEligibleStudents() {
     });
     eligibleStudents.value = list;
     searchCurrentPage.value = 1;
-  } catch (err) {
+  } catch (err: any) {
     console.error('Failed to load eligible students for payment:', err);
+    eligibleError.value = err?.message || 'Failed to load eligible students.';
     eligibleStudents.value = [];
   } finally {
     isEligibleLoading.value = false;
@@ -338,6 +342,9 @@ async function loadInitialData() {
     if (queryStudentId) {
       const student = await studentService.getStudent(queryStudentId);
       if (student) {
+        if (!student.photoUrl) {
+          student.photoUrl = await studentService.resolveStudentPhotoUrl(student);
+        }
         selectedStudent.value = student;
         selectedStudentId.value = student.id;
         identifiedViaNfc.value = false;
@@ -446,6 +453,9 @@ watch(lastTag, async (tag) => {
   try {
     const lookup = await studentService.lookupCard(tag.id);
     if (lookup.status === 'ACTIVE' && lookup.student) {
+      if (!lookup.student.photoUrl) {
+        lookup.student.photoUrl = await studentService.resolveStudentPhotoUrl(lookup.student);
+      }
       selectedStudent.value = lookup.student;
       selectedStudentId.value = lookup.student.id;
       identifiedViaNfc.value = true;
@@ -478,12 +488,24 @@ async function handleToggleScanner() {
 }
 
 // --- Manual Student Selection from Search Tab ---
-function handleSelectStudent(student: Student) {
+async function handleSelectStudent(student: Student) {
   haptics.medium();
+  if (!student.photoUrl) {
+    student.photoUrl = await studentService.resolveStudentPhotoUrl(student);
+  }
   selectedStudent.value = student;
   selectedStudentId.value = student.id;
   identifiedViaNfc.value = false;
   errorMessage.value = '';
+}
+
+async function handlePaymentPhotoError() {
+  if (selectedStudent.value) {
+    const refreshed = await studentService.resolveStudentPhotoUrl(selectedStudent.value, true);
+    if (refreshed && selectedStudent.value) {
+      selectedStudent.value.photoUrl = refreshed;
+    }
+  }
 }
 
 function handleClearStudent() {
@@ -675,15 +697,33 @@ function handleDone() {
   router.push('/tabs/finance');
 }
 
-function printReceipt() {
+const isDownloadingReceiptPdf = ref(false);
+
+async function downloadReceiptPdf() {
+  if (isDownloadingReceiptPdf.value) return;
   if (!completedReceipt.value) return;
-  const html = financeService.generatePrintableReceiptHtml(completedReceipt.value);
-  const printWindow = window.open('', '_blank');
-  if (printWindow) {
-    printWindow.document.write(html);
-    printWindow.document.close();
-    printWindow.focus();
-    printWindow.print();
+
+  isDownloadingReceiptPdf.value = true;
+  try {
+    const pdfBytes = financeService.generateReceiptPdf(completedReceipt.value);
+    const filename = financeService.buildReceiptPdfFilename(completedReceipt.value.referenceNumber);
+
+    const blob = new Blob([pdfBytes as any], { type: 'application/pdf' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+
+    await showToast(`Downloaded ${filename}`, 'success');
+  } catch (err: any) {
+    console.error('Failed to generate receipt PDF:', err);
+    await showToast(err?.message || 'Failed to download receipt PDF.', 'error');
+  } finally {
+    isDownloadingReceiptPdf.value = false;
   }
 }
 
@@ -789,7 +829,14 @@ onIonViewDidLeave(() => {
           <!-- A. Selected Student Profile Banner -->
           <div v-if="selectedStudent" class="selected-student-banner">
             <div class="student-avatar-circle">
-              {{ getInitials(selectedStudent) }}
+              <img
+                v-if="selectedStudent.photoUrl || selectedStudent.photoLocalUri"
+                :src="(selectedStudent.photoUrl || selectedStudent.photoLocalUri)!"
+                alt="Student Photo"
+                class="student-photo-img"
+                @error="handlePaymentPhotoError"
+              />
+              <span v-else>{{ getInitials(selectedStudent) }}</span>
             </div>
             <div class="student-details-wrap">
               <div class="student-header-line">
@@ -879,7 +926,7 @@ onIonViewDidLeave(() => {
               </div>
 
               <!-- Counter Bar -->
-              <div class="count-row">
+              <div v-if="!eligibleError" class="count-row">
                 <span class="count-text font-mono">
                   {{ filteredStudents.length }} {{ filteredStudents.length === 1 ? 'student found' : 'students found' }}
                 </span>
@@ -890,6 +937,22 @@ onIonViewDidLeave(() => {
               <div v-if="isEligibleLoading && eligibleStudents.length === 0" class="loading-state">
                 <ion-spinner name="crescent" color="primary" />
                 <span class="loading-text">Loading eligible students...</span>
+              </div>
+
+              <!-- Error State: Query failed -->
+              <div v-else-if="eligibleError" class="query-error-state">
+                <ion-icon :icon="alertCircle" class="error-icon" />
+                <div class="error-title">Unable to Load Balances</div>
+                <div class="error-desc">{{ eligibleError }}</div>
+                <UniButton
+                  variant="secondary"
+                  size="sm"
+                  class="retry-btn"
+                  @click="loadEligibleStudents"
+                >
+                  <ion-icon :icon="refreshOutline" slot="start" />
+                  Retry
+                </UniButton>
               </div>
 
               <!-- Empty State: Filter Returned No Match -->
@@ -1274,9 +1337,14 @@ onIonViewDidLeave(() => {
           </div>
 
           <div class="receipt-actions">
-            <UniButton variant="outline" @click="printReceipt">
-              <ion-icon :icon="printOutline" slot="start" />
-              <span>Print / Save PDF</span>
+            <UniButton
+              variant="outline"
+              :loading="isDownloadingReceiptPdf"
+              :disabled="isDownloadingReceiptPdf"
+              @click="downloadReceiptPdf"
+            >
+              <ion-icon :icon="downloadOutline" slot="start" />
+              <span>{{ isDownloadingReceiptPdf ? 'Generating PDF...' : 'Download PDF' }}</span>
             </UniButton>
             <UniButton variant="primary" @click="handleNextStudent">
               <ion-icon :icon="arrowForwardOutline" slot="start" />
@@ -1413,6 +1481,13 @@ onIonViewDidLeave(() => {
   font-size: 15px;
   letter-spacing: 0.5px;
   flex-shrink: 0;
+  overflow: hidden;
+}
+
+.student-avatar-circle .student-photo-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
 }
 
 .student-details-wrap {
@@ -1659,6 +1734,40 @@ onIonViewDidLeave(() => {
 .loading-text {
   font-size: 12px;
   color: var(--uni-text-secondary);
+}
+
+.query-error-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 24px 16px;
+  text-align: center;
+  gap: 8px;
+  background: rgba(239, 68, 68, 0.08);
+  border: 1px solid rgba(239, 68, 68, 0.2);
+  border-radius: 8px;
+}
+
+.query-error-state .error-icon {
+  font-size: 28px;
+  color: var(--ion-color-danger, #ef4444);
+}
+
+.query-error-state .error-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--uni-text-primary, #ffffff);
+}
+
+.query-error-state .error-desc {
+  font-size: 12px;
+  color: var(--uni-text-secondary, #94a3b8);
+  max-width: 320px;
+}
+
+.query-error-state .retry-btn {
+  margin-top: 4px;
 }
 
 .matching-students-list {

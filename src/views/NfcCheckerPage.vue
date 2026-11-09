@@ -22,7 +22,7 @@ import {
 } from 'ionicons/icons';
 import { useNfc } from '@/composables/useNfc';
 import { studentService, type CardLookupResult } from '@/services/student.service';
-import { formatFullName, formatYearLevel } from '@/utilities/student-formatters';
+import { formatFullName, formatYearLevel, getStudentInitials } from '@/utilities/student-formatters';
 import { formatDateTime } from '@/utilities/nfc-formatters';
 import { haptics } from '@/utilities/haptics';
 import { 
@@ -79,6 +79,9 @@ watch(lastTag, async (newTag) => {
 
   try {
     const result = await studentService.lookupCard(newTag.id);
+    if (result.student && !result.student.photoUrl) {
+      result.student.photoUrl = await studentService.resolveStudentPhotoUrl(result.student);
+    }
     lookupResult.value = result;
 
     if (result.status === 'ACTIVE' && result.student) {
@@ -100,6 +103,15 @@ watch(lastTag, async (newTag) => {
     isChecking.value = false;
   }
 });
+
+async function handlePhotoLoadError() {
+  if (lookupResult.value?.student) {
+    const refreshed = await studentService.resolveStudentPhotoUrl(lookupResult.value.student, true);
+    if (refreshed && lookupResult.value?.student) {
+      lookupResult.value.student.photoUrl = refreshed;
+    }
+  }
+}
 
 watch(scanError, (err) => {
   if (err) {
@@ -263,7 +275,16 @@ onIonViewDidLeave(async () => {
             <div class="student-info-surface">
               <div class="student-primary-line">
                 <div class="student-avatar-box">
-                  <ion-icon :icon="personOutline" />
+                  <img
+                    v-if="lookupResult.student.photoUrl || lookupResult.student.photoLocalUri"
+                    :src="(lookupResult.student.photoUrl || lookupResult.student.photoLocalUri)!"
+                    alt="Student Photo"
+                    class="student-photo-img"
+                    @error="handlePhotoLoadError"
+                  />
+                  <span v-else class="avatar-initials">
+                    {{ getStudentInitials(lookupResult.student.firstName, lookupResult.student.lastName) }}
+                  </span>
                 </div>
                 <div class="student-names-wrap">
                   <h3 class="student-full-name">
@@ -395,7 +416,16 @@ onIonViewDidLeave(async () => {
             <div v-if="lookupResult.student" class="student-info-surface student-info-subtle">
               <div class="student-primary-line">
                 <div class="student-avatar-box avatar-muted">
-                  <ion-icon :icon="personOutline" />
+                  <img
+                    v-if="lookupResult.student.photoUrl || lookupResult.student.photoLocalUri"
+                    :src="(lookupResult.student.photoUrl || lookupResult.student.photoLocalUri)!"
+                    alt="Student Photo"
+                    class="student-photo-img"
+                    @error="handlePhotoLoadError"
+                  />
+                  <span v-else class="avatar-initials">
+                    {{ getStudentInitials(lookupResult.student.firstName, lookupResult.student.lastName) }}
+                  </span>
                 </div>
                 <div class="student-names-wrap">
                   <h3 class="student-full-name">
@@ -756,16 +786,29 @@ body.ion-palette-dark .icon-mint {
 }
 
 .student-avatar-box {
-  width: 44px;
-  height: 44px;
+  width: 52px;
+  height: 52px;
   border-radius: 12px;
   background: rgba(112, 243, 207, 0.15);
   color: #0E8560;
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 22px;
+  font-size: 20px;
+  font-weight: 700;
   flex-shrink: 0;
+  overflow: hidden;
+}
+
+.student-photo-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.avatar-initials {
+  font-size: 18px;
+  font-weight: 700;
 }
 
 :root.dark .student-avatar-box,

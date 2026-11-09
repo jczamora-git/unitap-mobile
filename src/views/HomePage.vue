@@ -37,6 +37,7 @@ import { UniPageHeader, UniStatCard, UniButton } from '@/components/ui';
 import UniGlobalSyncPill from '@/components/shared/UniGlobalSyncPill.vue';
 import { logDataSource } from '@/utilities/data-source-logger';
 import { DataModeService } from '@/services/data-mode.service';
+import { SelectiveSyncService } from '@/services/sync/selective-sync.service';
 
 const router = useRouter();
 
@@ -121,6 +122,28 @@ async function loadDashboardData() {
       operation: 'KPI: events & occurrences',
       result: events.length,
     });
+
+    // In offline-first mode, trigger background selective sync for events when online
+    if (!isDirect && typeof navigator !== 'undefined' && navigator.onLine) {
+      SelectiveSyncService.refreshEvents()
+        .then(async (res) => {
+          if (res.refreshed && res.recordsPulled > 0) {
+            const freshEvents = await eventService.getEvents();
+            activeEventsCount.value = freshEvents.filter((e) => e.status === 'ACTIVE').length;
+            const freshOccs = await eventService.getOccurrences();
+            const openOcc = freshOccs.find((o) => o.status === 'OPEN') || freshOccs[0] || null;
+            activeOccurrence.value = openOcc;
+            if (openOcc) {
+              activeEvent.value = freshEvents.find((e) => e.id === openOcc.eventId) || null;
+              occurrenceStats.value = await attendanceService.getStats(openOcc.id);
+              recentActivity.value = (await attendanceService.getScanLogs(openOcc.id)).slice(0, 5);
+            }
+          }
+        })
+        .catch((err) => {
+          console.warn('[HomePage] Background events refresh failed:', err);
+        });
+    }
   } catch (evtErr) {
     console.error('Error loading events KPI:', evtErr);
   }

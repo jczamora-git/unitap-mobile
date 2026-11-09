@@ -25,11 +25,12 @@ import {
 import { useNfc } from '@/composables/useNfc';
 import { eventService } from '@/services/event.service';
 import { attendanceService, type VerificationPromptData } from '@/services/attendance.service';
+import { studentService } from '@/services/student.service';
 import { authService } from '@/services/auth.service';
 import type { EventOccurrence, Event } from '@/types/event';
 import type { AttendanceScanResult, AttendanceStats, AttendanceScanLog } from '@/types/attendance';
 import { formatTime, formatDate } from '@/utilities/date-formatters';
-import { formatFullName, formatStudentAcademicSummary } from '@/utilities/student-formatters';
+import { formatFullName, formatStudentAcademicSummary, getStudentInitials } from '@/utilities/student-formatters';
 import { haptics } from '@/utilities/haptics';
 import { UniPageHeader, UniButton, UniSelect } from '@/components/ui';
 import { useToast } from '@/composables/useToast';
@@ -95,6 +96,32 @@ const recentLogs = ref<AttendanceScanLog[]>([]);
 const lastResult = ref<AttendanceScanResult | null>(null);
 const pendingVerification = ref<VerificationPromptData | null>(null);
 const isProcessing = ref(false);
+const photoLoadFailed = ref(false);
+const resultPhotoLoadFailed = ref(false);
+
+async function handleVerifyPhotoError() {
+  if (photoLoadFailed.value) return;
+  photoLoadFailed.value = true;
+  if (pendingVerification.value?.student) {
+    const refreshed = await studentService.resolveStudentPhotoUrl(pendingVerification.value.student, true);
+    if (refreshed && pendingVerification.value) {
+      pendingVerification.value.photoUrl = refreshed;
+      photoLoadFailed.value = false;
+    }
+  }
+}
+
+async function handleResultPhotoError() {
+  if (resultPhotoLoadFailed.value) return;
+  resultPhotoLoadFailed.value = true;
+  if (lastResult.value?.student) {
+    const refreshed = await studentService.resolveStudentPhotoUrl(lastResult.value.student, true);
+    if (refreshed && lastResult.value) {
+      lastResult.value.photoUrl = refreshed;
+      resultPhotoLoadFailed.value = false;
+    }
+  }
+}
 
 async function loadOccurrences() {
   const events = await eventService.getEvents();
@@ -152,6 +179,8 @@ function formatScanErrorMessage(err: unknown): string {
 // Watch tag changes from useNfc
 watch(lastTag, async (newTag) => {
   if (!newTag?.id || isProcessing.value) return;
+  photoLoadFailed.value = false;
+  resultPhotoLoadFailed.value = false;
   if (!selectedOccurrenceId.value) {
     lastResult.value = {
       type: 'INVALID',
@@ -484,22 +513,28 @@ function handleRegisterCard() {
           <div class="verify-student-row">
             <div class="verify-avatar-box">
               <img
-                v-if="pendingVerification.photoUrl || pendingVerification.photoLocalUri"
+                v-if="(pendingVerification.photoUrl || pendingVerification.photoLocalUri) && !photoLoadFailed"
                 :src="(pendingVerification.photoUrl || pendingVerification.photoLocalUri)!"
                 alt="Student Photo"
                 class="verify-photo-img"
+                @error="handleVerifyPhotoError"
               />
               <div v-else class="verify-avatar-placeholder">
-                {{ pendingVerification.studentFullName?.charAt(0) || 'S' }}
+                {{ getStudentInitials(pendingVerification.studentFullName || 'Student') }}
               </div>
             </div>
             <div class="verify-details">
               <h3 class="verify-name">{{ pendingVerification.studentFullName }}</h3>
               <div class="verify-meta font-mono">
-                School ID: {{ pendingVerification.student?.school_id }}
+                School ID: {{ pendingVerification.schoolId || pendingVerification.student?.school_id || pendingVerification.student?.studentNumber || '—' }}
               </div>
-              <div class="verify-meta">
-                Card UID: <span class="font-mono">{{ pendingVerification.rfidUid }}</span>
+              <div class="verify-academic-row">
+                <span class="verify-program-badge">{{ pendingVerification.programCode || pendingVerification.student?.course || 'BSIT' }}</span>
+                <span class="verify-academic-text">Year {{ pendingVerification.yearLevel || pendingVerification.student?.yearLevel || 1 }} • Sec {{ pendingVerification.section || pendingVerification.student?.section || '1A' }}</span>
+              </div>
+              <div class="verify-meta font-mono verify-card-row">
+                <span>Card UID: {{ pendingVerification.rfidUid }}</span>
+                <span class="verify-nfc-badge">ACTIVE</span>
               </div>
             </div>
           </div>
@@ -546,13 +581,14 @@ function handleRegisterCard() {
           <div v-if="lastResult.student" class="result-student-row">
             <div class="result-avatar-box">
               <img
-                v-if="lastResult.photoUrl || lastResult.student?.photoUrl || lastResult.student?.photoLocalUri"
+                v-if="(lastResult.photoUrl || lastResult.student?.photoUrl || lastResult.student?.photoLocalUri) && !resultPhotoLoadFailed"
                 :src="(lastResult.photoUrl || lastResult.student?.photoUrl || lastResult.student?.photoLocalUri)!"
                 alt="Student Photo"
                 class="result-photo-img"
+                @error="handleResultPhotoError"
               />
               <div v-else class="result-avatar-placeholder">
-                {{ lastResult.studentFullName?.charAt(0) || lastResult.student?.firstName?.charAt(0) || 'S' }}
+                {{ getStudentInitials(lastResult.studentFullName || lastResult.student?.firstName || 'Student', lastResult.student?.lastName) }}
               </div>
             </div>
             <div class="result-student-info">
@@ -560,8 +596,8 @@ function handleRegisterCard() {
                 {{ formatFullName(lastResult.student.firstName, lastResult.student.middleName, lastResult.student.lastName) }}
               </h4>
               <div class="student-meta-line">
-                <span v-if="lastResult.student.studentNumber" class="font-mono">
-                  ID: {{ lastResult.student.studentNumber }}
+                <span v-if="lastResult.student.studentNumber || (lastResult.student as any).school_id" class="font-mono">
+                  ID: {{ lastResult.student.studentNumber || (lastResult.student as any).school_id }}
                 </span>
                 <span>• {{ formatStudentAcademicSummary(lastResult.student) }}</span>
               </div>
@@ -1390,6 +1426,46 @@ function handleRegisterCard() {
   font-size: 12px;
   color: var(--uni-text-secondary);
   margin-bottom: 2px;
+}
+
+.verify-academic-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 4px;
+}
+
+.verify-program-badge {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: rgba(15, 118, 110, 0.15);
+  color: var(--uni-primary, #0f766e);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.verify-academic-text {
+  font-size: 12px;
+  color: var(--uni-text-secondary);
+  font-weight: 500;
+}
+
+.verify-card-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.verify-nfc-badge {
+  display: inline-block;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: rgba(16, 185, 129, 0.15);
+  color: #10b981;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
 }
 
 .verify-warning-box {

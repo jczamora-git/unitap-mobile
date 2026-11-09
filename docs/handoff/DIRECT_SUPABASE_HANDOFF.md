@@ -1684,3 +1684,216 @@ The following items should be exercised during live user acceptance testing:
   - Upload a profile photo from the Student Profile page; verify that client-side image compression converts it to optimized WebP/JPEG under 150 KB.
   - Verify that the photo uploads to the private `student-profile-photos` bucket using the student's UUID as the storage path.
   - Verify that signed URLs load smoothly across Student Directory cards, Student Pass, Student Portal, and NFC attendance tap verification results.
+
+---
+
+## 21. Android & Web Data Consistency, Sync Diagnostics & Build Identity
+
+**Date:** November 10, 2026  
+**Status:** Completed & Verified  
+**Scope:** Android/Web Data Consistency, Direct Mode Persistence, Offline-First Background Hydration, Accurate Sync Diagnostics, and Android APK Build Identity
+
+### 21.1. Confirmed Root Causes
+
+1. **Runtime Data Mode Divergence & Lack of Cross-Platform Persistence**:
+   - Web was executing in Direct Supabase Mode (`VITE_DATA_MODE=supabase_direct` in `.env.local`), querying Supabase PostgREST directly (displaying 300 students, 2 active events, ₱150,000 outstanding).
+   - The installed Android APK executed in Offline-First mode because runtime data mode selection was not persisted across mobile application restarts, defaulting back to SQLite where the `events` table contained 0 records.
+2. **Missing Offline Event Hydration**:
+   - While `HomePage.vue` refreshed students, charges, and obligations on mount, it never invoked `SelectiveSyncService.refreshEvents()`. `EventsPage.vue` also lacked an automated pull trigger, leaving the local SQLite `events` and `event_occurrences` tables empty unless an explicit manual sync was triggered in Settings.
+3. **Foreign Key (Code 787) Failures in SchemaMapper**:
+   - Remote Supabase events reference `semester_id`, `category_id`, and `created_by_user_id`. When pulling remote events into an unpopulated or partially populated SQLite database, missing parent foreign keys caused native SQLite execution failure `Run: FOREIGN KEY constraint failed (code 787)`, rejecting the event inserts.
+4. **5 "Pending Pulls" Calculation False Positive**:
+   - `SyncManager.refreshCountsFromDatabase()` queried:
+     ```sql
+     SELECT COUNT(*) as pending_pulls FROM sync_state WHERE last_sync_status != 'SUCCESS' OR records_pulled = 0
+     ```
+   - Five remote Supabase tables (`event_categories`, `event_participants`, `attendance_records`, `attendance_audit`, and `payment_allocations`) currently contain 0 records. Even though pull sync completed with status `'SUCCESS'`, their `records_pulled` remained 0, causing the query to misidentify all 5 tables as "pending pulls".
+5. **Misleading "Up to Date" Indicator in Sync Status**:
+   - `SyncStatusService.userFacingStatus` returned `'Up to Date'` whenever `isSyncing` was false and no push mutations were queued, completely ignoring `pendingPullCount > 0`.
+6. **Premature Loop Break in PullSyncService**:
+   - `pullRemoteChanges` contained a loop break on any individual entity failure, causing subsequent entity tables to be skipped rather than attempting best-effort hydration.
+
+### 21.2. Implemented Fixes
+
+1. **`src/services/data-mode.service.ts`**:
+   - Updated `resolveInitialMode()` to inspect both `localStorage` and `@capacitor/preferences` with storage key `'unitap_data_mode'`. Defaults to `'supabase_direct'` outside of testing environments.
+   - Updated `setMode()` to persist runtime mode asynchronously to `@capacitor/preferences` and synchronously to `localStorage`.
+   - Added `getEnvironmentInfo()` returning `mode`, `modeLabel`, `supabaseUrl`, `versionName: '1.0.1'`, and `versionCode: 2`.
+2. **`src/services/sync/sync-manager.ts`**:
+   - Corrected pending pulls query to check against unattempted baseline timestamp rather than 0 record count:
+     ```sql
+     SELECT COUNT(*) as pending_pulls FROM sync_state WHERE last_sync_status != 'SUCCESS' OR last_pulled_at = '1970-01-01T00:00:00.000Z'
+     ```
+   - Entities with 0 remote records that sync successfully with status `'SUCCESS'` are no longer counted as pending pulls.
+3. **`src/services/sync/sync-status.service.ts`**:
+   - Added `'Sync Incomplete'` to `UserFacingSyncStatus`.
+   - Updated `userFacingStatus` getter: when `pendingPullCount > 0` and not actively syncing, reports `'Sync Incomplete'` instead of `'Up to Date'`.
+4. **`src/services/sync/schema-mapper.service.ts`**:
+   - In `mapRecord` for `event_occurrences`, added mapping for `checkpoints_json` from `raw.checkpoints` / `raw.checkpoints_json`.
+   - In `safeUpsertRecord` for `events`:
+     - Checks if referenced `semester_id` exists in SQLite; if missing, automatically provisions minimal parent `academic_years` and `semesters` records.
+     - Safely nullifies `category_id` and `created_by_user_id` if missing in local tables, preventing SQLite code 787 foreign key crashes.
+   - In `safeUpsertRecord` for `event_occurrences`:
+     - Sanitizes `starts_at` and `ends_at` to prevent SQLite CHECK constraint failures if remote timestamps are improperly ordered.
+5. **`src/services/sync/pull-sync.service.ts`**:
+   - In `pullRemoteChanges`, removed premature loop break. The loop only terminates if the client is completely offline or `sync_pull_entity_v2` RPC does not exist, enabling resilient best-effort pulls.
+6. **`src/views/HomePage.vue` & `src/views/EventsPage.vue`**:
+   - In Offline-First mode (`!isDirectSupabase`), triggers background `SelectiveSyncService.refreshEvents()` when online and refreshes reactive event counters and lists upon completion.
+7. **`src/views/SettingsPage.vue`**:
+   - Made Section 4 ("Data Mode, Sync Center & Diagnostics") visible in both Direct Supabase and Offline-First modes.
+   - Added Runtime Data Mode selector and Environment Diagnostics card (`envInfo`), displaying active mode, Supabase project URL, package identity, and build version.
+   - Enabled runtime toggling via `handleToggleDataMode()`.
+   - Fixed tag structure and mapped `'Sync Incomplete'` to amber status dot.
+8. **`android/app/build.gradle`**:
+   - Incremented `versionCode` to `2` and `versionName` to `"1.0.1"` for unambiguous build identity.
+
+### 21.3. Verification Results
+
+| Verification Step | Command | Result |
+| :--- | :--- | :--- |
+| Targeted Unit Tests | `npx vitest run tests/unit/data-consistency-mode.spec.ts tests/unit/checkpoint-time-windows.spec.ts` | **32 of 32 PASSED** (Exit code 0) |
+| Related Sync Unit Tests | `npx vitest run tests/unit/selective-sync.spec.ts tests/unit/sync-preferences.spec.ts` | **29 of 29 PASSED** (Exit code 0) |
+| TypeScript Typecheck | `npx vue-tsc --noEmit` | **0 errors** (Exit code 0) |
+| Production Build | `npm run build` | **SUCCESSFUL** in 1m 46s (Exit code 0) |
+| Capacitor Android Sync | `npx cap sync android` | **SUCCESSFUL** in 3.27s (Exit code 0) |
+| Android Debug APK | `Set-Location android; .\gradlew.bat assembleDebug` | **BUILD SUCCESSFUL** in 1m 32s (Exit code 0) |
+| APK Artifact Inspection | `android/app/build/outputs/apk/debug/app-debug.apk` | **18,019,557 bytes**, LastWriteTime: `11/10/2026 2:20:50 AM` |
+
+---
+
+## 22. Unified NFC Recognition & Student Photo Identity Verification
+
+**Date:** November 10, 2026  
+**Status:** Completed & Verified  
+**Scope:** Attendance Scanner NFC Identification, Cross-Module UID Normalization, Private Storage Student Photo Resolution, and Multi-Module Visual Identity Verification
+
+### 22.1. Confirmed Root Causes
+
+1. **Inconsistent UID Normalization & Lookup Logic**:
+   - `AttendanceScanPage.vue` and `attendance.service.ts` previously stripped all punctuation and colons from scanned card tags (`rawRfidUid.replace(/[^0-9A-F]/g, '')`), creating compact hex strings (e.g. `04A73291`). It then queried Supabase and SQLite with strict equality: `.eq('uid_normalized', cleanUid)`.
+   - Cards registered with colon-separated hexadecimal notation (e.g. `04:A7:32:91`) never matched the stripped compact UID, causing Attendance Scanner to report valid cards as "UNREGISTERED".
+   - In contrast, `NfcCheckerPage.vue` and `MakePaymentPage.vue` utilized `studentService.lookupCard()`, which tests both formatted and compact representations across active and inactive cards.
+2. **Conflation of Query Errors with "UNREGISTERED" Status**:
+   - In `attendance.service.ts`, if Supabase returned a PostgREST error (e.g. network timeout, RLS denial, or missing session token), the query result data was null. The code treated this as "Card not found" and reported "UNREGISTERED" rather than surfacing the actual exception.
+3. **Missing Profile Picture Display During Attendance & Payment Scans**:
+   - Although UniTap 2.0 requires officers to visually verify student identity prior to confirming attendance, `AttendanceScanPage.vue` lacked robust signed URL retrieval for private bucket `student-profile-photos`.
+   - `NfcCheckerPage.vue` and `MakePaymentPage.vue` only displayed default placeholder icons or text initials without rendering the student's uploaded profile picture.
+   - When student profile pictures failed to load or signed URLs expired, there was no graceful fallback to computed initials or dynamic URL refresh.
+
+### 22.2. Architectural Remediation
+
+1. **Unified NFC Card Lookup Service**:
+   - `attendance.service.ts` (`prepareNfcVerificationDirect` and `prepareNfcVerification`) now exclusively reuses `studentService.lookupCard(rawRfidUid)`.
+   - Authoritative lookup errors (network failure, RLS rejection) throw directly rather than being swallowed into false "UNREGISTERED" results.
+   - Genuinely unregistered cards are distinguished from `INVALID` cards (`LOST`, `REPLACED`, `DEACTIVATED`).
+2. **Bi-Directional UID Format Matching (`CardsRepository.lookupCardRecord`)**:
+   - `CardsRepository.lookupCardRecord` and `CardsRepository.getCardByNormalizedUid` now generate multiple search variants (clean raw, compact hex, and colon-separated pairs).
+   - In Direct Supabase mode: utilizes `.in('uid_normalized', variants)` with a safe fallback to active card inspection.
+   - In SQLite mode: executes `SELECT * FROM nfc_cards WHERE (uid_normalized = ? OR replace(replace(uid_normalized, ':', ''), ' ', '') = ?) ORDER BY CASE WHEN status = 'ACTIVE' THEN 0 ELSE 1 END LIMIT 1`.
+3. **Private Storage Photo Resolution with Expiry-Aware Caching**:
+   - `studentService.resolveStudentPhotoUrl(student, forceRefresh = false)` generates signed URLs via `supabase.storage.from('student-profile-photos').createSignedUrl(storagePath, 3600)`.
+   - Supports online resolution in both Direct Supabase and hybrid Offline-First modes.
+   - Includes cache bypass when `forceRefresh = true` to recover from expired URLs on image load error (`@error`).
+4. **Enhanced Visual Identity Card in `AttendanceScanPage.vue`**:
+   - Displays prominent student profile picture (80x88px with object-fit cover and rounded border).
+   - Dynamic error recovery: on image error, requests fresh signed URL or falls back to standard initials avatar generated by `getStudentInitials(fullName)`.
+   - Comprehensive student details: Full Name, School ID (`schoolId || student.school_id || student.studentNumber`), Program badge (`BSIT`), Year Level, Section, and Card UID with "Active" badge.
+5. **Student Photo Integration in `NfcCheckerPage.vue` and `MakePaymentPage.vue`**:
+   - `NfcCheckerPage.vue`: Registered and inactive student cards display the student's photo (52x52px rounded avatar) with initials fallback and `@error` retry handling.
+   - `MakePaymentPage.vue`: Selected student banner displays the verified profile photo in `student-avatar-circle` across both NFC tap and manual search identification paths.
+6. **Student Initials Helper (`src/utilities/student-formatters.ts`)**:
+   - `getStudentInitials(firstNameOrFullName, lastName)`: Extracts clean 1- or 2-letter uppercase initials with fallback to `'ST'`.
+
+### 22.3. Verification Results
+
+| Verification Step | Command | Result |
+| :--- | :--- | :--- |
+| Targeted NFC Verification Tests | `npx vitest run tests/unit/attendance-nfc-photo-verification.spec.ts` | **5 of 5 PASSED** (Exit code 0) |
+| Full NFC Verification Suite | `npx vitest run tests/unit/nfc-verification.spec.ts tests/unit/attendance-nfc-photo-verification.spec.ts` | **11 of 11 PASSED** (Exit code 0) |
+| TypeScript Compiler Check | `npx vue-tsc --noEmit` | **0 errors** (Exit code 0) |
+| Production Build | `npm run build` | **SUCCESSFUL** in 28.67s (Exit code 0) |
+
+## 23. Record Payment Eligible-Student Query Fix & Live Supabase Schema Alignment (2026-11-10)
+
+### 23.1. Confirmed Root Causes
+
+1. **Schema Mismatch on `obligation_adjustments` (`adjustment_type` vs `kind`)**:
+   - In Direct Supabase mode, `FinanceRepository.getStudentIdsWithOutstandingBalance` selected `obligation_id, kind, amount_centavos` from `obligation_adjustments`.
+   - In live Supabase PostgreSQL (defined in `supabase/migrations/20261031000001_unitap_initial_schema.sql`), the column name is `adjustment_type VARCHAR(20) NOT NULL` (e.g. `'WAIVE'`, `'DISCOUNT'`), and there is no column named `kind`.
+   - PostgREST rejected the query with `column obligation_adjustments.kind does not exist` (PGRST204).
+2. **Silent Failure & Inaccurate "No Outstanding Balances" Empty State**:
+   - `MakePaymentPage.vue`'s `loadEligibleStudents()` caught all exceptions and set `eligibleStudents.value = []`.
+   - Because `filteredStudents.length === 0` and there was no error state handling, the page erroneously displayed `UniEmptyState` with title "No Outstanding Balances", misleading officers into thinking all students had settled when in fact the query crashed.
+
+### 23.2. Architectural Remediation
+
+1. **Live Supabase Schema Alignment (`FinanceRepository.getStudentIdsWithOutstandingBalance`)**:
+   - Updated the batched lookup on `obligation_adjustments` to select `obligation_id, adjustment_type, amount_centavos`.
+   - Implemented adjustment type calculation semantics supporting both additions and deductions:
+     - Deductions: `'DISCOUNT'`, `'WAIVE'`, `'WAIVER'`, `'REDUCTION'`, `'DEDUCTION'` decrease the obligation balance (`-amt`).
+     - Additions: `'ADDITION'`, `'CHARGE'`, `'PENALTY'`, `'ADDITIONAL_CHARGE'` increase the obligation balance (`+amt`).
+     - Respects the non-negative constraint `amount_centavos >= 0` via `Math.abs(Number(adj.amount_centavos || 0))`.
+     - Supports both `adj.adjustment_type` (Supabase) and `(adj as any).kind` (SQLite) for cross-layer compatibility.
+2. **Correct Outstanding Balance Filtering**:
+   - Computes `netAssessed = assessed + adjustments` and `remainingBalance = netAssessed - postedPayments`.
+   - Excludes `VOID`, `PAID`, and `WAIVED` obligations.
+   - Includes students in the eligible payment list if and only if their computed `remainingBalance > 0`.
+   - Preserves filtering by category (`ALL`, `CONTRIBUTION`, `FINE`), specific `ruleId`, and active `semesterId`.
+3. **Transparent Query Error Propagation & Retry UI (`MakePaymentPage.vue`)**:
+   - Replaced silent error swallowing with an explicit `eligibleError` reactive state.
+   - When query errors occur, `MakePaymentPage.vue` surfaces a styled error card displaying "Unable to Load Balances", the specific error reason, and an interactive "Retry" button.
+   - `UniEmptyState` ("No Outstanding Balances" / "No matching students") is displayed only after a successful query execution returns zero owing students.
+
+### 23.3. Verification Results
+
+| Verification Step | Command | Result |
+| :--- | :--- | :--- |
+| Targeted Eligible Students Query Specification | `npx vitest run tests/unit/eligible-students-query.spec.ts` | **8 of 8 PASSED** (Exit code 0) |
+| Related Diagnostics & Continuous Finance Recording | `npx vitest run tests/unit/supabase-direct-diagnostic.spec.ts tests/unit/continuous-finance-recording.spec.ts` | **44 of 44 PASSED** (Exit code 0) |
+| TypeScript Compiler Check | `npx vue-tsc --noEmit` | **0 errors** (Exit code 0) |
+| Production Build | `npm run build` | **SUCCESSFUL** in 33.38s (Exit code 0) |
+
+## 24. Official Payment Receipt PDF Direct Download Architecture (2026-11-10)
+
+### 24.1. Problem & Context
+
+1. **Popup & Print Preview Limitations**:
+   - The previous receipt action in `MakePaymentPage.vue` invoked `financeService.generatePrintableReceiptHtml(receipt)` and called `window.open('', '_blank')` followed by `printWindow.print()`.
+   - On Android WebViews and mobile browsers, popup blockers frequently intercepted `window.open()`, and `window.print()` is either unsupported or triggers distorted print spoolers rather than saving a clean PDF file.
+   - Desktop browsers opened empty `about:blank` tabs or required manual print dialog configuration.
+
+### 24.2. Architectural Remediation
+
+1. **Native Client-Side PDF 1.4 Binary Generator (`ReportService.generateReceiptPdf`)**:
+   - Reused UniTap's zero-dependency binary PDF 1.4 generator in `ReportService` to construct fully compliant PDF byte streams (`Uint8Array`) using standard Type 1 fonts (`/Helvetica`, `/Helvetica-Bold`, `/Courier`) and `WinAnsiEncoding`.
+   - **Receipt Visual Design & Layout**:
+     - UniTap 2.0 brand header (#0F766E teal bar) and CSG subtitle.
+     - Dynamic server sync badge: `Authoritatively Confirmed - Server Recorded` or `Locally Recorded - Sync Pending`.
+     - 2-column metadata card: Receipt Ref #, Payment Date, Academic Term, Officer Name, Student Name, School ID, Year/Section, and Payment Method (Cash Collection / GCash Transfer / Bank Transfer).
+     - Itemized obligations table with individual columns: Obligation Title & ID, Type, Remaining Balance, and Amount Paid.
+     - Prominent Total Collected summary box.
+     - Payment notes (when present), official CSG electronic receipt notice, and confidentiality footer.
+     - Multi-item pagination: gracefully distributes items across multiple pages if a transaction spans more than 8 obligations.
+2. **Deterministic Descriptive Filename (`ReportService.buildReceiptPdfFilename`)**:
+   - Generates filenames strictly following `UniTap_Receipt_{receipt_reference}.pdf` with character sanitization (`[^a-zA-Z0-9_-]` mapped to `_`).
+   - Exposed directly on `FinanceService` (`financeService.generateReceiptPdf` and `financeService.buildReceiptPdfFilename`).
+3. **Blob Download Automation & Resource Cleanup (`MakePaymentPage.vue` & `FinancePage.vue`)**:
+   - Converted binary byte stream into `application/pdf` Blob: `new Blob([pdfBytes], { type: 'application/pdf' })`.
+   - Triggered browser download using a temporary `<a>` element with the `download` attribute (`link.click()`).
+   - Completely avoided `window.open`, `window.print`, `target="_blank"`, and `about:blank`.
+   - Automatically revokes the object URL via `URL.revokeObjectURL(url)`.
+   - Added `isDownloadingReceiptPdf` state with button loading spinner and disabled state to prevent duplicate downloads.
+   - Preserved receipt modal state (`isReceiptModalOpen` remains open after download) and the "Next Student (Scan)" workflow button.
+
+### 24.3. Verification Results
+
+| Verification Step | Command | Result |
+| :--- | :--- | :--- |
+| Targeted Receipt PDF Specification | `npx vitest run tests/unit/payment-receipt-pdf.spec.ts` | **7 of 7 PASSED** (Exit code 0) |
+| Related Payment & Report Suites | `npx vitest run tests/unit/payment-receipt-pdf.spec.ts tests/unit/continuous-finance-recording.spec.ts tests/unit/eligible-students-query.spec.ts tests/unit/filters-and-reports-ui.spec.ts` | **42 of 42 PASSED** (Exit code 0) |
+| TypeScript Compiler Check | `npx vue-tsc --noEmit` | **0 errors** (Exit code 0) |
+| Production Build | `npm run build` | **SUCCESSFUL** in 16.11s (Exit code 0) |
+
+
+
+
