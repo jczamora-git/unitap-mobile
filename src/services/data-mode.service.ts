@@ -37,6 +37,19 @@ const currentMode = ref<DataMode>(resolveInitialMode());
 // Asynchronously hydrate from Capacitor Preferences on native Android
 if (typeof window !== 'undefined') {
   Preferences.get({ key: STORAGE_KEY }).then(({ value }) => {
+    if (import.meta.env?.MODE === 'test' && import.meta.env?.VITE_DATA_MODE_TEST !== 'supabase_direct') {
+      return;
+    }
+    const envMode = (import.meta.env?.VITE_DATA_MODE as string | undefined)?.trim().toLowerCase();
+    // If environment explicitly specifies a mode, enforce that mode across Web and Android
+    if (envMode === 'supabase_direct' || envMode === 'direct') {
+      currentMode.value = 'supabase_direct';
+      return;
+    }
+    if (envMode === 'offline_first') {
+      currentMode.value = 'offline_first';
+      return;
+    }
     if (value === 'supabase_direct' || value === 'offline_first') {
       currentMode.value = value;
     }

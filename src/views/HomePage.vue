@@ -10,6 +10,8 @@ import {
 import { authService } from '@/services/auth.service';
 import { SupabaseAuthService } from '@/integrations/supabase/auth.service';
 import StudentHomeView from '@/components/student/StudentHomeView.vue';
+import WorkspaceSwitcher from '@/components/shared/WorkspaceSwitcher.vue';
+import { useAuth } from '@/composables/useAuth';
 import {
   peopleOutline,
   calendarOutline,
@@ -40,6 +42,7 @@ import { DataModeService } from '@/services/data-mode.service';
 import { SelectiveSyncService } from '@/services/sync/selective-sync.service';
 
 const router = useRouter();
+const { canSwitchPortal } = useAuth();
 
 const isStudent = computed(() => {
   const role = authService.role.value || SupabaseAuthService.role.value;
@@ -211,6 +214,9 @@ onIonViewWillEnter(loadDashboardData);
 
     <ion-content class="safe-content">
       <div class="page-container">
+        <!-- Dual-Role Workspace Switcher -->
+        <WorkspaceSwitcher v-if="canSwitchPortal" style="margin-bottom: 14px;" />
+
         <!-- 2x2 Metric Grid -->
         <section class="metrics-grid">
           <UniStatCard

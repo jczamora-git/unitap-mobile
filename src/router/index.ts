@@ -285,12 +285,27 @@ router.beforeEach(async (to, _from) => {
   }
 
   if (to.matched.some((record) => record.meta?.requiresDevAdmin)) {
-    const role = SupabaseAuthService.role.value || authService.role.value;
-    if (role !== 'DEVADMIN') {
+    const hasDevAdmin = SupabaseAuthService.roles.value.includes('DEVADMIN') || authService.roles.value.includes('DEVADMIN');
+    if (!hasDevAdmin) {
       return '/tabs/home';
+    }
+    const currentRole = SupabaseAuthService.role.value || authService.role.value;
+    if (currentRole !== 'DEVADMIN') {
+      try {
+        await SupabaseAuthService.switchWorkspace('DEVADMIN');
+      } catch {
+        // Non-fatal
+      }
     }
   } else {
     const role = SupabaseAuthService.role.value || authService.role.value;
+    if (to.path === '/tabs/pass' || to.path === '/pass') {
+      const studentId = SupabaseAuthService.user.value?.student_id || authService.user.value?.student_id;
+      if (!studentId) {
+        return '/tabs/home';
+      }
+    }
+
     if (role === 'STUDENT') {
       const officerOnlyPrefixes = [
         '/tabs/scan',

@@ -32,8 +32,11 @@ import {
   listOutline,
   repeatOutline,
   searchOutline,
-  documentTextOutline
+  documentTextOutline,
+  terminalOutline,
+  swapHorizontalOutline
 } from 'ionicons/icons';
+import { useAuth } from '@/composables/useAuth';
 import { useNfc } from '@/composables/useNfc';
 import { useOnboarding } from '@/composables/useOnboarding';
 import { useTheme, type ThemePreference } from '@/composables/useTheme';
@@ -506,8 +509,62 @@ async function handleApprovePreview(plan: PullPreviewPlan) {
   }
 }
 
-const currentUser = computed(() => SupabaseAuthService.user.value || authService.user.value);
-const currentRole = computed(() => SupabaseAuthService.role.value || authService.role.value);
+const {
+  user: currentUser,
+  role: currentRole,
+  roles: activeRoles,
+  availablePortals,
+  activeWorkspace,
+  canSwitchPortal,
+  student: currentStudent,
+  switchWorkspace
+} = useAuth();
+
+const userDisplayName = computed(() => {
+  if (currentStudent.value) {
+    const s = currentStudent.value as any;
+    const parts = [
+      s.first_name || s.firstName,
+      s.middle_name || s.middleName,
+      s.last_name || s.lastName,
+    ].filter(Boolean);
+    if (parts.length > 0) return parts.join(' ');
+  }
+  return currentUser.value?.username || 'Authenticated User';
+});
+
+function getPortalName(p: string | null): string {
+  if (p === 'DEVADMIN') return 'Developer Admin Portal';
+  if (p === 'OFFICER') return 'Officer Workspace';
+  if (p === 'STUDENT') return 'Student Portal';
+  return 'Workspace';
+}
+
+function getPortalIcon(p: string | null) {
+  if (p === 'DEVADMIN') return terminalOutline;
+  if (p === 'OFFICER') return shieldCheckmarkOutline;
+  return schoolOutline;
+}
+
+function getPortalDescription(p: string | null): string {
+  if (p === 'DEVADMIN') return 'System setup, configurations & DevAdmin tools';
+  if (p === 'OFFICER') return 'Attendance scanning, events & finance assessments';
+  if (p === 'STUDENT') return 'Personal student pass, dues & attendance monitoring';
+  return 'Workspace portal';
+}
+
+async function handleSwitchPortal(portal: 'DEVADMIN' | 'OFFICER' | 'STUDENT') {
+  if (activeWorkspace.value === portal) return;
+  haptics.medium();
+  try {
+    await switchWorkspace(portal);
+    await showToast(`Switched to ${getPortalName(portal)}`, 'success');
+    router.replace('/tabs/home');
+  } catch (err: unknown) {
+    await showToast((err as Error).message || 'Failed to switch portal', 'error');
+  }
+}
+
 const currentSemester = ref<Semester | null>(null);
 const currentYear = ref<AcademicYear | null>(null);
 
@@ -627,18 +684,60 @@ function toggleNotifications() {
             </div>
             <div class="profile-info">
               <div class="profile-name-row">
-                <span class="profile-name">{{ currentUser?.username || 'Authenticated User' }}</span>
-                <span class="role-badge" :class="currentRole?.toLowerCase()">
-                  {{ formatUserRole(currentRole) }}
+                <span class="profile-name">{{ userDisplayName }}</span>
+              </div>
+              <div class="roles-badge-row">
+                <span
+                  v-for="r in activeRoles"
+                  :key="r"
+                  class="role-badge"
+                  :class="r.toLowerCase()"
+                >
+                  {{ formatUserRole(r) }}
                 </span>
               </div>
               <span class="profile-meta">
                 {{ currentUser?.id ? `UID: ${currentUser.id.substring(0, 8)}...` : 'Local Offline Session' }}
+                {{ (currentStudent?.school_id || (currentStudent as any)?.studentNumber) ? `• ID: ${currentStudent?.school_id || (currentStudent as any)?.studentNumber}` : '' }}
               </span>
             </div>
           </div>
 
-          <WorkspaceSwitcher style="margin-top: 10px;" />
+          <!-- Available Portals & Switch Portal Actions -->
+          <div v-if="availablePortals.length > 1" class="portals-management-card">
+            <div class="portals-header">
+              <span class="portals-label font-mono">AVAILABLE PORTALS</span>
+              <span class="active-portal-tag">Active: {{ getPortalName(activeWorkspace) }}</span>
+            </div>
+
+            <div class="portals-list">
+              <button
+                v-for="portal in availablePortals"
+                :key="portal"
+                type="button"
+                class="portal-item-btn"
+                :class="{ 'is-active': activeWorkspace === portal }"
+                @click="handleSwitchPortal(portal)"
+              >
+                <div class="portal-item-left">
+                  <div class="portal-icon-box" :class="portal.toLowerCase()">
+                    <ion-icon :icon="getPortalIcon(portal)" />
+                  </div>
+                  <div class="portal-item-text">
+                    <span class="portal-item-title">{{ getPortalName(portal) }}</span>
+                    <span class="portal-item-desc">{{ getPortalDescription(portal) }}</span>
+                  </div>
+                </div>
+                <div class="portal-item-right">
+                  <span v-if="activeWorkspace === portal" class="portal-active-pill">CURRENT</span>
+                  <div v-else class="portal-switch-action">
+                    <ion-icon :icon="swapHorizontalOutline" />
+                    <span>Switch</span>
+                  </div>
+                </div>
+              </button>
+            </div>
+          </div>
         </section>
 
         <!-- 2. APPEARANCE (THEME SELECTOR) -->
@@ -2071,6 +2170,145 @@ function toggleNotifications() {
 :root.ion-palette-dark .role-badge.student {
   background: rgba(56, 189, 248, 0.2);
   color: #7dd3fc;
+}
+
+.roles-badge-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  margin-top: 2px;
+}
+
+.portals-management-card {
+  margin-top: 10px;
+  background: var(--uni-surface, #ffffff);
+  border: 1px solid var(--uni-border, #e2e8f0);
+  border-radius: 12px;
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.portals-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.portals-label {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  color: var(--uni-text-secondary, #64748b);
+}
+
+.active-portal-tag {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--uni-primary, #0f766e);
+}
+
+.portals-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.portal-item-btn {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--uni-border, #e2e8f0);
+  background: var(--uni-background, #f8fafc);
+  cursor: pointer;
+  text-align: left;
+  transition: all 0.15s ease;
+}
+
+.portal-item-btn.is-active {
+  border-color: var(--uni-primary, #0f766e);
+  background: rgba(15, 118, 110, 0.04);
+}
+
+.portal-item-left {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.portal-icon-box {
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 16px;
+}
+
+.portal-icon-box.devadmin {
+  background: rgba(225, 29, 72, 0.12);
+  color: #e11d48;
+}
+
+.portal-icon-box.officer {
+  background: rgba(15, 118, 110, 0.12);
+  color: #0f766e;
+}
+
+.portal-icon-box.student {
+  background: rgba(2, 132, 199, 0.12);
+  color: #0284c7;
+}
+
+.portal-item-text {
+  display: flex;
+  flex-direction: column;
+}
+
+.portal-item-title {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--uni-text, #0f172a);
+}
+
+.portal-item-desc {
+  font-size: 11px;
+  color: var(--uni-text-secondary, #64748b);
+}
+
+.portal-active-pill {
+  font-size: 10px;
+  font-weight: 800;
+  padding: 3px 8px;
+  border-radius: 6px;
+  background: var(--uni-primary, #0f766e);
+  color: #ffffff;
+}
+
+.portal-switch-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--uni-primary, #0f766e);
+}
+
+:root.dark .portals-management-card,
+:root.ion-palette-dark .portals-management-card {
+  background: var(--uni-surface, #1b1d23);
+  border-color: var(--uni-border, #30343d);
+}
+
+:root.dark .portal-item-btn,
+:root.ion-palette-dark .portal-item-btn {
+  background: var(--uni-surface-secondary, #232730);
+  border-color: var(--uni-border, #30343d);
 }
 
 .version-tag {

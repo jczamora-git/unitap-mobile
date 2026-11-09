@@ -1,8 +1,10 @@
 import { sha256 } from 'hash-wasm';
+import { Capacitor } from '@capacitor/core';
 import { supabase } from '@/integrations/supabase/client';
 import { AuthRepository } from '@/database/repositories/auth.repository';
 import { StudentsRepository } from '@/database/repositories/students.repository';
 import { OperationPolicyService } from './operation-policy.service';
+import { DataModeService } from './data-mode.service';
 import { normalizeSchoolId, getSchoolIdVariants } from '@/utilities/school-id-normalizer';
 import type {
   ActivationClaim,
@@ -258,9 +260,11 @@ export class StudentActivationService {
     const isTestEnv = isTestEnvironment();
 
     // Enforce selective offline-first policy: ONLINE_CONFIRMED required
-    if (!isTestEnv) {
+    if (DataModeService.isDirectSupabase() || !isTestEnv) {
       try {
-        await OperationPolicyService.assertPermitted('STUDENT_ACTIVATION_ACCOUNT_LINKING');
+        if (!isTestEnv) {
+          await OperationPolicyService.assertPermitted('STUDENT_ACTIVATION_ACCOUNT_LINKING');
+        }
       } catch (policyErr: any) {
         return {
           success: false,
@@ -270,13 +274,28 @@ export class StudentActivationService {
     }
 
     // 1. Online check if Supabase is connected
-    if (!isTestEnv) {
+    if (DataModeService.isDirectSupabase() || !isTestEnv) {
       const targetIdentifier = (await this.resolveStudentUuid(studentId)) || studentId;
+      console.log('[StudentActivation] issueActivationCode called:', {
+        platform: Capacitor.getPlatform(),
+        dataMode: DataModeService.getModeLabel(),
+        studentId: targetIdentifier,
+      });
+
       try {
         const { data, error } = await supabase.rpc('officer_issue_activation_code', {
           p_student_id: targetIdentifier,
           p_token_hash: tokenHash,
           p_expires_hours: expiresHours,
+        });
+
+        console.log('[StudentActivation] officer_issue_activation_code RPC result:', {
+          platform: Capacitor.getPlatform(),
+          success: data?.success,
+          claimId: data?.claim_id,
+          action: data?.action,
+          errorCode: error?.code,
+          errorMessage: error?.message || data?.error,
         });
 
         if (error) {
@@ -287,8 +306,22 @@ export class StudentActivationService {
         }
 
         if (data && data.success) {
-          // Replicate locally for offline cache
-          await this.persistLocalClaim(data.student_id || targetIdentifier, tokenHash, issuedByUserId, data.expires_at || expiresAt, data.claim_id || claimId);
+          // Direct Supabase Mode: Supabase RPC is the single authoritative mutation.
+          // DO NOT perform local SQLite mirror writes that fail foreign key constraints.
+          if (!DataModeService.isDirectSupabase()) {
+            try {
+              await this.persistLocalClaim(
+                data.student_id || targetIdentifier,
+                tokenHash,
+                issuedByUserId,
+                data.expires_at || expiresAt,
+                data.claim_id || claimId
+              );
+            } catch (cacheErr) {
+              console.warn('[StudentActivation] Non-fatal offline cache warning:', cacheErr);
+            }
+          }
+
           return {
             success: true,
             rawCode,
@@ -303,6 +336,10 @@ export class StudentActivationService {
           error: data?.error || 'Failed to issue activation code.',
         };
       } catch (err: any) {
+        console.error('[StudentActivation] Network exception while issuing activation code:', {
+          platform: Capacitor.getPlatform(),
+          error: err?.message,
+        });
         return {
           success: false,
           error: err?.message || 'Network error while issuing activation code. Please check your connection.',
@@ -310,7 +347,15 @@ export class StudentActivationService {
       }
     }
 
-    // 2. Local SQLite generation
+    // Direct Supabase Mode: NEVER fall back to local SQLite claim generation
+    if (DataModeService.isDirectSupabase()) {
+      return {
+        success: false,
+        error: 'Cannot generate activation code offline in Direct Supabase Mode.',
+      };
+    }
+
+    // 2. Local SQLite generation in Offline-First mode
     const action = await this.persistLocalClaim(studentId, tokenHash, issuedByUserId, expiresAt, claimId);
 
     return {
@@ -335,6 +380,26 @@ export class StudentActivationService {
     if (existing && !existing.used_at && !existing.revoked_at) {
       await AuthRepository.revokeActivationClaim(existing.id);
       action = 'REISSUED';
+    }
+
+    // Ensure foreign key dependencies in SQLite:
+    // 1. Ensure issuedByUserId exists in users table to satisfy FOREIGN KEY (issued_by_user_id) REFERENCES users(id)
+    if (issuedByUserId) {
+      const user = await AuthRepository.getUserById(issuedByUserId);
+      if (!user) {
+        try {
+          const { getDatabase } = await import('@/database/database');
+          const db = await getDatabase();
+          await db.execute(
+            `INSERT INTO users (id, username, account_status, created_at, updated_at)
+             VALUES (?, ?, 'ACTIVE', ?, ?)
+             ON CONFLICT(id) DO NOTHING`,
+            [issuedByUserId, `officer_${issuedByUserId.slice(0, 8)}`, new Date().toISOString(), new Date().toISOString()]
+          );
+        } catch (fkUserErr) {
+          console.warn('[StudentActivation] Warning ensuring local user for claim:', fkUserErr);
+        }
+      }
     }
 
     const claim: ActivationClaim = {
@@ -374,12 +439,27 @@ export class StudentActivationService {
   ): Promise<{ success: boolean; error?: string }> {
     const isTestEnv = isTestEnvironment();
 
-    if (!isTestEnv) {
+    if (DataModeService.isDirectSupabase() || !isTestEnv) {
       try {
-        await OperationPolicyService.assertPermitted('STUDENT_ACTIVATION_ACCOUNT_LINKING');
+        if (!isTestEnv) {
+          await OperationPolicyService.assertPermitted('STUDENT_ACTIVATION_ACCOUNT_LINKING');
+        }
+        console.log('[StudentActivation] revokeActivationCode called:', {
+          platform: Capacitor.getPlatform(),
+          claimId,
+          studentId,
+        });
+
         const { data, error } = await supabase.rpc('officer_revoke_activation_code', {
           p_claim_id: claimId,
           p_reason: reason,
+        });
+
+        console.log('[StudentActivation] officer_revoke_activation_code RPC result:', {
+          platform: Capacitor.getPlatform(),
+          success: data?.success,
+          errorCode: error?.code,
+          errorMessage: error?.message || data?.error,
         });
 
         if (error) {
@@ -387,22 +467,33 @@ export class StudentActivationService {
         }
 
         if (data && data.success) {
-          await AuthRepository.revokeActivationClaim(claimId);
-          await AuthRepository.recordActivationAudit({
-            id: 'aud_' + Math.random().toString(36).substring(2, 12),
-            claim_id: claimId,
-            student_id: studentId,
-            action: 'REVOKED',
-            performed_by_user_id: revokedByUserId,
-            notes: reason,
-            created_at: new Date().toISOString(),
-          });
+          // Direct Supabase Mode: RPC is authoritative. Skip local SQLite operations.
+          if (!DataModeService.isDirectSupabase()) {
+            try {
+              await AuthRepository.revokeActivationClaim(claimId);
+              await AuthRepository.recordActivationAudit({
+                id: 'aud_' + Math.random().toString(36).substring(2, 12),
+                claim_id: claimId,
+                student_id: studentId,
+                action: 'REVOKED',
+                performed_by_user_id: revokedByUserId,
+                notes: reason,
+                created_at: new Date().toISOString(),
+              });
+            } catch (cacheErr) {
+              console.warn('[StudentActivation] Non-fatal offline revoke cache warning:', cacheErr);
+            }
+          }
           return { success: true };
         }
         return { success: false, error: data?.error || 'Failed to revoke activation code on server.' };
       } catch (err: any) {
         return { success: false, error: err?.message || 'Network error while revoking code. Please check connection.' };
       }
+    }
+
+    if (DataModeService.isDirectSupabase()) {
+      return { success: false, error: 'Cannot revoke activation code offline in Direct Supabase Mode.' };
     }
 
     await AuthRepository.revokeActivationClaim(claimId);

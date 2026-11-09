@@ -1,9 +1,11 @@
 import { sha256 } from 'hash-wasm';
+import { Capacitor } from '@capacitor/core';
 import { supabase } from './client';
 import { getDatabase } from '@/database/database';
 import { StudentsRepository } from '@/database/repositories/students.repository';
 import { AuthRepository } from '@/database/repositories/auth.repository';
 import { normalizeSchoolId } from '@/utilities/school-id-normalizer';
+import { DataModeService } from '@/services/data-mode.service';
 
 export interface VerifyActivationClaimResult {
   success: boolean;
@@ -40,7 +42,7 @@ export class AccountLinkingService {
     const tokenHash = await this.hashActivationCode(rawCode);
     const isTestEnv = isTestEnvironment();
 
-    if (!isTestEnv) {
+    if (DataModeService.isDirectSupabase() || !isTestEnv) {
       try {
         const { data, error } = await supabase.rpc('verify_and_claim_student_code', {
           p_school_id: cleanSchoolId,
@@ -117,7 +119,7 @@ export class AccountLinkingService {
     const isTestEnv = isTestEnvironment();
 
     // 1. Online verification check via Supabase RPC if available
-    if (!isTestEnv) {
+    if (DataModeService.isDirectSupabase() || !isTestEnv) {
       try {
         const { data, error } = await supabase.rpc('validate_activation_code', {
           p_school_id: cleanSchoolId,
@@ -221,8 +223,15 @@ export class AccountLinkingService {
     const tokenHash = await this.hashActivationCode(rawCode);
     const isTestEnv = isTestEnvironment();
 
-    if (!isTestEnv) {
+    if (DataModeService.isDirectSupabase() || !isTestEnv) {
       try {
+        console.log('[AccountLinking] activate_student_account called:', {
+          platform: Capacitor.getPlatform(),
+          dataMode: DataModeService.getModeLabel(),
+          schoolId: cleanSchoolId,
+          authUserId,
+        });
+
         // 1. Online atomic activation via Supabase RPC
         const { data, error } = await supabase.rpc('activate_student_account', {
           p_school_id: cleanSchoolId,
@@ -230,24 +239,38 @@ export class AccountLinkingService {
           p_auth_user_id: authUserId,
         });
 
+        console.log('[AccountLinking] activate_student_account RPC result:', {
+          platform: Capacitor.getPlatform(),
+          success: data?.success,
+          alreadyLinked: data?.already_linked,
+          errorCode: error?.code,
+          errorMessage: error?.message || data?.error,
+        });
+
         if (error) {
+          let errorMsg = error.message || 'Server error during account activation.';
+          if (error.code === '23505' || errorMsg.includes('users_username_key') || errorMsg.includes('duplicate key')) {
+            errorMsg = `An account for School ID ${cleanSchoolId} already exists. Please log in or contact an officer.`;
+          }
           return {
             success: false,
-            error: error.message || 'Server error during account activation.',
+            error: errorMsg,
           };
         }
 
         if (data && data.success) {
-          // Mirror linkage in local SQLite database for offline consistency
-          try {
-            await this.linkStudentAccount(
-              authUserId,
-              data.student_id,
-              cleanSchoolId,
-              { firstName: data.first_name, lastName: data.last_name }
-            );
-          } catch (mirrorErr) {
-            console.warn('[AccountLinking] Failed to mirror linkage locally, but online activation succeeded:', mirrorErr);
+          // Direct Supabase Mode: RPC is authoritative. Skip local SQLite mirror writes.
+          if (!DataModeService.isDirectSupabase()) {
+            try {
+              await this.linkStudentAccount(
+                authUserId,
+                data.student_id,
+                cleanSchoolId,
+                { firstName: data.first_name, lastName: data.last_name }
+              );
+            } catch (mirrorErr) {
+              console.warn('[AccountLinking] Non-fatal local mirror warning:', mirrorErr);
+            }
           }
 
           return {
@@ -266,6 +289,10 @@ export class AccountLinkingService {
           };
         }
       } catch (netErr: any) {
+        console.error('[AccountLinking] Network exception during activation:', {
+          platform: Capacitor.getPlatform(),
+          error: netErr?.message,
+        });
         return {
           success: false,
           error: netErr?.message || 'Network error during account activation. Please check your connection.',
@@ -273,7 +300,15 @@ export class AccountLinkingService {
       }
     }
 
-    // 2. Local fallback verification in SQLite
+    // Direct Supabase Mode: NEVER fall back to local SQLite activation
+    if (DataModeService.isDirectSupabase()) {
+      return {
+        success: false,
+        error: 'Cannot activate student account offline in Direct Supabase Mode.',
+      };
+    }
+
+    // 2. Local fallback verification in SQLite for Offline-First mode
     const student = await StudentsRepository.getStudentBySchoolId(cleanSchoolId);
     if (!student) {
       return { success: false, error: 'Invalid activation code or school ID.' };

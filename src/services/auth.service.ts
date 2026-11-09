@@ -37,28 +37,39 @@ class AuthService {
 
   public user = computed(() => this.currentUser.value);
   public role = computed(() => {
-    if (this.currentRole.value?.role === 'DEVADMIN') return 'DEVADMIN';
     return this.currentWorkspace.value || this.currentRole.value?.role || null;
   });
   public roles = computed(() => this.currentRoles.value.map((r) => r.role));
   public activeWorkspace = computed(() => this.currentWorkspace.value);
   public student = computed(() => this.currentStudent.value);
   public isAuthenticated = computed(() => this.currentUser.value !== null);
-  public canSwitchWorkspace = computed(() => {
-    const r = this.currentRoles.value.map((x) => x.role);
-    return r.includes('STUDENT') && r.includes('OFFICER');
+
+  public availablePortals = computed<('DEVADMIN' | 'OFFICER' | 'STUDENT')[]>(() => {
+    const portals: ('DEVADMIN' | 'OFFICER' | 'STUDENT')[] = [];
+    const r = this.currentRoles.value.filter((x) => !x.revoked_at).map((x) => x.role);
+    if (r.includes('DEVADMIN')) portals.push('DEVADMIN');
+    if (r.includes('OFFICER')) portals.push('OFFICER');
+    if (r.includes('STUDENT') || Boolean(this.currentUser.value?.student_id)) portals.push('STUDENT');
+    return portals;
   });
+
+  public canSwitchWorkspace = computed(() => this.availablePortals.value.length > 1);
 
   public hasRole(role: 'DEVADMIN' | 'OFFICER' | 'STUDENT'): boolean {
     return this.currentRoles.value.some((r) => r.role === role && !r.revoked_at);
   }
 
   public async switchWorkspace(workspace: 'DEVADMIN' | 'OFFICER' | 'STUDENT'): Promise<void> {
-    if (!this.hasRole(workspace)) {
-      throw new Error(`User does not possess the ${workspace} role.`);
+    if (!this.availablePortals.value.includes(workspace)) {
+      throw new Error(`Unauthorized portal: account does not have access to ${workspace} portal.`);
     }
-    const matchingRole = this.currentRoles.value.find((r) => r.role === workspace && !r.revoked_at);
-    if (!matchingRole) return;
+
+    const matchingRole = this.currentRoles.value.find((r) => r.role === workspace && !r.revoked_at) || {
+      id: 'rol_' + (this.currentUser.value?.id || 'temp').substring(0, 8) + '_' + workspace.toLowerCase(),
+      user_id: this.currentUser.value?.id || '',
+      role: workspace,
+      assigned_at: new Date().toISOString(),
+    };
 
     this.currentWorkspace.value = workspace;
     this.currentRole.value = matchingRole;
@@ -73,6 +84,14 @@ class AuthService {
         loggedInAt: new Date().toISOString(),
       };
       await Preferences.set({ key: SESSION_STORAGE_KEY, value: JSON.stringify(session) });
+      await Preferences.set({ key: 'unitap_active_workspace', value: workspace });
+    }
+
+    try {
+      const { SupabaseAuthService } = await import('@/integrations/supabase/auth.service');
+      SupabaseAuthService.setActiveRole(workspace);
+    } catch {
+      // Non-fatal
     }
   }
 
@@ -260,22 +279,25 @@ class AuthService {
     user: UserAccount,
     role: UserRoleRecord,
     student?: StudentRecord | null,
-    allRoles?: UserRoleRecord[]
+    allRoles?: UserRoleRecord[],
+    explicitWorkspace?: 'DEVADMIN' | 'OFFICER' | 'STUDENT'
   ): Promise<void> {
     this.currentUser.value = user;
     this.currentRole.value = role;
     this.currentRoles.value = allRoles && allRoles.length > 0 ? allRoles : [role];
-    this.currentWorkspace.value = role.role;
+    const targetWorkspace = explicitWorkspace || role.role;
+    this.currentWorkspace.value = targetWorkspace;
     this.currentStudent.value = student || null;
     const session: AuthSession = {
       user,
       role,
       roles: this.currentRoles.value,
-      activeWorkspace: role.role,
+      activeWorkspace: targetWorkspace,
       student: student || null,
       loggedInAt: new Date().toISOString(),
     };
     await Preferences.set({ key: SESSION_STORAGE_KEY, value: JSON.stringify(session) });
+    await Preferences.set({ key: 'unitap_active_workspace', value: targetWorkspace });
   }
 
   // --- INITIAL DEVADMIN SETUP ---

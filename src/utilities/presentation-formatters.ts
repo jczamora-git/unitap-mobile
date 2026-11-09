@@ -3,6 +3,14 @@
  * Converts technical database enums and identifiers into clean, user-friendly labels.
  */
 
+export {
+  INSTITUTION_CONFIG,
+  INSTITUTION_NAME,
+  INSTITUTION_COLLEGE,
+  INSTITUTION_ORG,
+  INSTITUTION_PASS_SUBTITLE,
+} from './branding';
+
 /**
  * Format academic semester term (e.g., 'FIRST' -> '1st Semester')
  */

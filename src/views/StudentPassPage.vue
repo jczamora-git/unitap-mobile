@@ -21,6 +21,7 @@ import {
 } from 'ionicons/icons';
 import { useCurrentStudentPortal } from '@/composables/useCurrentStudentPortal';
 import { formatYearLevel } from '@/utilities/student-formatters';
+import { INSTITUTION_CONFIG } from '@/utilities/branding';
 import { useToast } from '@/composables/useToast';
 import { haptics } from '@/utilities/haptics';
 import { UniPageHeader, UniButton } from '@/components/ui';
@@ -88,8 +89,8 @@ onIonViewWillEnter(() => {
               <!-- Top institution branding -->
               <div class="pass-header-row">
                 <div class="institution-branding">
-                  <span class="inst-name font-mono">MABALACAT CITY COLLEGE</span>
-                  <span class="dept-name">College of Computing Studies • CSG</span>
+                  <span class="inst-name font-mono">{{ INSTITUTION_CONFIG.name }}</span>
+                  <span class="dept-name">{{ INSTITUTION_CONFIG.passSubtitle }}</span>
                 </div>
                 <div class="pass-type-badge font-mono">
                   <span>STUDENT</span>
@@ -115,7 +116,7 @@ onIonViewWillEnter(() => {
                   <h3 class="pass-name">{{ studentName }}</h3>
 
                   <span class="pass-label font-mono">STUDENT ID NUMBER</span>
-                  <span class="pass-id-number font-mono">{{ student?.studentNumber || 'MCC STUDENT' }}</span>
+                  <span class="pass-id-number font-mono">{{ student?.studentNumber || 'STUDENT' }}</span>
 
                   <span class="pass-label font-mono">PROGRAM &amp; LEVEL</span>
                   <span class="pass-program-text">

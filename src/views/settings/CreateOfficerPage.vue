@@ -180,6 +180,16 @@ async function selectStudent(st: any) {
       console.warn('Could not hydrate student user account:', statusErr);
     }
   }
+
+  // Proactively check if student already has an active officer appointment
+  try {
+    const existing = await OfficerManagementService.getAppointmentForStudent(st.student_id);
+    if (existing && (existing.status === 'ACTIVE' || existing.status === 'SUSPENDED')) {
+      selectedStudent.value.is_officer = 1;
+    }
+  } catch {
+    // Non-fatal
+  }
 }
 
 async function clearSelectedStudent() {
@@ -250,7 +260,9 @@ async function handleSubmit() {
         devAdminUserId,
       });
 
-      if (!res.success) throw new Error(res.error || 'Failed to promote student to officer.');
+      if (!res || res.success !== true) {
+        throw new Error(res?.error || 'Failed to promote student to officer.');
+      }
       haptics.success();
       createdResult.value = {
         success: true,

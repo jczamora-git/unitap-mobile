@@ -165,10 +165,19 @@ export class OfficerManagementService {
         });
 
         if (error) {
-          throw new Error(`Failed to promote student on Supabase: ${error.message}`);
+          return {
+            success: false,
+            appointment: null as any,
+            error: error.message || 'Failed to promote student on Supabase.',
+          };
         }
-        if (!data || !data.success) {
-          return { success: false, appointment: null as any, error: data?.error || 'Failed to promote student to officer.' };
+
+        if (!data || data.success !== true) {
+          return {
+            success: false,
+            appointment: null as any,
+            error: data?.error || 'Student promotion was rejected by the server.',
+          };
         }
 
         const appointment: OfficerAppointmentRecord = {
@@ -757,6 +766,80 @@ export class OfficerManagementService {
   }
 
   /**
+   * Fetches active or suspended officer appointment for a given student ID.
+   */
+  public static async getAppointmentForStudent(studentId: string): Promise<OfficerAppointmentRecord | null> {
+    if (DataModeService.isDirectSupabase()) {
+      try {
+        const { supabase } = await import('@/integrations/supabase/client');
+        const { data, error } = await supabase
+          .from('officer_appointments')
+          .select('*')
+          .eq('student_id', studentId)
+          .in('status', ['ACTIVE', 'SUSPENDED'])
+          .is('revoked_at', null)
+          .order('created_at', { ascending: false })
+          .limit(1)
+          .maybeSingle();
+
+        if (!error && data) {
+          return data as OfficerAppointmentRecord;
+        }
+      } catch (err) {
+        console.warn('[OfficerManagementService] getAppointmentForStudent direct error:', err);
+      }
+    }
+    return OfficerRepository.getAppointmentByStudentId(studentId);
+  }
+
+  /**
+   * Determines if a user currently has an ACTIVE, non-revoked, and unexpired officer appointment.
+   */
+  public static async hasValidOfficerAppointment(userId: string, studentId?: string | null): Promise<boolean> {
+    if (DataModeService.isDirectSupabase()) {
+      try {
+        const { supabase } = await import('@/integrations/supabase/client');
+        const now = new Date();
+        let query = supabase
+          .from('officer_appointments')
+          .select('id, status, appointment_start, appointment_end, revoked_at')
+          .eq('status', 'ACTIVE')
+          .is('revoked_at', null);
+
+        if (studentId) {
+          query = query.or(`user_id.eq.${userId},student_id.eq.${studentId}`);
+        } else {
+          query = query.eq('user_id', userId);
+        }
+
+        const { data: appt, error } = await query
+          .order('created_at', { ascending: false })
+          .limit(1)
+          .maybeSingle();
+
+        if (!error && appt && appt.status === 'ACTIVE') {
+          if (appt.appointment_start && new Date(appt.appointment_start) > now) return false;
+          if (appt.appointment_end && new Date(appt.appointment_end) < now) return false;
+          return true;
+        }
+        return false;
+      } catch (err) {
+        console.warn('[OfficerManagementService] hasValidOfficerAppointment direct error:', err);
+      }
+    }
+
+    let appt = await OfficerRepository.getAppointmentByUserId(userId);
+    if (!appt && studentId) {
+      appt = await OfficerRepository.getAppointmentByStudentId(studentId);
+    }
+    if (!appt || appt.status !== 'ACTIVE' || (appt as any).revoked_at) return false;
+    const now = new Date();
+    if (appt.appointment_start && new Date(appt.appointment_start) > now) return false;
+    if (appt.appointment_end && new Date(appt.appointment_end) < now) return false;
+    return true;
+  }
+
+  /**
    * Check if a given user currently holds an active permission.
    */
   public static async userHasPermission(
@@ -941,16 +1024,34 @@ export class OfficerManagementService {
           });
 
           // Find existing active officer appointments in Supabase
-          const { data: apptData } = await supabase
-            .from('officer_appointments')
-            .select('student_id, user_id, status')
-            .in('student_id', studentIds)
-            .in('status', ['ACTIVE', 'SUSPENDED']);
+          const userIds = Array.from(userByStudentId.values()).map((u: any) => u.id).filter(Boolean);
+          let apptData: any[] = [];
+          try {
+            const { data: byStu } = await supabase
+              .from('officer_appointments')
+              .select('student_id, user_id, status')
+              .in('student_id', studentIds)
+              .in('status', ['ACTIVE', 'SUSPENDED']);
+            if (byStu) apptData = apptData.concat(byStu);
 
-          const activeOfficerStudentIds = new Set<string>((apptData || []).map((a: any) => a.student_id));
+            if (userIds.length > 0) {
+              const { data: byUser } = await supabase
+                .from('officer_appointments')
+                .select('student_id, user_id, status')
+                .in('user_id', userIds)
+                .in('status', ['ACTIVE', 'SUSPENDED']);
+              if (byUser) apptData = apptData.concat(byUser);
+            }
+          } catch (apptErr) {
+            console.warn('[OfficerManagementService] Could not pre-query appointments:', apptErr);
+          }
+
+          const activeOfficerStudentIds = new Set<string>(apptData.map((a: any) => a.student_id).filter(Boolean));
+          const activeOfficerUserIds = new Set<string>(apptData.map((a: any) => a.user_id).filter(Boolean));
 
           return remote.map((r: any) => {
             const u = userByStudentId.get(r.id);
+            const isOfficer = activeOfficerStudentIds.has(r.id) || (u?.id && activeOfficerUserIds.has(u.id)) ? 1 : 0;
             return {
               student_id: r.id,
               school_id: r.school_id,
@@ -961,7 +1062,7 @@ export class OfficerManagementService {
               username: u?.username || null,
               account_status: u?.account_status || null,
               is_registered: u?.id ? 1 : 0,
-              is_officer: activeOfficerStudentIds.has(r.id) ? 1 : 0,
+              is_officer: isOfficer,
             };
           });
         }

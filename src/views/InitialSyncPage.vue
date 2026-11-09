@@ -10,6 +10,7 @@ import { InitialSyncService } from '@/services/sync/initial-sync.service';
 import { onboardingService } from '@/services/onboarding.service';
 import { useOnboarding } from '@/composables/useOnboarding';
 import { getDatabase } from '@/database/database';
+import { DataModeService } from '@/services/data-mode.service';
 import {
   UniWelcomeSetup,
   UniDataUpdateScreen,
@@ -97,6 +98,14 @@ async function startHydration() {
   isValidatingSession.value = true;
 
   try {
+    if (DataModeService.isDirectSupabase()) {
+      SyncStatusService.setHydration('READY');
+      SyncStatusService.setState('SYNCED');
+      isValidatingSession.value = false;
+      await proceedToDestination();
+      return;
+    }
+
     if (!role.value) {
       await SupabaseAuthService.initialize();
     }
@@ -146,6 +155,13 @@ async function proceedToDestination() {
 
 onMounted(async () => {
   try {
+    if (DataModeService.isDirectSupabase()) {
+      SyncStatusService.setHydration('READY');
+      SyncStatusService.setState('SYNCED');
+      await proceedToDestination();
+      return;
+    }
+
     const hasOnboarded = await onboardingService.hasCompletedOnboarding();
     const isRehydrate = route.query.mode === 'rehydrate';
     isReturningUser.value = hasOnboarded || isRehydrate;

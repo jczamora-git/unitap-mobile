@@ -30,6 +30,8 @@ import { formatDate, formatTime } from '@/utilities/date-formatters';
 import { haptics } from '@/utilities/haptics';
 import { UniPageHeader, UniStatCard, UniButton, UniEmptyState, UniSheet } from '@/components/ui';
 import UniGlobalSyncPill from '@/components/shared/UniGlobalSyncPill.vue';
+import WorkspaceSwitcher from '@/components/shared/WorkspaceSwitcher.vue';
+import { authService } from '@/services/auth.service';
 import { useToast } from '@/composables/useToast';
 import { studentService } from '@/services/student.service';
 import {
@@ -47,6 +49,8 @@ const isCompressingPhoto = ref(false);
 const isUploadingPhoto = ref(false);
 const showPhotoPreviewSheet = ref(false);
 const compressedPhoto = ref<CompressedImageResult | null>(null);
+
+const canSwitchPortal = computed(() => authService.canSwitchWorkspace.value);
 
 const hasProfilePhoto = computed(() => {
   return Boolean(
@@ -167,6 +171,9 @@ onIonViewWillEnter(() => {
 
     <ion-content class="safe-content">
       <div class="page-container">
+        <!-- Dual-Role Workspace Switcher -->
+        <WorkspaceSwitcher v-if="canSwitchPortal" style="margin-bottom: 14px;" />
+
         <!-- Loading State -->
         <div v-if="isLoading && !student" class="portal-loading-box">
           <ion-spinner name="crescent" color="primary" />

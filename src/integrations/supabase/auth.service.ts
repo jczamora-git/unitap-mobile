@@ -1,10 +1,12 @@
 import { ref, computed } from 'vue';
+import { Capacitor } from '@capacitor/core';
 import { supabase } from './client';
 import { AuthSessionService, type CachedOfflineSession } from './auth-session.service';
 import { AccountLinkingService } from './account-linking.service';
 import { AuthRepository } from '@/database/repositories/auth.repository';
 import { StudentsRepository } from '@/database/repositories/students.repository';
 import { DataModeService } from '@/services/data-mode.service';
+import { NetworkService } from '@/services/network.service';
 import type { UserAccount, UserRoleRecord, StudentRecord } from '@/types/database';
 
 export interface LoginResult {
@@ -17,6 +19,9 @@ export interface LoginResult {
 export class SupabaseAuthService {
   private static currentUser = ref<UserAccount | null>(null);
   private static currentRole = ref<'DEVADMIN' | 'OFFICER' | 'STUDENT' | null>(null);
+  private static currentRoles = ref<('DEVADMIN' | 'OFFICER' | 'STUDENT')[]>([]);
+  private static currentAvailablePortals = ref<('DEVADMIN' | 'OFFICER' | 'STUDENT')[]>([]);
+  private static currentActiveWorkspace = ref<'DEVADMIN' | 'OFFICER' | 'STUDENT' | null>(null);
   private static currentStudent = ref<StudentRecord | null>(null);
   private static isOfflineMode = ref(false);
   private static authListenerInitialized = false;
@@ -28,7 +33,23 @@ export class SupabaseAuthService {
   }
 
   public static get role() {
-    return computed(() => this.currentRole.value);
+    return computed(() => this.currentActiveWorkspace.value || this.currentRole.value);
+  }
+
+  public static get roles() {
+    return computed(() => this.currentRoles.value);
+  }
+
+  public static get availablePortals() {
+    return computed(() => this.currentAvailablePortals.value);
+  }
+
+  public static get activeWorkspace() {
+    return computed(() => this.currentActiveWorkspace.value || this.currentRole.value);
+  }
+
+  public static get canSwitchPortal() {
+    return computed(() => this.currentAvailablePortals.value.length > 1);
   }
 
   public static get student() {
@@ -98,10 +119,30 @@ export class SupabaseAuthService {
     }
   }
 
+  public static setActiveRole(role: 'DEVADMIN' | 'OFFICER' | 'STUDENT'): void {
+    this.currentRole.value = role;
+    this.currentActiveWorkspace.value = role;
+  }
+
   public static async switchWorkspace(workspace: 'DEVADMIN' | 'OFFICER' | 'STUDENT'): Promise<void> {
-    const { authService } = await import('@/services/auth.service');
-    await authService.switchWorkspace(workspace);
+    if (this.currentAvailablePortals.value.length > 0 && !this.currentAvailablePortals.value.includes(workspace)) {
+      throw new Error(`Unauthorized portal: account does not have access to ${workspace} portal.`);
+    }
+
+    this.currentActiveWorkspace.value = workspace;
     this.currentRole.value = workspace;
+
+    try {
+      const { Preferences } = await import('@capacitor/preferences');
+      await Preferences.set({ key: 'unitap_active_workspace', value: workspace });
+    } catch {
+      // Non-fatal
+    }
+
+    const { authService } = await import('@/services/auth.service');
+    if (authService.activeWorkspace.value !== workspace) {
+      await authService.switchWorkspace(workspace);
+    }
   }
 
   public static async hasRole(role: 'DEVADMIN' | 'OFFICER' | 'STUDENT'): Promise<boolean> {
@@ -129,8 +170,24 @@ export class SupabaseAuthService {
           this.isInitialized.value = true;
         }
       });
+
+      // App resume listener for Android: refresh live Supabase session on resume
+      NetworkService.onAppResume(async () => {
+        try {
+          if (DataModeService.isDirectSupabase()) {
+            const { data: { session }, error } = await supabase.auth.getSession();
+            if (!error && session?.user) {
+              if (!this.currentUser.value || this.currentUser.value.id !== session.user.id) {
+                await this.handleOnlineSession(session.user.id, session.user.email || '');
+              }
+            }
+          }
+        } catch (resumeErr) {
+          console.warn('[SupabaseAuth] Resume session refresh warning:', resumeErr);
+        }
+      });
     } catch (err) {
-      console.warn('[SupabaseAuth] Failed to attach onAuthStateChange listener:', err);
+      console.warn('[SupabaseAuth] Failed to attach auth listeners:', err);
     }
   }
 
@@ -421,37 +478,52 @@ export class SupabaseAuthService {
     const cleanEmail = email.trim().toLowerCase();
     const cleanCode = activationCode.trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
 
+    console.log('[SupabaseAuth] registerStudent attempt:', {
+      platform: Capacitor.getPlatform(),
+      dataMode: DataModeService.getModeLabel(),
+      schoolId: cleanSchoolId,
+      email: cleanEmail,
+    });
+
     try {
-      // 1. Sign up user via Supabase Auth
-      const { data, error } = await supabase.auth.signUp({
-        email: cleanEmail,
-        password,
-        options: {
-          data: {
-            school_id: cleanSchoolId,
+      // 1. Check if caller already has an active Supabase session with the same email
+      const { data: existingSessionData } = await supabase.auth.getSession();
+      let userId = existingSessionData?.session?.user?.email?.toLowerCase() === cleanEmail
+        ? existingSessionData.session.user.id
+        : undefined;
+
+      if (!userId) {
+        // Sign up user via Supabase Auth
+        const { data, error } = await supabase.auth.signUp({
+          email: cleanEmail,
+          password,
+          options: {
+            data: {
+              school_id: cleanSchoolId,
+            },
           },
-        },
-      });
+        });
 
-      let userId = data?.user?.id;
+        userId = data?.user?.id;
 
-      // Handle case where user already exists in auth (e.g. interrupted registration)
-      if (error) {
-        if (error.message.includes('already registered') || error.message.includes('User already registered')) {
-          const signInRes = await supabase.auth.signInWithPassword({
-            email: cleanEmail,
-            password,
-          });
-          if (signInRes.data?.user) {
-            userId = signInRes.data.user.id;
+        // Handle case where user already exists in auth (e.g. interrupted registration)
+        if (error) {
+          if (error.message.includes('already registered') || error.message.includes('User already registered')) {
+            const signInRes = await supabase.auth.signInWithPassword({
+              email: cleanEmail,
+              password,
+            });
+            if (signInRes.data?.user) {
+              userId = signInRes.data.user.id;
+            } else {
+              return {
+                success: false,
+                error: 'An account with this email already exists. Please sign in or use password recovery.',
+              };
+            }
           } else {
-            return {
-              success: false,
-              error: 'An account with this email already exists. Please sign in or use password recovery.',
-            };
+            return { success: false, error: error.message };
           }
-        } else {
-          return { success: false, error: error.message };
         }
       }
 
@@ -466,14 +538,29 @@ export class SupabaseAuthService {
         userId
       );
 
+      console.log('[SupabaseAuth] activateAndLinkStudentAccount result:', {
+        success: linkRes.success,
+        studentId: linkRes.studentId,
+        alreadyLinked: linkRes.alreadyLinked,
+        error: linkRes.error,
+      });
+
       if (!linkRes.success) {
         return { success: false, error: linkRes.error || 'Activation failed.' };
       }
 
-      // 3. Populate session
+      // 3. Populate session ONLY on verified activation success
       await this.handleOnlineSession(userId, cleanEmail);
       return { success: true };
     } catch (err) {
+      if (DataModeService.isDirectSupabase()) {
+        console.error('[SupabaseAuth] Registration exception in Direct Mode:', err);
+        return {
+          success: false,
+          error: (err as Error).message || 'Student registration failed.',
+        };
+      }
+
       // Fallback for offline / local SQLite test environments
       try {
         const { authService } = await import('@/services/auth.service');
@@ -537,29 +624,97 @@ export class SupabaseAuthService {
       console.warn('[SupabaseAuth] Could not query remote users profile:', e);
     }
 
-    // 2. Determine authoritative role from Supabase PostgreSQL user_roles table
+    // 2. Determine authoritative role and active workspace from Supabase PostgreSQL user_roles and appointments
     let authoritativeRole: 'DEVADMIN' | 'OFFICER' | 'STUDENT' | null = null;
+    let remoteRoles: any[] = [];
     try {
-      const { data: remoteRoles, error: remoteRoleErr } = await supabase
+      const { data, error: remoteRoleErr } = await supabase
         .from('user_roles')
         .select('id, role, semester_id, assigned_at, revoked_at')
         .eq('user_id', userId)
         .is('revoked_at', null);
 
-      if (!remoteRoleErr && remoteRoles && remoteRoles.length > 0) {
-        if (remoteRoles.some((r: { role: string }) => r.role === 'DEVADMIN')) {
-          authoritativeRole = 'DEVADMIN';
-        } else if (remoteRoles.some((r: { role: string }) => r.role === 'OFFICER')) {
-          authoritativeRole = 'OFFICER';
-        } else {
-          authoritativeRole = 'STUDENT';
-        }
+      if (!remoteRoleErr && data) {
+        remoteRoles = data;
       }
     } catch (e) {
       console.warn('[SupabaseAuth] Could not query remote user_roles:', e);
     }
 
-    // 3. Check Supabase user app_metadata / user_metadata
+    const hasDevAdmin = remoteRoles.some((r: { role: string }) => r.role === 'DEVADMIN');
+    const hasOfficerRole = remoteRoles.some((r: { role: string }) => r.role === 'OFFICER');
+    const hasStudentRole = remoteRoles.some((r: { role: string }) => r.role === 'STUDENT') || Boolean(remoteStudentId);
+
+    // Require valid, active, non-expired officer appointment before enabling Officer access
+    let hasValidOfficer = false;
+    if (hasOfficerRole) {
+      try {
+        const { OfficerManagementService } = await import('@/services/officer-management.service');
+        hasValidOfficer = await OfficerManagementService.hasValidOfficerAppointment(userId, remoteStudentId);
+      } catch (apptErr) {
+        console.warn('[SupabaseAuth] Officer appointment validity check error:', apptErr);
+      }
+    }
+
+    // Resolve verified active roles (do not display OFFICER if appointment is invalid)
+    const verifiedActiveRoles: ('DEVADMIN' | 'OFFICER' | 'STUDENT')[] = [];
+    if (hasDevAdmin) {
+      verifiedActiveRoles.push('DEVADMIN');
+    }
+    if (hasOfficerRole && hasValidOfficer) {
+      verifiedActiveRoles.push('OFFICER');
+    }
+    if (hasStudentRole) {
+      verifiedActiveRoles.push('STUDENT');
+    }
+
+    // Fallback if no roles found
+    if (verifiedActiveRoles.length === 0) {
+      verifiedActiveRoles.push(email.toLowerCase().includes('admin') ? 'DEVADMIN' : 'STUDENT');
+    }
+
+    // Resolve available portals independently
+    const availablePortals: ('DEVADMIN' | 'OFFICER' | 'STUDENT')[] = [];
+    if (verifiedActiveRoles.includes('DEVADMIN')) {
+      availablePortals.push('DEVADMIN');
+    }
+    if (verifiedActiveRoles.includes('OFFICER')) {
+      availablePortals.push('OFFICER');
+    }
+    if (verifiedActiveRoles.includes('STUDENT') && Boolean(remoteStudentId)) {
+      availablePortals.push('STUDENT');
+    } else if (verifiedActiveRoles.includes('STUDENT') && !hasDevAdmin && !hasValidOfficer) {
+      availablePortals.push('STUDENT');
+    }
+
+    // Restore selected portal from Preferences if valid, otherwise select default
+    let activeWorkspace: 'DEVADMIN' | 'OFFICER' | 'STUDENT' | null = null;
+    try {
+      const { Preferences } = await import('@capacitor/preferences');
+      const { value: saved } = await Preferences.get({ key: 'unitap_active_workspace' });
+      if (saved && availablePortals.includes(saved as any)) {
+        activeWorkspace = saved as any;
+      }
+    } catch {}
+
+    if (!activeWorkspace) {
+      if (availablePortals.includes('STUDENT') && !hasDevAdmin) {
+        activeWorkspace = 'STUDENT';
+      } else if (hasDevAdmin) {
+        activeWorkspace = 'DEVADMIN';
+      } else {
+        activeWorkspace = availablePortals[0] || 'STUDENT';
+      }
+    }
+
+    authoritativeRole = activeWorkspace;
+
+    try {
+      const { Preferences } = await import('@capacitor/preferences');
+      await Preferences.set({ key: 'unitap_active_workspace', value: activeWorkspace });
+    } catch {}
+
+    // 3. Check Supabase user app_metadata / user_metadata fallback
     if (!authoritativeRole) {
       try {
         const { data: { user: sbUser } } = await supabase.auth.getUser();
@@ -627,18 +782,23 @@ export class SupabaseAuthService {
         const db = await getDatabase();
         await db.execute('UPDATE users SET student_id = ? WHERE id = ?', [remoteStudentId, userId]);
       }
+    }
 
-      // Ensure local SQLite user_roles matches authoritative role
-      const localRoles = await AuthRepository.getUserRoles(userId);
-      const hasMatchingActiveRole = localRoles.some((r) => r.role === authoritativeRole && !r.revoked_at);
-      if (!hasMatchingActiveRole) {
-        const primaryRole: UserRoleRecord = {
-          id: 'rol_' + userId.substring(0, 8) + '_' + Date.now().toString(36),
+    // Ensure all active remote roles are mirrored into local SQLite without deleting or overriding existing roles
+    const localRoles = await AuthRepository.getUserRoles(userId);
+    const rolesToMirror = (remoteRoles && remoteRoles.length > 0)
+      ? remoteRoles
+      : [{ role: authoritativeRole, user_id: userId }];
+
+    for (const r of rolesToMirror) {
+      const exists = localRoles.some((lr) => lr.role === r.role && !lr.revoked_at);
+      if (!exists) {
+        await AuthRepository.assignUserRole({
+          id: 'rol_' + userId.substring(0, 8) + '_' + r.role.toLowerCase(),
           user_id: userId,
-          role: authoritativeRole,
-          assigned_at: now,
-        };
-        await AuthRepository.assignUserRole(primaryRole);
+          role: r.role,
+          assigned_at: r.assigned_at || now,
+        });
       }
     }
 
@@ -650,7 +810,10 @@ export class SupabaseAuthService {
     };
 
     this.currentUser.value = user;
-    this.currentRole.value = authoritativeRole;
+    this.currentRole.value = activeWorkspace;
+    this.currentRoles.value = verifiedActiveRoles;
+    this.currentAvailablePortals.value = availablePortals;
+    this.currentActiveWorkspace.value = activeWorkspace;
 
     let studentRecord: StudentRecord | null = null;
     if (user.student_id) {
@@ -678,8 +841,13 @@ export class SupabaseAuthService {
 
     // Sync session with local authService for Vue reactivity & route guards
     const { authService } = await import('@/services/auth.service');
-    const allLocalRoles = await AuthRepository.getUserRoles(userId);
-    await authService.setSession(user, effectiveRoleRecord, studentRecord, allLocalRoles);
+    const localUserRoles: UserRoleRecord[] = verifiedActiveRoles.map((r) => ({
+      id: 'rol_' + userId.substring(0, 8) + '_' + r.toLowerCase(),
+      user_id: userId,
+      role: r,
+      assigned_at: now,
+    }));
+    await authService.setSession(user, effectiveRoleRecord, studentRecord, localUserRoles, activeWorkspace);
 
     return authoritativeRole;
   }
@@ -700,8 +868,47 @@ export class SupabaseAuthService {
       assigned_at: cached.cachedAt,
     };
 
+    const localRoles = await AuthRepository.getUserRoles(cached.userId);
+    const dbRoles = localRoles.filter((r) => !r.revoked_at).map((r) => r.role);
+
+    let hasValidOfficer = false;
+    if (dbRoles.includes('OFFICER')) {
+      try {
+        const { OfficerManagementService } = await import('@/services/officer-management.service');
+        hasValidOfficer = await OfficerManagementService.hasValidOfficerAppointment(cached.userId, cached.studentId);
+      } catch {
+        hasValidOfficer = false;
+      }
+    }
+
+    const verifiedActiveRoles: ('DEVADMIN' | 'OFFICER' | 'STUDENT')[] = [];
+    if (dbRoles.includes('DEVADMIN')) verifiedActiveRoles.push('DEVADMIN');
+    if (dbRoles.includes('OFFICER') && hasValidOfficer) verifiedActiveRoles.push('OFFICER');
+    if (dbRoles.includes('STUDENT') || Boolean(cached.studentId)) verifiedActiveRoles.push('STUDENT');
+    if (verifiedActiveRoles.length === 0) verifiedActiveRoles.push(cached.role);
+
+    const availablePortals: ('DEVADMIN' | 'OFFICER' | 'STUDENT')[] = [];
+    if (verifiedActiveRoles.includes('DEVADMIN')) availablePortals.push('DEVADMIN');
+    if (verifiedActiveRoles.includes('OFFICER')) availablePortals.push('OFFICER');
+    if (verifiedActiveRoles.includes('STUDENT') && Boolean(cached.studentId)) availablePortals.push('STUDENT');
+    if (availablePortals.length === 0) availablePortals.push(cached.role);
+
+    let activeWorkspace: 'DEVADMIN' | 'OFFICER' | 'STUDENT' = cached.role;
+    try {
+      const { Preferences } = await import('@capacitor/preferences');
+      const { value: saved } = await Preferences.get({ key: 'unitap_active_workspace' });
+      if (saved && availablePortals.includes(saved as any)) {
+        activeWorkspace = saved as any;
+      }
+    } catch {
+      // Ignored
+    }
+
     this.currentUser.value = user;
-    this.currentRole.value = cached.role;
+    this.currentRole.value = activeWorkspace;
+    this.currentRoles.value = verifiedActiveRoles;
+    this.currentAvailablePortals.value = availablePortals;
+    this.currentActiveWorkspace.value = activeWorkspace;
 
     let studentRecord: StudentRecord | null = null;
     if (cached.studentId) {
@@ -713,7 +920,7 @@ export class SupabaseAuthService {
 
     // Sync with local authService
     const { authService } = await import('@/services/auth.service');
-    await authService.setSession(user, role, studentRecord);
+    await authService.setSession(user, role, studentRecord, localRoles, activeWorkspace);
   }
 }
 

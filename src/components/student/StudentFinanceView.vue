@@ -23,6 +23,7 @@ import type { PaymentRecord } from '@/types/database';
 import type { StudentObligationWithBalance } from '@/database/repositories/finance.repository';
 import { formatPeso } from '@/utilities/finance-formatters';
 import { formatDate } from '@/utilities/date-formatters';
+import { INSTITUTION_CONFIG } from '@/utilities/branding';
 import { haptics } from '@/utilities/haptics';
 import { UniPageHeader, UniSegmentedControl, UniEmptyState, UniSheet, UniButton } from '@/components/ui';
 
@@ -230,8 +231,8 @@ onIonViewWillEnter(() => {
       <div v-if="selectedPayment" class="receipt-sheet-content">
         <div class="receipt-slip-card">
           <div class="slip-header">
-            <span class="slip-school font-mono">MABALACAT CITY COLLEGE</span>
-            <span class="slip-org">College Studies Government (CSG)</span>
+            <span class="slip-school font-mono">{{ INSTITUTION_CONFIG.name }}</span>
+            <span class="slip-org">{{ INSTITUTION_CONFIG.organizationName }} ({{ INSTITUTION_CONFIG.organizationAcronym }})</span>
             <span class="slip-title">ACKNOWLEDGMENT RECEIPT</span>
           </div>
 
@@ -252,7 +253,7 @@ onIonViewWillEnter(() => {
             </div>
             <div class="slip-field">
               <span class="field-label">Student ID</span>
-              <span class="field-val font-mono">{{ student?.studentNumber || 'MCC STUDENT' }}</span>
+              <span class="field-val font-mono">{{ student?.studentNumber || 'STUDENT' }}</span>
             </div>
             <div class="slip-field">
               <span class="field-label">Academic Summary</span>

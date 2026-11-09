@@ -1894,6 +1894,169 @@ The following items should be exercised during live user acceptance testing:
 | TypeScript Compiler Check | `npx vue-tsc --noEmit` | **0 errors** (Exit code 0) |
 | Production Build | `npm run build` | **SUCCESSFUL** in 16.11s (Exit code 0) |
 
+## 25. Student Account Activation Idempotency & Android Native Runtime Consistency (2026-11-10)
+
+### 25.1. Problem & Root Cause Analysis
+
+1. **Issue 1: `activate_student_account` RPC Duplicate Username (PostgreSQL 23505)**:
+   - **Symptom**: Calling `activate_student_account` failed with `23505: duplicate key value violates unique constraint "users_username_key"` for username `mcc2026-0256`. Auth account creation succeeded (`auth/v1/user` returned 200), but activation aborted.
+   - **Root Cause**: `public.users` has a unique constraint on `username` (`users_username_key`). The RPC performed `INSERT INTO public.users (id, username, student_id, account_status) VALUES (v_target_user_id, lower(v_student.school_id), ...) ON CONFLICT (id) DO UPDATE`. If another row in `public.users` already held `lower(v_student.school_id)` with a different UUID, `ON CONFLICT (id)` did not match, triggering an unhandled 23505 exception. Additionally, step 2 only checked `WHERE student_id = v_student.id AND account_status = 'ACTIVE'`, missing rows in other statuses.
+   - **Remediation**:
+     - Authored forward-only migration `supabase/migrations/20261110000000_idempotent_student_activation_repair.sql`.
+     - Validates caller ownership: if caller's `public.users` row is already linked to the student, returns idempotent success (`already_linked: true`).
+     - Detects conflicts before insertion: if the student or username belongs to another account (`id <> v_target_user_id`), returns an explicit friendly error message.
+     - Wraps the `public.users` upsert in an `EXCEPTION WHEN unique_violation` handler to eliminate 500/unhandled crash states.
+     - Updated `SupabaseAuthService.registerStudent`: checks for existing active session matching caller email to prevent duplicate Auth account creation on retry; returns `{ success: false, error }` without falling back to local SQLite in Direct Supabase Mode; never calls `handleOnlineSession` or navigates to `/initial-sync` on activation failure.
+
+2. **Issue 2: Android Officer Activation Code SQLite Foreign Key Failure (Code 787)**:
+   - **Symptom**: Web activation code issuance succeeded, but on installed Android APK, issuing an activation code failed with `FOREIGN KEY constraint failed`.
+   - **Root Cause**: In `StudentActivationService.issueActivationCode`, when online RPC `officer_issue_activation_code` succeeded, the service immediately called `persistLocalClaim` to mirror into SQLite. On native Android (`NativeSqliteAdapter` with `PRAGMA foreign_keys = ON`), `activation_claims.issued_by_user_id` has a foreign key referencing `users(id)`. Because the officer logged in via Supabase Auth and their UUID did not exist in the Android device's local SQLite `users` table, SQLite aborted with error 787. The catch block in `issueActivationCode` trapped this error and returned failure to the officer despite the server RPC having succeeded.
+   - **Remediation**:
+     - In Direct Supabase Mode (`DataModeService.isDirectSupabase()`), the server RPC is the single authoritative mutation. Eliminated local SQLite mirror writes (`persistLocalClaim` and local audit creation) during code issuance and revocation.
+     - Never falls back to local SQLite code generation on RPC failure in Direct Supabase Mode.
+     - In Offline-First Mode, `persistLocalClaim` ensures the officer user row exists in SQLite before inserting into `activation_claims`, preventing foreign key failures.
+
+3. **Issue 3: Android Native Runtime Consistency & App Resume**:
+   - Verified Supabase URL (`https://snqcbmroefhxkhcadidr.supabase.co`) and public API keys match across Web and Android packages.
+   - Prevented asynchronous Capacitor Preferences hydration from overriding the authoritative `VITE_DATA_MODE=supabase_direct` setting on native Android.
+   - Added app resume listener via `NetworkService.onAppResume` in `SupabaseAuthService` to refresh live Supabase sessions when resuming the Android application from the background.
+   - Added focused diagnostic logging with platform (`Capacitor.getPlatform()`), data mode, RPC results, and error codes without exposing sensitive passwords or tokens.
+
+### 25.2. Migration File Authored
+
+- `supabase/migrations/20261110000000_idempotent_student_activation_repair.sql`
+
+### 25.3. Verification Results
+
+| Verification Step | Command | Result |
+| :--- | :--- | :--- |
+| Targeted Activation & Runtime Specification | `npx vitest run tests/unit/student-activation-and-runtime.spec.ts` | **9 of 9 PASSED** (Exit code 0) |
+| Related Activation & Role Sync Suites | `npx vitest run tests/unit/role-sync-and-activation.spec.ts tests/unit/student-activation.spec.ts` | **28 of 28 PASSED** (Exit code 0) |
+| TypeScript Compiler Check | `npx vue-tsc --noEmit` | **0 errors** (Exit code 0) |
+| Production Build | `npm run build` | **SUCCESSFUL** in 52.19s (Exit code 0) |
+| Capacitor Android Sync | `npx cap sync android` | **SUCCESSFUL** in 3.29s (Exit code 0) |
+| Gradle Debug APK Build | `cd android; .\gradlew.bat assembleDebug` | **BUILD SUCCESSFUL** in 55s (Exit code 0) |
+| APK Artifact Verification | `android/app/build/outputs/apk/debug/app-debug.apk` | **17.26 MB** (18,102,582 bytes), verified |
+
+## 26. Officer Management RLS Visibility, Dual-Role Portal Architecture & Initial Sync Routing (2026-11-10)
+
+### 26.1. Problem & Root Cause Analysis
+
+1. **Issue 1: Officer Management RLS Visibility**:
+   - **Symptom**: In Officer Management, DEVADMIN could not view all officer appointments. The list only showed appointments matching `user_id = auth.uid()`.
+   - **Root Cause**: The RLS SELECT policy on `public.officer_appointments` strictly enforced `user_id = auth.uid() AND status IN ('ACTIVE', 'SUSPENDED')`. There was no policy allowing DEVADMIN to view appointments for all officers.
+   - **Remediation**: Authored forward-only migration `supabase/migrations/20261110010000_devadmin_officer_appointments_rls.sql` providing:
+     - `DevAdmin view all officer_appointments`: SELECT policy using `public.get_current_user_role() = 'DEVADMIN'`.
+     - Preserved ordinary officers' own-appointment SELECT policy (`user_id = auth.uid() AND status IN ('ACTIVE', 'SUSPENDED')`).
+     - Restricted INSERT, UPDATE, and DELETE operations on `officer_appointments` exclusively to DEVADMIN.
+     - Kept RLS enabled and blocked unauthenticated (`anon`) access.
+
+2. **Issue 2: False Officer Promotion Success Handling & Duplicate Prevention**:
+   - **Symptom**: In `CreateOfficerPage.vue`, if `devadmin_promote_student_to_officer` RPC returned `{ success: false, error: '...' }` with an HTTP 200 response, client callers might treat the lack of a transport error as success, displaying the "Officer Promoted" modal despite the server rejecting the operation.
+   - **Root Cause**: The client caller did not strictly assert `data.success === true` and did not detect existing active appointments prior to submission.
+   - **Remediation**:
+     - Updated `OfficerManagementService.promoteStudentToOfficer`: strictly inspects `!data || data.success !== true`, returning `{ success: false, error }` without creating or caching local records.
+     - Added `OfficerManagementService.getAppointmentForStudent`: checks live Supabase and SQLite for active/suspended appointments.
+     - In `CreateOfficerPage.vue`: checks `getAppointmentForStudent` during student selection, sets `is_officer = 1` and displays the duplicate officer warning banner.
+     - In `handleSubmit`: strictly verifies `res && res.success === true` before opening success dialog; otherwise triggers error toast and preserves form state.
+
+3. **Issue 3: Dual-Role Portal Access & Workspace Switching**:
+   - **Symptom**: A student promoted to officer possesses dual identities (`STUDENT` and `OFFICER`). Previously, session hydration unconditionally overrode the active role to `OFFICER`, locking them out of the Student Portal dock, digital pass, and student dashboard.
+   - **Root Cause**: Session initialization lacked support for multi-role accounts and defaulted to the highest privilege without offering a seamless toggle.
+   - **Remediation**:
+     - `SupabaseAuthService.handleOnlineSession`: queries all non-revoked remote roles, verifies active appointment validity (`hasValidOfficerAppointment`), and defaults landing portal to `STUDENT` for students with dual roles.
+     - Mirrors all active roles into local SQLite without deleting or overriding `STUDENT`.
+     - In `authService`: updated `switchWorkspace` to allow switching between `STUDENT` and `OFFICER` without sign-out or credentials loss, synchronizing with `SupabaseAuthService.setActiveRole`.
+     - Integrated `WorkspaceSwitcher` into `StudentHomeView.vue` and `SettingsPage.vue`, allowing student-officers to toggle between Student Portal and Officer Workspace instantly.
+     - Guarded Officer Portal access with `hasValidOfficerAppointment` (checks `status === 'ACTIVE'`, not revoked, and valid appointment dates).
+
+4. **Issue 4: Initial Sync Routing in Direct Supabase Mode**:
+   - **Symptom**: In Direct Supabase Mode, navigating to `/initial-sync` could cause unnecessary delay or become unresponsive if full table hydration into SQLite was attempted.
+   - **Root Cause**: `/initial-sync` was designed for SQLite offline hydration, which is bypassed when `DataModeService.isDirectSupabase()` is true.
+   - **Remediation**:
+     - In `InitialSyncPage.vue`: when `DataModeService.isDirectSupabase()` is true, immediately sets hydration to `READY` and state to `SYNCED`, and navigates directly to `/tabs/home` (or the active portal).
+
+### 26.2. Forward-Only Migration Authored
+
+- `supabase/migrations/20261110010000_devadmin_officer_appointments_rls.sql`
+
+*(Note: Author migration file only; not executed against live database per strict instructions).*
+
+### 26.3. Multi-Role Resolution, Dynamic Portal Switching & Settings Account Polish
+
+1. **Multi-Role Resolution from Remote Database**:
+   - Resolved the fundamental limitation of `get_current_user_role()`, which only returns a single role based on priority (`DEVADMIN > OFFICER > STUDENT`), effectively masking other active roles.
+   - Updated session hydration (`handleOnlineSession` and `restoreOfflineSession`) to query all active, non-revoked records directly from `public.user_roles WHERE user_id = auth.uid() AND revoked_at IS NULL`.
+   - Populated `currentRoles` and exposed `roles` so that all active roles (e.g. `['STUDENT', 'OFFICER']`) are retained in client state.
+   - Verified active officer appointment validity via `OfficerManagementService.hasValidOfficerAppointment(userId, studentId)`.
+
+2. **Independent Portal Resolution & State Separation**:
+   - Strictly separated `availablePortals` / `availableRoles` from `activeWorkspace`.
+   - `availablePortals` evaluates all active roles independently:
+     - `DEVADMIN` role in active roles $\rightarrow$ Developer Admin Portal.
+     - `STUDENT` role + valid `student_id` $\rightarrow$ Student Portal.
+     - `OFFICER` role + valid active non-expired non-revoked appointment $\rightarrow$ Officer Workspace.
+   - Changing `activeWorkspace` toggles local active context without modifying database rows or clearing available roles.
+   - Persisted active workspace selection to `@capacitor/preferences` under key `unitap_active_workspace` and restored on app relaunch / page refresh.
+
+3. **DEVADMIN Isolation**:
+   - Accounts with only `DEVADMIN` and no `student_id` load directly into the DevAdmin dashboard.
+   - Bypassed student profile resolution for non-student accounts in `HomePage.vue` (`useCurrentStudentPortal` is only called when `isStudent` is true).
+   - Guarded `/tabs/pass` against accounts without a `student_id`.
+
+4. **Settings & Account Management Polish**:
+   - In `SettingsPage.vue`:
+     - Display full student name (`Althea Ocampo Abella`) when linked, resolving first, middle, and last names rather than displaying the raw username (`mcc2026-0256`).
+     - Display individual badge chips for all active roles (`STUDENT · OFFICER`).
+     - Added "Available Portals" card displaying all authorized workspaces with a `CURRENT` badge for the active portal.
+     - Provided a one-tap direct switch button (`Switch to this portal`) enabling seamless switching without logging out.
+   - In `HomePage.vue`:
+     - Added `WorkspaceSwitcher` banner for dual-role users in Officer mode so they can return to Student Portal without visiting Settings.
+
+### 26.4. Verification Results
+
+| Verification Step | Command | Result |
+| :--- | :--- | :--- |
+| Targeted Dual-Role & Officer RLS Specification | `npx vitest run tests/unit/dual-role-portal-and-officer-rls.spec.ts` | **16 of 16 PASSED** (Exit code 0) |
+| Related Activation & Runtime Specification | `npx vitest run tests/unit/student-activation-and-runtime.spec.ts` | **9 of 9 PASSED** (Exit code 0) |
+| Role-Based Database Sync & Activation Suite | `npx vitest run tests/unit/role-sync-and-activation.spec.ts` | **13 of 13 PASSED** (Exit code 0) |
+| TypeScript Compiler Check | `npx vue-tsc --noEmit` | **0 errors** (Exit code 0) |
+| Production Build | `npm run build` | **SUCCESSFUL** in 30.95s (Exit code 0) |
+
+## 27. Institutional Branding Standardization & Digital Student Pass (2026-11-10)
+
+### 27.1. Problem & Root Cause Analysis
+
+1. **Incorrect Institution Name on Digital Student Pass**:
+   - **Symptom**: `StudentPassPage.vue` displayed `MABALACAT CITY COLLEGE` and `College of Computing Studies • CSG`.
+   - **Root Cause**: The institution title and subtitle were hardcoded directly in the Vue template markup rather than sourced from a single centralized branding configuration.
+   - **Remediation**:
+     - Created centralized branding configuration in `src/utilities/branding.ts` (`INSTITUTION_CONFIG`).
+     - Standardized authoritative values:
+       - `name`: `MINDORO STATE UNIVERSITY`
+       - `shortName`: `MinSU`
+       - `collegeName`: `College of Computer Studies`
+       - `organizationName`: `Computer Studies Government`
+       - `organizationAcronym`: `CSG`
+       - `passSubtitle`: `College of Computer Studies - CSG`
+     - Re-exported configuration from `src/utilities/presentation-formatters.ts`.
+     - Updated `src/views/StudentPassPage.vue` to bind directly to `INSTITUTION_CONFIG.name` and `INSTITUTION_CONFIG.passSubtitle`.
+     - Updated `src/components/student/StudentFinanceView.vue` acknowledgment receipt header to use `INSTITUTION_CONFIG.name` and `INSTITUTION_CONFIG.organizationName`.
+     - Preserved all card geometry, holographic glow overlay, student photo loading, NFC pairing indicators, simulated barcode, and academic validity term stamps.
+
+### 27.2. Verification Results
+
+| Verification Step | Command | Result |
+| :--- | :--- | :--- |
+| Targeted Digital Pass Branding Specification | `npx vitest run tests/unit/digital-pass-branding.spec.ts` | **3 of 3 PASSED** (Exit code 0) |
+| Related Student Portal Specification | `npx vitest run tests/unit/student-portal.spec.ts` | **4 of 4 PASSED** (Exit code 0) |
+| TypeScript Compiler Check | `npx vue-tsc --noEmit` | **0 errors** (Exit code 0) |
+| Production Build | `npm run build` | **SUCCESSFUL** in 27.59s (Exit code 0) |
+
+
+
+
+
 
 
 
