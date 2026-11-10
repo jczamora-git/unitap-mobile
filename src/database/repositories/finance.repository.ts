@@ -1248,9 +1248,10 @@ export class FinanceRepository {
 
           const alreadyFined = obligations.some((o) => {
             if (o.student_id !== stu.student_id) return false;
-            return o.title?.toLowerCase().includes(targetCp.label.toLowerCase()) ||
-                   o.title?.includes(targetCp.id) ||
-                   (ruleId && o.rule_id === ruleId);
+            return (
+              o.title?.toLowerCase().includes(targetCp.label.toLowerCase()) ||
+              o.title?.includes(targetCp.id)
+            );
           });
 
           candidates.push({
@@ -1263,7 +1264,7 @@ export class FinanceRepository {
             attendanceRequired: true,
             excused: stu.excused,
             alreadyFined,
-            selected: !alreadyFined,
+            selected: false,
             attendanceStatus: 'ABSENT',
             missedCheckpoints: missedCps,
             attendedCheckpoints: attendedCpIds,
@@ -1274,6 +1275,10 @@ export class FinanceRepository {
 
           const alreadyFined = obligations.some((o) => {
             if (o.student_id !== stu.student_id) return false;
+            const isCheckpointFine = checkpoints.some(
+              (cp) => o.title?.toLowerCase().includes(cp.label.toLowerCase()) || o.title?.includes(cp.id)
+            );
+            if (isCheckpointFine) return false;
             return (!ruleId || o.rule_id === ruleId);
           });
 
@@ -1287,7 +1292,7 @@ export class FinanceRepository {
             attendanceRequired: true,
             excused: stu.excused,
             alreadyFined,
-            selected: !alreadyFined,
+            selected: false,
             attendanceStatus: 'ABSENT',
             missedCheckpoints: missedCps,
             attendedCheckpoints: [],
@@ -1394,8 +1399,8 @@ export class FinanceRepository {
         last_name: string;
         program_id?: string;
       }>(
-        `SELECT se.id, se.student_id, se.year_level, se.section,
-                s.school_id, s.first_name, s.middle_name, s.last_name, s.program_id
+        `SELECT se.id, se.student_id, se.year_level, se.section, se.program_id,
+                s.school_id, s.first_name, s.middle_name, s.last_name
          FROM student_enrollments se
          JOIN students s ON s.id = se.student_id
          WHERE se.semester_id = ? AND s.status = 'ACTIVE'`,
@@ -1515,9 +1520,10 @@ export class FinanceRepository {
 
         const alreadyFined = obligations.some((o) => {
           if (o.student_id !== stu.student_id) return false;
-          return o.title?.toLowerCase().includes(targetCp.label.toLowerCase()) ||
-                 o.title?.includes(targetCp.id) ||
-                 (ruleId && o.rule_id === ruleId);
+          return (
+            o.title?.toLowerCase().includes(targetCp.label.toLowerCase()) ||
+            o.title?.includes(targetCp.id)
+          );
         });
 
         candidates.push({
@@ -1530,7 +1536,7 @@ export class FinanceRepository {
           attendanceRequired: true,
           excused: false,
           alreadyFined,
-          selected: !alreadyFined,
+          selected: false,
           attendanceStatus: 'ABSENT',
           missedCheckpoints: missedCps,
           attendedCheckpoints: attendedCpIds,
@@ -1541,6 +1547,10 @@ export class FinanceRepository {
 
         const alreadyFined = obligations.some((o) => {
           if (o.student_id !== stu.student_id) return false;
+          const isCheckpointFine = checkpoints.some(
+            (cp) => o.title?.toLowerCase().includes(cp.label.toLowerCase()) || o.title?.includes(cp.id)
+          );
+          if (isCheckpointFine) return false;
           return (!ruleId || o.rule_id === ruleId);
         });
 
@@ -1554,7 +1564,7 @@ export class FinanceRepository {
           attendanceRequired: true,
           excused: false,
           alreadyFined,
-          selected: !alreadyFined,
+          selected: false,
           attendanceStatus: 'ABSENT',
           missedCheckpoints: missedCps,
           attendedCheckpoints: [],
@@ -1614,6 +1624,7 @@ export class FinanceRepository {
       throw new Error('Fine amount must be a positive integer in centavos.');
     }
 
+    const { eventService } = await import('@/services/event.service');
     const now = new Date().toISOString();
     let assessedCount = 0;
     let skippedCount = 0;
@@ -1624,7 +1635,7 @@ export class FinanceRepository {
       const rawOccId = params.occurrenceId.startsWith('occ_') ? params.occurrenceId.replace(/^occ_/, '') : params.occurrenceId;
       const { data: occ, error: occErr } = await supabase
         .from('event_occurrences')
-        .select('id, event_id, status, events(id, semester_id, title)')
+        .select('id, event_id, status, checkpoints_json, events(id, semester_id, title)')
         .eq('id', rawOccId)
         .maybeSingle();
 
@@ -1632,6 +1643,9 @@ export class FinanceRepository {
       if (occ.status !== 'CLOSED') {
         throw new Error('Attendance session is still open or scheduled. Fines can only be assessed on closed sessions.');
       }
+
+      const checkpoints = eventService.parseCheckpoints(occ);
+      const targetCp = params.checkpointId ? checkpoints.find((c) => c.id === params.checkpointId) : null;
 
       const parentEvent: any = occ.events;
       const semesterId = parentEvent?.semester_id;
@@ -1679,8 +1693,17 @@ export class FinanceRepository {
         const isAlreadyFined = (existingObs || []).some((o: any) => {
           if (o.student_id !== studentId) return false;
           if (params.mode === 'PER_CHECKPOINT' && params.checkpointId) {
-            return o.title === params.fineTitle || o.title.includes(params.checkpointId);
+            const cpLabel = targetCp?.label || '';
+            return (
+              o.title === params.fineTitle ||
+              (cpLabel && o.title.toLowerCase().includes(cpLabel.toLowerCase())) ||
+              o.title.includes(params.checkpointId)
+            );
           }
+          const isCpSpecific = checkpoints.some(
+            (cp) => o.title.toLowerCase().includes(cp.label.toLowerCase()) || o.title.includes(cp.id)
+          );
+          if (isCpSpecific) return false;
           return (!params.ruleId || o.rule_id === params.ruleId) || o.title === params.fineTitle;
         });
 
@@ -1764,6 +1787,9 @@ export class FinanceRepository {
       throw new Error('Attendance session is still open or scheduled. Fines can only be assessed on closed sessions.');
     }
 
+    const checkpoints = eventService.parseCheckpoints(occ);
+    const targetCp = params.checkpointId ? checkpoints.find((c) => c.id === params.checkpointId) : null;
+
     let rule: ObligationRule | null = null;
     if (params.ruleId) {
       rule = await db.queryOne<ObligationRule>('SELECT * FROM obligation_rules WHERE id = ?', [params.ruleId]);
@@ -1829,18 +1855,19 @@ export class FinanceRepository {
         // C. Duplicate check (idempotency)
         let alreadyFined;
         if (params.mode === 'PER_CHECKPOINT' && params.checkpointId) {
+          const cpLabel = targetCp?.label || '';
           alreadyFined = await tx.queryOne<{ id: string }>(
             `SELECT id FROM student_obligations
              WHERE student_id = ? AND related_occurrence_id = ? AND status = 'ACTIVE'
-               AND (title = ? OR title LIKE ?)`,
-            [studentId, params.occurrenceId, params.fineTitle, `%${params.checkpointId}%`]
+               AND (title = ? OR title LIKE ? OR title LIKE ?)`,
+            [studentId, params.occurrenceId, params.fineTitle, `%${params.checkpointId}%`, `%${cpLabel}%`]
           );
         } else {
           alreadyFined = await tx.queryOne<{ id: string }>(
             `SELECT id FROM student_obligations
              WHERE student_id = ? AND related_occurrence_id = ? AND status = 'ACTIVE'
-               AND (? IS NULL OR rule_id = ?)`,
-            [studentId, params.occurrenceId, params.ruleId || null, params.ruleId || null]
+               AND (? IS NULL OR rule_id = ? OR title = ?)`,
+            [studentId, params.occurrenceId, params.ruleId || null, params.ruleId || null, params.fineTitle]
           );
         }
         if (alreadyFined) {

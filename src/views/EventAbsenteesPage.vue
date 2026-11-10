@@ -82,16 +82,87 @@ const searchQuery = ref<string>('');
 const selectedYearLevel = ref<string>('ALL');
 const selectedSection = ref<string>('ALL');
 
+export interface CheckpointFineConfig {
+  amountSource: 'CUSTOM' | 'TEMPLATE';
+  customAmountPesos: number | null;
+  ruleId: string;
+  fineTitle: string;
+}
+
 // Bulk Assessment Sheet State
 const isModalOpen = ref<boolean>(false);
 const isAssessing = ref<boolean>(false);
 const assessmentError = ref<string | null>(null);
 
-const selectedRuleId = ref<string>('');
-const customFineTitle = ref<string>('');
-const fineAmountPesos = ref<number>(50);
 const dueDate = ref<string>('');
 const assessmentNotes = ref<string>('');
+
+// Whole event configuration
+const wholeEventConfig = ref<CheckpointFineConfig>({
+  amountSource: 'CUSTOM',
+  customAmountPesos: null,
+  ruleId: '',
+  fineTitle: '',
+});
+
+// Map of checkpointId -> CheckpointFineConfig
+const checkpointConfigs = ref<Record<string, CheckpointFineConfig>>({});
+
+const currentCheckpoint = computed(() => {
+  if (assessmentMode.value !== 'PER_CHECKPOINT' || !selectedCheckpointId.value || !summary.value?.checkpoints) {
+    return null;
+  }
+  return summary.value.checkpoints.find((c) => c.checkpointId === selectedCheckpointId.value) || null;
+});
+
+const currentCheckpointLabel = computed(() => currentCheckpoint.value?.label || '');
+
+const defaultFineTitle = computed(() => {
+  if (!summary.value) return 'Absence Fine';
+  if (assessmentMode.value === 'PER_CHECKPOINT') {
+    const cp = currentCheckpoint.value;
+    return cp ? `Absence Fine (${cp.label}): ${summary.value.eventTitle}` : `Absence Fine: ${summary.value.eventTitle}`;
+  }
+  return `Absence Fine: ${summary.value.eventTitle}`;
+});
+
+function getOrCreateCheckpointConfig(cpId: string): CheckpointFineConfig {
+  if (!checkpointConfigs.value[cpId]) {
+    checkpointConfigs.value[cpId] = {
+      amountSource: 'CUSTOM',
+      customAmountPesos: null,
+      ruleId: '',
+      fineTitle: '',
+    };
+  }
+  return checkpointConfigs.value[cpId];
+}
+
+const currentConfig = computed<CheckpointFineConfig>(() => {
+  if (assessmentMode.value === 'PER_CHECKPOINT') {
+    const cpId = selectedCheckpointId.value || 'default';
+    return getOrCreateCheckpointConfig(cpId);
+  }
+  return wholeEventConfig.value;
+});
+
+const currentFineAmountPesos = computed<number | null>(() => {
+  const cfg = currentConfig.value;
+  if (cfg.amountSource === 'TEMPLATE') {
+    const rule = rules.value.find((r) => r.id === cfg.ruleId);
+    return rule ? centavosToPeso(rule.defaultAmountCentavos) : null;
+  }
+  return cfg.customAmountPesos;
+});
+
+const currentFineAmountCentavos = computed<number>(() => {
+  const p = currentFineAmountPesos.value;
+  return p && p > 0 ? pesoToCentavos(p) : 0;
+});
+
+const isAmountConfigured = computed<boolean>(() => {
+  return currentFineAmountCentavos.value > 0;
+});
 
 // Distinct Sections for Filter
 const availableSections = computed(() => {
@@ -161,9 +232,41 @@ function handleOccurrenceSelect(val: string | number) {
   loadOccurrenceAbsentees();
 }
 
-function handleRuleSelect(val: string | number) {
-  selectedRuleId.value = String(val);
-  handleRuleChange();
+function setAmountSource(src: 'CUSTOM' | 'TEMPLATE') {
+  haptics.light();
+  currentConfig.value.amountSource = src;
+}
+
+function handleTemplateSelect(val: string | number) {
+  const ruleId = String(val);
+  currentConfig.value.ruleId = ruleId;
+  const rule = rules.value.find((r) => r.id === ruleId);
+  if (rule && !currentConfig.value.fineTitle) {
+    currentConfig.value.fineTitle = assessmentMode.value === 'PER_CHECKPOINT' && currentCheckpointLabel.value
+      ? `Absence Fine (${currentCheckpointLabel.value}): ${rule.name}`
+      : `Absence Fine: ${rule.name}`;
+  }
+}
+
+function setQuickAmount(preset: number) {
+  haptics.light();
+  currentConfig.value.amountSource = 'CUSTOM';
+  currentConfig.value.customAmountPesos = preset;
+}
+
+function copyCurrentAmountToAllCheckpoints() {
+  if (!summary.value?.checkpoints) return;
+  haptics.medium();
+  const src = currentConfig.value;
+  summary.value.checkpoints.forEach((cp) => {
+    checkpointConfigs.value[cp.checkpointId] = {
+      amountSource: src.amountSource,
+      customAmountPesos: src.customAmountPesos,
+      ruleId: src.ruleId,
+      fineTitle: src.fineTitle,
+    };
+  });
+  showToast('Copied fine configuration to all checkpoints', 'success');
 }
 
 // Filtered Candidates
@@ -189,8 +292,12 @@ const selectedCandidates = computed(() => {
   return candidates.value.filter((c) => c.selected && !c.alreadyFined);
 });
 
+const eligibleAbsenteesCount = computed(() => {
+  return candidates.value.filter((c) => !c.alreadyFined).length;
+});
+
 const totalAssessmentCentavos = computed(() => {
-  return selectedCandidates.value.length * pesoToCentavos(fineAmountPesos.value || 0);
+  return selectedCandidates.value.length * currentFineAmountCentavos.value;
 });
 
 const isSessionClosed = computed(() => {
@@ -274,12 +381,14 @@ async function onSemesterChanged() {
   events.value = await EventsRepository.getEventsBySemester(selectedSemesterId.value);
   rules.value = await financeService.getRules(selectedSemesterId.value);
 
-  // Default rule for absence
-  const absenceRule = rules.value.find((r) => r.triggerType === 'ABSENCE') || rules.value[0];
-  if (absenceRule) {
-    selectedRuleId.value = absenceRule.id;
-    fineAmountPesos.value = centavosToPeso(absenceRule.defaultAmountCentavos);
-  }
+  // Clear fine configuration on semester change - NEVER auto-apply unrelated fine template
+  wholeEventConfig.value = {
+    amountSource: 'CUSTOM',
+    customAmountPesos: null,
+    ruleId: '',
+    fineTitle: '',
+  };
+  checkpointConfigs.value = {};
 
   if (events.value.length > 0) {
     selectedEventId.value = events.value[0].id;
@@ -294,6 +403,15 @@ async function onSemesterChanged() {
 }
 
 async function onEventChanged() {
+  // Clear fine configuration on event change to avoid inheriting previous event's fines
+  wholeEventConfig.value = {
+    amountSource: 'CUSTOM',
+    customAmountPesos: null,
+    ruleId: '',
+    fineTitle: '',
+  };
+  checkpointConfigs.value = {};
+
   if (!selectedEventId.value) return;
   occurrences.value = await EventsRepository.getOccurrencesByEventId(selectedEventId.value);
   if (occurrences.value.length > 0) {
@@ -315,6 +433,13 @@ async function selectOccurrenceById(occId: string) {
       selectedEventId.value = ev.id;
       occurrences.value = await EventsRepository.getOccurrencesByEventId(ev.id);
       selectedOccurrenceId.value = occ.id;
+      wholeEventConfig.value = {
+        amountSource: 'CUSTOM',
+        customAmountPesos: null,
+        ruleId: '',
+        fineTitle: '',
+      };
+      checkpointConfigs.value = {};
       await loadOccurrenceAbsentees();
     }
   }
@@ -327,34 +452,32 @@ async function loadOccurrenceAbsentees() {
 
   try {
     const cpId = assessmentMode.value === 'PER_CHECKPOINT' ? (selectedCheckpointId.value || undefined) : undefined;
+    const ruleId = currentConfig.value.amountSource === 'TEMPLATE' ? (currentConfig.value.ruleId || undefined) : undefined;
     const result = await financeService.getAbsenteeCandidates(
       selectedOccurrenceId.value,
-      selectedRuleId.value || undefined,
+      ruleId,
       cpId
     );
     summary.value = result.summary;
-    candidates.value = result.candidates;
+    // Default to no students selected when candidates are loaded
+    candidates.value = (result.candidates || []).map((c) => ({
+      ...c,
+      selected: false,
+    }));
 
     // Automatically select first checkpoint if in PER_CHECKPOINT mode and none selected yet
     if (assessmentMode.value === 'PER_CHECKPOINT' && !selectedCheckpointId.value && summary.value.checkpoints && summary.value.checkpoints.length > 0) {
       selectedCheckpointId.value = summary.value.checkpoints[0].checkpointId;
       const cpResult = await financeService.getAbsenteeCandidates(
         selectedOccurrenceId.value,
-        selectedRuleId.value || undefined,
+        ruleId,
         selectedCheckpointId.value
       );
       summary.value = cpResult.summary;
-      candidates.value = cpResult.candidates;
-    }
-
-    // Set default fine title
-    if (summary.value) {
-      if (assessmentMode.value === 'PER_CHECKPOINT') {
-        const cp = summary.value.checkpoints?.find((c) => c.checkpointId === selectedCheckpointId.value);
-        customFineTitle.value = cp ? `Absence Fine: ${cp.label}` : `Absence Fine: ${summary.value.eventTitle}`;
-      } else {
-        customFineTitle.value = `Absence Fine: ${summary.value.eventTitle}`;
-      }
+      candidates.value = (cpResult.candidates || []).map((c) => ({
+        ...c,
+        selected: false,
+      }));
     }
   } catch (err: any) {
     console.error('Failed to load occurrence absentees:', err);
@@ -419,15 +542,6 @@ async function exportAbsenteesCsv() {
   }
 }
 
-function handleRuleChange() {
-  const rule = rules.value.find((r) => r.id === selectedRuleId.value);
-  if (rule) {
-    fineAmountPesos.value = centavosToPeso(rule.defaultAmountCentavos);
-    customFineTitle.value = `Absence Fine: ${rule.name}`;
-    loadOccurrenceAbsentees();
-  }
-}
-
 // ============================================================================
 // Selection Actions
 // ============================================================================
@@ -458,12 +572,20 @@ function toggleStudentSelection(candidate: AbsenteeCandidate) {
 
 function openBulkAssessmentModal() {
   if (selectedCandidates.value.length === 0) return;
+  if (!isAmountConfigured.value) {
+    showToast('Please configure a positive fine amount before assessing.', 'warning');
+    return;
+  }
   haptics.medium();
   isModalOpen.value = true;
 }
 
 async function confirmBulkAssessment() {
   if (selectedCandidates.value.length === 0) return;
+  if (!isAmountConfigured.value) {
+    assessmentError.value = 'Please configure a positive fine amount before proceeding with assessment.';
+    return;
+  }
   if (!canAssessFines.value) {
     assessmentError.value = assessFinesDisabledReason.value || 'Assessing fines requires an active internet connection.';
     return;
@@ -478,11 +600,13 @@ async function confirmBulkAssessment() {
 
   try {
     const studentIds = selectedCandidates.value.map((c) => c.studentId);
+    const resolvedTitle = (currentConfig.value.fineTitle || defaultFineTitle.value).trim();
+
     const result = await financeService.assessBulkFines({
       occurrenceId: selectedOccurrenceId.value,
-      ruleId: selectedRuleId.value || undefined,
-      fineTitle: customFineTitle.value.trim() || (assessmentMode.value === 'PER_CHECKPOINT' ? 'Checkpoint Absence Fine' : 'Event Absence Fine'),
-      amountCentavos: pesoToCentavos(fineAmountPesos.value),
+      ruleId: currentConfig.value.amountSource === 'TEMPLATE' ? (currentConfig.value.ruleId || undefined) : undefined,
+      fineTitle: resolvedTitle,
+      amountCentavos: currentFineAmountCentavos.value,
       dueDate: dueDate.value || null,
       studentIds,
       notes: assessmentNotes.value.trim() || null,
@@ -697,7 +821,135 @@ onIonViewWillEnter(initializeData);
             </UniStatCard>
           </div>
 
-          <!-- 3. Filters & Action Toolbar -->
+          <!-- 3. Explicit Fine Configuration Section -->
+          <UniCard class="fine-config-card" padding="sm">
+            <div class="config-header">
+              <div class="config-header-left">
+                <ion-icon :icon="cashOutline" class="config-icon text-primary" />
+                <div>
+                  <h3 class="config-title">Fine Configuration</h3>
+                  <p class="config-subtitle">
+                    {{ assessmentMode === 'PER_CHECKPOINT' ? `Configuring ${currentCheckpointLabel || 'Checkpoint'} fine` : 'Configuring Whole-Event occurrence fine' }}
+                  </p>
+                </div>
+              </div>
+              <div v-if="assessmentMode === 'PER_CHECKPOINT' && summary.checkpoints && summary.checkpoints.length > 1" class="config-header-actions">
+                <UniButton variant="outline" size="sm" @click="copyCurrentAmountToAllCheckpoints">
+                  Apply Amount to All Checkpoints
+                </UniButton>
+              </div>
+            </div>
+
+            <div class="config-body-grid">
+              <!-- Amount Source Toggle -->
+              <div class="config-col">
+                <label class="field-label">Amount Source</label>
+                <div class="source-segmented-control">
+                  <button
+                    type="button"
+                    class="source-btn"
+                    :class="{ active: currentConfig.amountSource === 'CUSTOM' }"
+                    @click="setAmountSource('CUSTOM')"
+                  >
+                    Custom Amount
+                  </button>
+                  <button
+                    type="button"
+                    class="source-btn"
+                    :class="{ active: currentConfig.amountSource === 'TEMPLATE' }"
+                    @click="setAmountSource('TEMPLATE')"
+                  >
+                    Fine Template
+                  </button>
+                </div>
+              </div>
+
+              <!-- Template Mode -->
+              <div v-if="currentConfig.amountSource === 'TEMPLATE'" class="config-col">
+                <label class="field-label">Fine Template (ABSENCE Rules)</label>
+                <UniSelect
+                  :model-value="currentConfig.ruleId"
+                  :options="ruleOptions"
+                  placeholder="Select Template"
+                  empty-placeholder="No templates available"
+                  @change="handleTemplateSelect"
+                />
+              </div>
+
+              <!-- Custom Mode -->
+              <div v-else class="config-col">
+                <label class="field-label">Amount per Student (PHP)</label>
+                <div class="custom-amount-wrap">
+                  <div class="amount-input-row">
+                    <span class="currency-prefix">₱</span>
+                    <input
+                      v-model.number="currentConfig.customAmountPesos"
+                      type="number"
+                      min="1"
+                      step="1"
+                      placeholder="e.g. 50"
+                      class="clean-input amount-number-input font-mono font-bold"
+                    />
+                  </div>
+                  <div class="quick-preset-chips">
+                    <button
+                      v-for="preset in [25, 50, 100]"
+                      :key="preset"
+                      type="button"
+                      class="preset-chip"
+                      :class="{ active: currentConfig.customAmountPesos === preset }"
+                      @click="setQuickAmount(preset)"
+                    >
+                      ₱{{ preset }}
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Fine Title Input -->
+              <div class="config-col">
+                <label class="field-label">Fine Obligation Title</label>
+                <input
+                  v-model="currentConfig.fineTitle"
+                  type="text"
+                  class="clean-input font-medium"
+                  :placeholder="defaultFineTitle"
+                />
+              </div>
+            </div>
+
+            <!-- Immediate Financial Preview Bar -->
+            <div class="financial-preview-bar">
+              <div class="preview-metric">
+                <span class="metric-label">Scope</span>
+                <span class="metric-value text-primary font-bold">
+                  {{ assessmentMode === 'PER_CHECKPOINT' ? (currentCheckpointLabel || 'Checkpoint') : 'Whole Event' }}
+                </span>
+              </div>
+              <div class="preview-metric">
+                <span class="metric-label">Eligible</span>
+                <span class="metric-value font-mono">{{ eligibleAbsenteesCount }}</span>
+              </div>
+              <div class="preview-metric">
+                <span class="metric-label">Selected</span>
+                <span class="metric-value font-mono text-primary font-bold">{{ selectedCandidates.length }}</span>
+              </div>
+              <div class="preview-metric">
+                <span class="metric-label">Fine / Student</span>
+                <span class="metric-value font-mono font-bold" :class="isAmountConfigured ? 'text-primary' : 'text-muted'">
+                  {{ isAmountConfigured ? formatPeso(currentFineAmountCentavos) : 'Not Configured' }}
+                </span>
+              </div>
+              <div class="preview-metric total-metric">
+                <span class="metric-label">Total Assessment</span>
+                <span class="metric-value font-mono font-bold" :class="isAmountConfigured && selectedCandidates.length > 0 ? 'text-success' : 'text-muted'">
+                  {{ isAmountConfigured ? formatPeso(totalAssessmentCentavos) : '₱0.00' }}
+                </span>
+              </div>
+            </div>
+          </UniCard>
+
+          <!-- 4. Filters & Action Toolbar -->
           <UniCard class="table-toolbar-card" padding="sm">
             <div class="toolbar-top">
               <div class="search-wrap">
@@ -764,7 +1016,7 @@ onIonViewWillEnter(initializeData);
             </div>
           </UniCard>
 
-          <!-- 4. Absentee List (UniTap Reusable Components) -->
+          <!-- 5. Absentee List (UniTap Reusable Components) -->
           <div class="absentee-records-card">
             <UniRecordList
               :empty="filteredCandidates.length === 0"
@@ -778,8 +1030,8 @@ onIonViewWillEnter(initializeData);
                 :subtitle="`${c.schoolId} • Year ${c.yearLevel} - ${c.section}`"
                 :badge="c.alreadyFined ? 'Already Fined' : c.selected ? 'Selected for Fine' : 'Eligible'"
                 :badge-variant="c.alreadyFined ? 'neutral' : c.selected ? 'primary' : 'warning'"
-                :amount="formatPeso(pesoToCentavos(fineAmountPesos))"
-                :amount-variant="c.alreadyFined ? 'default' : 'danger'"
+                :amount="c.alreadyFined ? 'Fined' : (isAmountConfigured ? formatPeso(currentFineAmountCentavos) : 'Not Configured')"
+                :amount-variant="c.alreadyFined ? 'default' : (isAmountConfigured ? 'danger' : 'default')"
               >
                 <template #leading>
                   <div class="row-checkbox-wrap" @click.stop>
@@ -846,66 +1098,79 @@ onIonViewWillEnter(initializeData);
         />
       </div>
 
-      <!-- 5. Floating Bottom Assessment Action Bar -->
+      <!-- 6. Floating Bottom Assessment Action Bar -->
       <div
         v-if="summary && summary.eligibleForFineCount > 0"
         class="floating-action-dock"
       >
         <div class="dock-summary">
           <span class="dock-meta font-mono">{{ selectedCandidates.length }} students</span>
-          <span class="dock-total font-mono font-bold">{{ formatPeso(totalAssessmentCentavos) }}</span>
+          <span class="dock-total font-mono font-bold">{{ isAmountConfigured ? formatPeso(totalAssessmentCentavos) : '₱0.00' }}</span>
         </div>
 
         <UniButton
           variant="primary"
-          :disabled="selectedCandidates.length === 0 || !isSessionClosed || !canAssessFines"
+          :disabled="selectedCandidates.length === 0 || !isSessionClosed || !canAssessFines || !isAmountConfigured"
           @click="openBulkAssessmentModal"
         >
           <ion-icon :icon="cashOutline" slot="start" />
-          Bulk Assign Fines
+          <span>{{ !isAmountConfigured ? 'Configure Amount to Assess' : `Assess Fines (${formatPeso(totalAssessmentCentavos)})` }}</span>
         </UniButton>
       </div>
 
-      <!-- 6. Bulk Assessment Configuration Sheet / Modal -->
+      <!-- 7. Bulk Assessment Read-Only Confirmation Sheet / Modal -->
       <UniSheet
         :is-open="isModalOpen"
         title="Confirm Bulk Fine Assessment"
         @close="isModalOpen = false"
       >
         <div class="sheet-form">
-          <div class="form-group">
-            <label class="form-label">Obligation Fine Rule</label>
-            <UniSelect
-              :model-value="selectedRuleId"
-              :options="ruleOptions"
-              placeholder="Select Fine Rule"
-              empty-placeholder="No fine rules available"
-              @change="handleRuleSelect"
-            />
-          </div>
-
-          <div class="form-group">
-            <label class="form-label">Fine Title</label>
-            <input
-              v-model="customFineTitle"
-              type="text"
-              class="clean-input"
-              placeholder="e.g. CSG General Assembly Absence Fine"
-            />
+          <!-- Read-Only Summary Box -->
+          <div class="preview-box">
+            <div class="preview-row">
+              <span>Event:</span>
+              <strong>{{ summary?.eventTitle }}</strong>
+            </div>
+            <div class="preview-row">
+              <span>Occurrence:</span>
+              <strong>{{ summary?.occurrenceTitle }} ({{ summary?.occursOn }})</strong>
+            </div>
+            <div class="preview-row">
+              <span>Assessment Scope:</span>
+              <strong class="text-primary font-bold">
+                {{ assessmentMode === 'PER_CHECKPOINT' ? `Per-Checkpoint (${currentCheckpointLabel || 'Checkpoint'})` : 'Whole-Event Fine' }}
+              </strong>
+            </div>
+            <div class="preview-row">
+              <span>Fine Title:</span>
+              <strong>{{ currentConfig.fineTitle || defaultFineTitle }}</strong>
+            </div>
+            <div class="preview-row">
+              <span>Amount Source:</span>
+              <span>{{ currentConfig.amountSource === 'TEMPLATE' ? 'Fine Template' : 'Custom Amount' }}</span>
+            </div>
+            <div class="preview-divider"></div>
+            <div class="preview-row">
+              <span>Eligible Absentees:</span>
+              <strong class="font-mono">{{ eligibleAbsenteesCount }}</strong>
+            </div>
+            <div class="preview-row">
+              <span>Selected Students:</span>
+              <strong class="font-mono text-primary font-bold">{{ selectedCandidates.length }}</strong>
+            </div>
+            <div class="preview-row">
+              <span>Fine per Student:</span>
+              <strong class="font-mono font-bold">{{ formatPeso(currentFineAmountCentavos) }}</strong>
+            </div>
+            <div class="preview-divider"></div>
+            <div class="preview-row total-row">
+              <span>Total Bulk Assessment:</span>
+              <strong class="text-primary font-mono font-bold">{{ formatPeso(totalAssessmentCentavos) }}</strong>
+            </div>
           </div>
 
           <div class="form-row">
-            <div class="form-group">
-              <label class="form-label">Amount per Student (PHP)</label>
-              <input
-                v-model.number="fineAmountPesos"
-                type="number"
-                min="1"
-                step="5"
-                class="clean-input font-mono"
-              />
-            </div>
-            <div class="form-group">
+            <div class="form-group" style="flex: 1;">
               <label class="form-label">Due Date (Optional)</label>
               <input
                 v-model="dueDate"
@@ -925,31 +1190,6 @@ onIonViewWillEnter(initializeData);
             ></textarea>
           </div>
 
-          <!-- Preview Summary Box -->
-          <div class="preview-box">
-            <div class="preview-row">
-              <span>Event:</span>
-              <strong>{{ summary?.eventTitle }}</strong>
-            </div>
-            <div class="preview-row">
-              <span>Assessment Scope:</span>
-              <strong class="text-primary">{{ assessmentMode === 'PER_CHECKPOINT' ? 'Per-Checkpoint Fine' : 'Whole-Event Fine' }}</strong>
-            </div>
-            <div class="preview-row">
-              <span>Selected Students:</span>
-              <strong class="font-mono">{{ selectedCandidates.length }}</strong>
-            </div>
-            <div class="preview-row">
-              <span>Fine per Student:</span>
-              <strong class="font-mono">{{ formatPeso(pesoToCentavos(fineAmountPesos)) }}</strong>
-            </div>
-            <div class="preview-divider"></div>
-            <div class="preview-row total-row">
-              <span>Total Bulk Assessment:</span>
-              <strong class="text-primary font-mono font-bold">{{ formatPeso(totalAssessmentCentavos) }}</strong>
-            </div>
-          </div>
-
           <div v-if="!canAssessFines" class="offline-warning-box">
             <ion-icon :icon="alertCircleOutline" class="warn-icon" />
             <div class="warn-text">
@@ -967,11 +1207,11 @@ onIonViewWillEnter(initializeData);
             </UniButton>
             <UniButton
               variant="primary"
-              :disabled="isAssessing || selectedCandidates.length === 0 || !canAssessFines"
+              :disabled="isAssessing || selectedCandidates.length === 0 || !canAssessFines || !isAmountConfigured"
               @click="confirmBulkAssessment"
             >
               <ion-spinner v-if="isAssessing" name="crescent" slot="start" />
-              <span>Confirm & Assess Fines</span>
+              <span>Confirm & Assess {{ selectedCandidates.length }} Fines</span>
             </UniButton>
           </div>
         </div>
@@ -993,6 +1233,173 @@ onIonViewWillEnter(initializeData);
 .selectors-card {
   border: 1px solid var(--uni-border);
   box-shadow: var(--uni-shadow-card);
+}
+
+.fine-config-card {
+  border: 1px solid var(--uni-border);
+  box-shadow: var(--uni-shadow-card);
+  margin-bottom: 4px;
+}
+
+.config-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.config-header-left {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.config-icon {
+  font-size: 24px;
+}
+
+.config-title {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 800;
+  color: var(--uni-text);
+}
+
+.config-subtitle {
+  margin: 2px 0 0 0;
+  font-size: 11.5px;
+  color: var(--uni-text-secondary);
+}
+
+.config-body-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+@media (min-width: 640px) {
+  .config-body-grid {
+    grid-template-columns: repeat(3, 1fr);
+  }
+}
+
+.config-col {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.source-segmented-control {
+  display: flex;
+  background: var(--uni-surface-subtle, rgba(0, 0, 0, 0.04));
+  border-radius: var(--uni-radius-input, 10px);
+  padding: 3px;
+  gap: 4px;
+  border: 1px solid var(--uni-border);
+}
+
+.source-btn {
+  flex: 1;
+  padding: 8px 10px;
+  font-size: 12px;
+  font-weight: 700;
+  border: none;
+  background: transparent;
+  color: var(--uni-text-secondary);
+  border-radius: 8px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.source-btn.active {
+  background: var(--uni-surface, #ffffff);
+  color: var(--uni-primary);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+}
+
+.custom-amount-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.amount-input-row {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.currency-prefix {
+  position: absolute;
+  left: 12px;
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--uni-text-secondary);
+  pointer-events: none;
+}
+
+.amount-number-input {
+  padding-left: 28px !important;
+}
+
+.quick-preset-chips {
+  display: flex;
+  gap: 6px;
+}
+
+.preset-chip {
+  padding: 4px 10px;
+  font-size: 11.5px;
+  font-weight: 700;
+  border-radius: 6px;
+  border: 1px solid var(--uni-border);
+  background: var(--uni-surface);
+  color: var(--uni-text);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.preset-chip.active {
+  border-color: var(--uni-primary);
+  background: rgba(15, 118, 110, 0.1);
+  color: var(--uni-primary);
+}
+
+.financial-preview-bar {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 10px;
+  padding: 10px 14px;
+  background: var(--uni-surface-subtle, rgba(0, 0, 0, 0.02));
+  border: 1px dashed var(--uni-border);
+  border-radius: var(--uni-radius-input, 10px);
+}
+
+@media (min-width: 640px) {
+  .financial-preview-bar {
+    grid-template-columns: repeat(5, 1fr);
+  }
+}
+
+.preview-metric {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.metric-label {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  color: var(--uni-text-secondary);
+  letter-spacing: 0.05em;
+}
+
+.metric-value {
+  font-size: 13.5px;
 }
 
 .selectors-grid {

@@ -21,6 +21,7 @@ import {
   alertCircleOutline,
   printOutline,
   downloadOutline,
+  refreshOutline,
 } from 'ionicons/icons';
 
 import { financeService } from '@/services/finance.service';
@@ -53,6 +54,9 @@ import {
   UniSelect,
   UniPagination,
   UniSegmentedControl,
+  UniSkeleton,
+  UniAnimatedCounter,
+  UniUpdatingBadge,
 } from '@/components/ui';
 
 import { haptics } from '@/utilities/haptics';
@@ -141,6 +145,12 @@ const fines = ref<StudentObligationItem[]>([]);
 const contributions = ref<StudentObligationItem[]>([]);
 const payments = ref<PaymentItem[]>([]);
 const isLoading = ref(true);
+const isInitialLoading = ref(true);
+const isRefreshing = ref(false);
+const isFinanceStale = ref(false);
+const financeError = ref<string | null>(null);
+const hasFinanceLoadedOnce = ref(false);
+let financeRequestId = 0;
 
 // Receipt modal state
 const selectedPayment = ref<PaymentItem | null>(null);
@@ -243,32 +253,65 @@ watch([filterStatus, searchQuery, selectedSemesterId], () => {
 async function loadFinanceData() {
   if (isStudent.value) {
     isLoading.value = false;
+    isInitialLoading.value = false;
     return;
   }
+  const thisRequestId = ++financeRequestId;
+  if (!hasFinanceLoadedOnce.value) {
+    isInitialLoading.value = true;
+  } else {
+    isRefreshing.value = true;
+  }
   isLoading.value = true;
+  financeError.value = null;
+
   try {
     const activeSem = await AcademicRepository.getActiveSemester();
-    semesters.value = await AcademicRepository.getSemesters();
+    const loadedSemesters = await AcademicRepository.getSemesters();
+
+    if (thisRequestId !== financeRequestId) return;
+    semesters.value = loadedSemesters;
 
     if (activeSem && !selectedSemesterId.value) {
       selectedSemesterId.value = activeSem.id;
-    } else if (semesters.value.length > 0 && !selectedSemesterId.value) {
-      selectedSemesterId.value = semesters.value[0].id;
+    } else if (loadedSemesters.length > 0 && !selectedSemesterId.value) {
+      selectedSemesterId.value = loadedSemesters[0].id;
     }
 
     if (selectedSemesterId.value) {
-      summary.value = await financeService.getFinanceSummary(selectedSemesterId.value);
-      fines.value = await financeService.getObligationsBySemester(selectedSemesterId.value, 'FINE');
-      contributions.value = await financeService.getObligationsBySemester(
-        selectedSemesterId.value,
-        'CONTRIBUTION'
-      );
-      payments.value = await financeService.getAllPayments(selectedSemesterId.value);
+      const semId = selectedSemesterId.value;
+      const [freshSummary, freshFines, freshContribs, freshPayments] = await Promise.all([
+        financeService.getFinanceSummary(semId),
+        financeService.getObligationsBySemester(semId, 'FINE'),
+        financeService.getObligationsBySemester(semId, 'CONTRIBUTION'),
+        financeService.getAllPayments(semId),
+      ]);
+
+      if (thisRequestId !== financeRequestId) return;
+      summary.value = freshSummary;
+      fines.value = freshFines;
+      contributions.value = freshContribs;
+      payments.value = freshPayments;
+      isFinanceStale.value = false;
+      financeError.value = null;
     }
-  } catch (err) {
+  } catch (err: unknown) {
     console.error('Error loading finance data:', err);
+    if (thisRequestId === financeRequestId) {
+      if (hasFinanceLoadedOnce.value) {
+        // Rule: Preserve existing data if present, flag as stale
+        isFinanceStale.value = true;
+      } else {
+        financeError.value = err instanceof Error ? err.message : String(err);
+      }
+    }
   } finally {
-    isLoading.value = false;
+    if (thisRequestId === financeRequestId) {
+      hasFinanceLoadedOnce.value = true;
+      isInitialLoading.value = false;
+      isRefreshing.value = false;
+      isLoading.value = false;
+    }
   }
 }
 
@@ -380,7 +423,11 @@ onIonViewWillEnter(loadFinanceData);
         title="Finance"
         subtitle="Fines, contributions & payment records"
         variant="root"
-      />
+      >
+        <template #trailing>
+          <UniUpdatingBadge v-if="isRefreshing" style="margin-right: 6px;" />
+        </template>
+      </UniPageHeader>
 
     <ion-content class="safe-content">
       <div class="page-container">
@@ -460,14 +507,26 @@ onIonViewWillEnter(loadFinanceData);
                 <span class="hero-sublabel">Total Outstanding Balance</span>
               </div>
               <span class="hero-wallets-tag font-mono">
-                {{ summary.unpaidFinesCount + summary.unpaidContributionsCount }} Unpaid
+                <UniSkeleton v-if="isInitialLoading && !hasFinanceLoadedOnce" width="55px" height="16px" border-radius="4px" />
+                <template v-else>{{ summary.unpaidFinesCount + summary.unpaidContributionsCount }} Unpaid</template>
               </span>
             </div>
 
             <div class="hero-balance-row">
-              <span class="hero-balance-figure tabular-nums font-mono">
-                {{ formatPeso(summary.totalOutstandingCentavos) }}
-              </span>
+              <UniSkeleton
+                v-if="isInitialLoading && !hasFinanceLoadedOnce"
+                width="180px"
+                height="36px"
+                border-radius="8px"
+              />
+              <UniAnimatedCounter
+                v-else
+                :value="summary.totalOutstandingCentavos"
+                format="currency"
+                :is-centavos="true"
+                :stale="isFinanceStale"
+                class="hero-balance-figure tabular-nums font-mono"
+              />
             </div>
 
             <div class="hero-bottom-row">
@@ -480,7 +539,13 @@ onIonViewWillEnter(loadFinanceData);
           <div class="summary-cards-grid">
             <UniStatCard
               label="Total Assessed"
-              :value="formatPeso(summary.totalAssessedCentavos)"
+              :value="summary.totalAssessedCentavos"
+              format="currency"
+              :is-centavos="true"
+              :animated="true"
+              :loading="isInitialLoading && !hasFinanceLoadedOnce"
+              :updating="isRefreshing"
+              :stale="isFinanceStale"
               meta="All issued fees"
               :interactive="false"
             >
@@ -491,8 +556,14 @@ onIonViewWillEnter(loadFinanceData);
 
             <UniStatCard
               label="Total Collected"
-              :value="formatPeso(summary.totalPaymentsCollectedCentavos)"
+              :value="summary.totalPaymentsCollectedCentavos"
+              format="currency"
+              :is-centavos="true"
+              :animated="true"
               value-color="success"
+              :loading="isInitialLoading && !hasFinanceLoadedOnce"
+              :updating="isRefreshing"
+              :stale="isFinanceStale"
               meta="Verified collections"
               :interactive="false"
             >
@@ -516,7 +587,10 @@ onIonViewWillEnter(loadFinanceData);
               <div class="nav-card-body">
                 <div class="nav-card-title-row">
                   <h4 class="nav-card-title">Contributions</h4>
-                  <span class="nav-card-badge font-mono">{{ summary.activeContributionsCount }} active</span>
+                  <span class="nav-card-badge font-mono">
+                    <UniSkeleton v-if="isInitialLoading && !hasFinanceLoadedOnce" width="50px" height="13px" border-radius="4px" />
+                    <template v-else>{{ summary.activeContributionsCount }} active</template>
+                  </span>
                 </div>
                 <p class="nav-card-subtitle">Templates, dues & student assessments</p>
               </div>
@@ -534,7 +608,10 @@ onIonViewWillEnter(loadFinanceData);
               <div class="nav-card-body">
                 <div class="nav-card-title-row">
                   <h4 class="nav-card-title">Fines Management</h4>
-                  <span class="nav-card-badge font-mono">{{ summary.activeFinesCount }} active</span>
+                  <span class="nav-card-badge font-mono">
+                    <UniSkeleton v-if="isInitialLoading && !hasFinanceLoadedOnce" width="50px" height="13px" border-radius="4px" />
+                    <template v-else>{{ summary.activeFinesCount }} active</template>
+                  </span>
                 </div>
                 <p class="nav-card-subtitle">Absence penalties & student fines</p>
               </div>

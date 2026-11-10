@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from 'vue';
+import { computed, onMounted } from 'vue';
 import { useRouter } from 'vue-router';
 import { IonIcon } from '@ionic/vue';
 import {
@@ -14,7 +14,15 @@ import { useToast } from '@/composables/useToast';
 
 const router = useRouter();
 const { showToast } = useToast();
-const { availablePortals, activeWorkspace, switchWorkspace } = useAuth();
+const { availablePortals, activeWorkspace, switchWorkspace, refreshRoles } = useAuth();
+
+onMounted(() => {
+  if (refreshRoles) {
+    refreshRoles().catch((err) => {
+      console.warn('[WorkspaceSwitcher] Non-fatal background role refresh warning:', err);
+    });
+  }
+});
 
 const canSwitch = computed(() => availablePortals.value.length > 1);
 const currentWorkspace = computed(() => activeWorkspace.value);

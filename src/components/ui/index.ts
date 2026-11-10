@@ -25,5 +25,8 @@ export { default as UniSheetNavigator } from './UniSheetNavigator.vue';
 export { default as UniKpiCarousel } from './UniKpiCarousel.vue';
 export { default as UniWelcomeSetup, type SetupStage } from './UniWelcomeSetup.vue';
 export { default as UniDataUpdateScreen, type UpdateStage } from './UniDataUpdateScreen.vue';
+export { default as UniSkeleton } from './UniSkeleton.vue';
+export { default as UniAnimatedCounter } from './UniAnimatedCounter.vue';
+export { default as UniUpdatingBadge } from './UniUpdatingBadge.vue';
 
 

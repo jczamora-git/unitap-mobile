@@ -43,7 +43,11 @@ const payments = ref<PaymentRecord[]>([]);
 const portalEvents = ref<StudentPortalEventItem[]>([]);
 const recentActivity = ref<StudentPortalActivity[]>([]);
 const isLoading = ref(false);
+const isInitialLoading = ref(true);
+const isRefreshing = ref(false);
+const isStale = ref(false);
 const error = ref<string | null>(null);
+let portalRequestId = 0;
 
 export function useCurrentStudentPortal() {
   const isStudent = computed(() => {
@@ -195,30 +199,43 @@ export function useCurrentStudentPortal() {
   }
 
   async function loadPortalData() {
+    const thisRequestId = ++portalRequestId;
+    if (currentStudent.value) {
+      isRefreshing.value = true;
+    } else {
+      isInitialLoading.value = true;
+    }
     isLoading.value = true;
     error.value = null;
 
     try {
       const student = await resolveCurrentStudent();
+      if (thisRequestId !== portalRequestId) return;
       if (!student) {
         isLoading.value = false;
+        isInitialLoading.value = false;
+        isRefreshing.value = false;
         return;
       }
 
       // 1. Obligations & Dues
       const obs = await FinanceRepository.getStudentObligations(student.id);
+      if (thisRequestId !== portalRequestId) return;
       obligations.value = obs;
 
       // 2. Payments
       const pays = await FinanceRepository.getPaymentsByStudent(student.id);
+      if (thisRequestId !== portalRequestId) return;
       payments.value = pays;
 
       // 3. Events & Occurrences
       const allEvents = await eventService.getEvents();
       const allOccurrences = await eventService.getOccurrences();
+      if (thisRequestId !== portalRequestId) return;
 
       // 4. Attendance Records
       const attHistory = await AttendanceRepository.getStudentAttendanceHistory(student.id);
+      if (thisRequestId !== portalRequestId) return;
       const attMap = new Map<string, typeof attHistory[0]>();
       for (const rec of attHistory) {
         attMap.set(rec.occurrence_id, rec);
@@ -311,11 +328,23 @@ export function useCurrentStudentPortal() {
       // Sort activity descending by date
       activity.sort((a, b) => b.date.localeCompare(a.date));
       recentActivity.value = activity.slice(0, 8);
+      isStale.value = false;
+      error.value = null;
     } catch (err: unknown) {
       console.error('[useCurrentStudentPortal] Error loading data:', err);
-      error.value = err instanceof Error ? err.message : String(err);
+      if (thisRequestId === portalRequestId) {
+        if (currentStudent.value) {
+          isStale.value = true;
+        } else {
+          error.value = err instanceof Error ? err.message : String(err);
+        }
+      }
     } finally {
-      isLoading.value = false;
+      if (thisRequestId === portalRequestId) {
+        isInitialLoading.value = false;
+        isRefreshing.value = false;
+        isLoading.value = false;
+      }
     }
   }
 
@@ -329,6 +358,9 @@ export function useCurrentStudentPortal() {
     portalEvents,
     recentActivity,
     isLoading,
+    isInitialLoading,
+    isRefreshing,
+    isStale,
     error,
     totalAssessedCentavos,
     totalPaidCentavos,

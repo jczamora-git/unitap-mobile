@@ -150,6 +150,37 @@ export class SupabaseAuthService {
     return authService.hasRole(role);
   }
 
+  /**
+   * Reactively refreshes all user roles and officer appointments from Supabase.
+   * On failure/offline, safely retains previous valid roles and workspace without data loss.
+   */
+  public static async refreshSessionRoles(): Promise<void> {
+    let userId = this.currentUser.value?.id;
+    let email = this.currentUser.value?.username
+      ? (this.currentUser.value.username.includes('@') ? this.currentUser.value.username : `${this.currentUser.value.username}@unitap.com`)
+      : '';
+
+    if (!userId) {
+      if (DataModeService.isDirectSupabase()) {
+        try {
+          const { data: { session } } = await supabase.auth.getSession();
+          if (session?.user) {
+            userId = session.user.id;
+            email = session.user.email || '';
+          }
+        } catch {}
+      }
+    }
+
+    if (!userId) return;
+
+    try {
+      await this.handleOnlineSession(userId, email);
+    } catch (err) {
+      console.warn('[SupabaseAuth] Role refresh failed, preserving existing valid state:', err);
+    }
+  }
+
   public static setupAuthStateListener(): void {
     if (this.authListenerInitialized) return;
     this.authListenerInitialized = true;
@@ -660,12 +691,13 @@ export class SupabaseAuthService {
     const verifiedActiveRoles: ('DEVADMIN' | 'OFFICER' | 'STUDENT')[] = [];
     if (hasDevAdmin) {
       verifiedActiveRoles.push('DEVADMIN');
-    }
-    if (hasOfficerRole && hasValidOfficer) {
-      verifiedActiveRoles.push('OFFICER');
-    }
-    if (hasStudentRole) {
-      verifiedActiveRoles.push('STUDENT');
+    } else {
+      if (hasOfficerRole && hasValidOfficer) {
+        verifiedActiveRoles.push('OFFICER');
+      }
+      if (hasStudentRole) {
+        verifiedActiveRoles.push('STUDENT');
+      }
     }
 
     // Fallback if no roles found
@@ -681,9 +713,7 @@ export class SupabaseAuthService {
     if (verifiedActiveRoles.includes('OFFICER')) {
       availablePortals.push('OFFICER');
     }
-    if (verifiedActiveRoles.includes('STUDENT') && Boolean(remoteStudentId)) {
-      availablePortals.push('STUDENT');
-    } else if (verifiedActiveRoles.includes('STUDENT') && !hasDevAdmin && !hasValidOfficer) {
+    if (verifiedActiveRoles.includes('STUDENT')) {
       availablePortals.push('STUDENT');
     }
 
@@ -698,10 +728,13 @@ export class SupabaseAuthService {
     } catch {}
 
     if (!activeWorkspace) {
-      if (availablePortals.includes('STUDENT') && !hasDevAdmin) {
+      // Default to Student Portal if available and no saved workspace preference exists
+      if (availablePortals.includes('STUDENT')) {
         activeWorkspace = 'STUDENT';
-      } else if (hasDevAdmin) {
+      } else if (availablePortals.includes('DEVADMIN')) {
         activeWorkspace = 'DEVADMIN';
+      } else if (availablePortals.includes('OFFICER')) {
+        activeWorkspace = 'OFFICER';
       } else {
         activeWorkspace = availablePortals[0] || 'STUDENT';
       }
@@ -747,6 +780,25 @@ export class SupabaseAuthService {
 
     let user = await AuthRepository.getUserById(userId);
 
+    // Ensure student record exists in SQLite before referencing it to prevent foreign key violation
+    if (remoteStudentId) {
+      const existingStudent = await StudentsRepository.getStudentById(remoteStudentId);
+      if (!existingStudent) {
+        try {
+          const { data: remoteStu } = await supabase
+            .from('students')
+            .select('*')
+            .eq('id', remoteStudentId)
+            .maybeSingle();
+          if (remoteStu) {
+            await StudentsRepository.createStudent(remoteStu as StudentRecord);
+          }
+        } catch (stuErr) {
+          console.warn('[SupabaseAuth] Could not pre-hydrate student for FK constraint:', stuErr);
+        }
+      }
+    }
+
     // If not found in SQLite yet, provision local stub
     if (!user) {
       const baseUsername = remoteUsername || email.split('@')[0];
@@ -755,10 +807,11 @@ export class SupabaseAuthService {
         ? `${baseUsername}_${userId.substring(0, 6)}`
         : baseUsername;
 
+      const studentInDb = remoteStudentId ? await StudentsRepository.getStudentById(remoteStudentId) : null;
       user = {
         id: userId,
         username: safeUsername,
-        student_id: remoteStudentId || undefined,
+        student_id: studentInDb ? remoteStudentId : undefined,
         account_status: 'ACTIVE',
         created_at: now,
         updated_at: now,
@@ -882,18 +935,21 @@ export class SupabaseAuthService {
     }
 
     const verifiedActiveRoles: ('DEVADMIN' | 'OFFICER' | 'STUDENT')[] = [];
-    if (dbRoles.includes('DEVADMIN')) verifiedActiveRoles.push('DEVADMIN');
-    if (dbRoles.includes('OFFICER') && hasValidOfficer) verifiedActiveRoles.push('OFFICER');
-    if (dbRoles.includes('STUDENT') || Boolean(cached.studentId)) verifiedActiveRoles.push('STUDENT');
+    if (dbRoles.includes('DEVADMIN')) {
+      verifiedActiveRoles.push('DEVADMIN');
+    } else {
+      if (dbRoles.includes('OFFICER') && hasValidOfficer) verifiedActiveRoles.push('OFFICER');
+      if (dbRoles.includes('STUDENT') || Boolean(cached.studentId)) verifiedActiveRoles.push('STUDENT');
+    }
     if (verifiedActiveRoles.length === 0) verifiedActiveRoles.push(cached.role);
 
     const availablePortals: ('DEVADMIN' | 'OFFICER' | 'STUDENT')[] = [];
     if (verifiedActiveRoles.includes('DEVADMIN')) availablePortals.push('DEVADMIN');
     if (verifiedActiveRoles.includes('OFFICER')) availablePortals.push('OFFICER');
-    if (verifiedActiveRoles.includes('STUDENT') && Boolean(cached.studentId)) availablePortals.push('STUDENT');
+    if (verifiedActiveRoles.includes('STUDENT')) availablePortals.push('STUDENT');
     if (availablePortals.length === 0) availablePortals.push(cached.role);
 
-    let activeWorkspace: 'DEVADMIN' | 'OFFICER' | 'STUDENT' = cached.role;
+    let activeWorkspace: 'DEVADMIN' | 'OFFICER' | 'STUDENT' | null = null;
     try {
       const { Preferences } = await import('@capacitor/preferences');
       const { value: saved } = await Preferences.get({ key: 'unitap_active_workspace' });
@@ -902,6 +958,18 @@ export class SupabaseAuthService {
       }
     } catch {
       // Ignored
+    }
+
+    if (!activeWorkspace) {
+      if (availablePortals.includes('STUDENT')) {
+        activeWorkspace = 'STUDENT';
+      } else if (availablePortals.includes('DEVADMIN')) {
+        activeWorkspace = 'DEVADMIN';
+      } else if (availablePortals.includes('OFFICER')) {
+        activeWorkspace = 'OFFICER';
+      } else {
+        activeWorkspace = availablePortals[0] || cached.role;
+      }
     }
 
     this.currentUser.value = user;

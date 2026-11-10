@@ -5,7 +5,8 @@ import {
   IonPage,
   IonContent,
   IonIcon,
-  IonSpinner
+  IonSpinner,
+  onIonViewWillEnter
 } from '@ionic/vue';
 import {
   hardwareChipOutline,
@@ -517,7 +518,8 @@ const {
   activeWorkspace,
   canSwitchPortal,
   student: currentStudent,
-  switchWorkspace
+  switchWorkspace,
+  refreshRoles
 } = useAuth();
 
 const userDisplayName = computed(() => {
@@ -594,6 +596,9 @@ async function checkStatus() {
   try {
     await authService.initSession();
     await SupabaseAuthService.initialize();
+    if (refreshRoles) {
+      await refreshRoles();
+    }
   } catch (err) {
     console.warn('Auth session check in settings:', err);
   }
@@ -606,6 +611,7 @@ async function checkStatus() {
 }
 
 onMounted(checkStatus);
+onIonViewWillEnter(checkStatus);
 
 async function handleConfirmSignOut() {
   showSignOutAlert.value = false;

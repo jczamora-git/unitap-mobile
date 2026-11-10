@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue';
+import { ref, computed, onMounted, watch } from 'vue';
 import { useRouter } from 'vue-router';
 import {
   IonPage,
@@ -35,19 +35,14 @@ import { formatAttendanceStatus } from '@/utilities/presentation-formatters';
 import type { Event, EventOccurrence } from '@/types/event';
 import type { AttendanceStats, AttendanceScanLog } from '@/types/attendance';
 import { haptics } from '@/utilities/haptics';
-import { UniPageHeader, UniStatCard, UniButton } from '@/components/ui';
+import { UniPageHeader, UniStatCard, UniButton, UniSkeleton, UniUpdatingBadge } from '@/components/ui';
 import UniGlobalSyncPill from '@/components/shared/UniGlobalSyncPill.vue';
 import { logDataSource } from '@/utilities/data-source-logger';
 import { DataModeService } from '@/services/data-mode.service';
 import { SelectiveSyncService } from '@/services/sync/selective-sync.service';
 
 const router = useRouter();
-const { canSwitchPortal } = useAuth();
-
-const isStudent = computed(() => {
-  const role = authService.role.value || SupabaseAuthService.role.value;
-  return role === 'STUDENT';
-});
+const { canSwitchPortal, isStudent, refreshRoles } = useAuth();
 
 function navigateWithHaptic(path: string) {
   haptics.light();
@@ -63,23 +58,38 @@ function navigateToAttendance() {
   }
 }
 
-const totalStudents = ref(0);
+const totalStudents = ref<number | null>(null);
 const studentsError = ref(false);
-const activeEventsCount = ref(0);
-const totalCheckIns = ref(0);
-const totalOutstandingCentavos = ref(0);
+const studentsStale = ref(false);
+const activeEventsCount = ref<number | null>(null);
+const eventsStale = ref(false);
+const totalCheckIns = ref<number | null>(null);
+const checkInsStale = ref(false);
+const totalOutstandingCentavos = ref<number | null>(null);
+const financeStale = ref(false);
 
 const activeEvent = ref<Event | null>(null);
 const activeOccurrence = ref<EventOccurrence | null>(null);
 const occurrenceStats = ref<AttendanceStats | null>(null);
 
 const recentActivity = ref<AttendanceScanLog[]>([]);
+const isInitialLoading = ref(true);
+const isRefreshing = ref(false);
 const isLoading = ref(true);
+const hasLoadedOnce = ref(false);
+let dashboardRequestId = 0;
 
 async function loadDashboardData() {
   if (isStudent.value) {
     isLoading.value = false;
+    isInitialLoading.value = false;
     return;
+  }
+  const thisRequestId = ++dashboardRequestId;
+  if (!hasLoadedOnce.value) {
+    isInitialLoading.value = true;
+  } else {
+    isRefreshing.value = true;
   }
   isLoading.value = true;
   const isDirect = DataModeService.isDirectSupabase();
@@ -87,50 +97,62 @@ async function loadDashboardData() {
 
   // 1. Students KPI
   try {
-    studentsError.value = false;
     const students = await studentService.getStudents();
-    totalStudents.value = students.length;
-    logDataSource({
-      page: 'HomePage',
-      source,
-      operation: 'KPI: totalStudents',
-      result: students.length,
-    });
+    if (thisRequestId === dashboardRequestId) {
+      totalStudents.value = students.length;
+      studentsError.value = false;
+      studentsStale.value = false;
+      logDataSource({
+        page: 'HomePage',
+        source,
+        operation: 'KPI: totalStudents',
+        result: students.length,
+      });
+    }
   } catch (stuErr) {
     console.error('Error loading students KPI:', stuErr);
-    studentsError.value = true;
+    if (thisRequestId === dashboardRequestId) {
+      if (totalStudents.value !== null) {
+        studentsStale.value = true;
+      } else {
+        studentsError.value = true;
+      }
+    }
   }
 
   // 2. Events & Active Occurrence KPI
   try {
     const events = await eventService.getEvents();
-    activeEventsCount.value = events.filter((e) => e.status === 'ACTIVE').length;
-
     const occurrences = await eventService.getOccurrences();
-    const openOcc = occurrences.find((o) => o.status === 'OPEN') || occurrences[0] || null;
-    activeOccurrence.value = openOcc;
+    if (thisRequestId === dashboardRequestId) {
+      activeEventsCount.value = events.filter((e) => e.status === 'ACTIVE').length;
+      eventsStale.value = false;
 
-    if (openOcc) {
-      activeEvent.value = events.find((e) => e.id === openOcc.eventId) || null;
-      occurrenceStats.value = await attendanceService.getStats(openOcc.id);
-      recentActivity.value = (await attendanceService.getScanLogs(openOcc.id)).slice(0, 5);
-    } else {
-      activeEvent.value = null;
-      occurrenceStats.value = null;
-      recentActivity.value = (await attendanceService.getScanLogs()).slice(0, 5);
+      const openOcc = occurrences.find((o) => o.status === 'OPEN') || occurrences[0] || null;
+      activeOccurrence.value = openOcc;
+
+      if (openOcc) {
+        activeEvent.value = events.find((e) => e.id === openOcc.eventId) || null;
+        occurrenceStats.value = await attendanceService.getStats(openOcc.id);
+        recentActivity.value = (await attendanceService.getScanLogs(openOcc.id)).slice(0, 5);
+      } else {
+        activeEvent.value = null;
+        occurrenceStats.value = null;
+        recentActivity.value = (await attendanceService.getScanLogs()).slice(0, 5);
+      }
+      logDataSource({
+        page: 'HomePage',
+        source,
+        operation: 'KPI: events & occurrences',
+        result: events.length,
+      });
     }
-    logDataSource({
-      page: 'HomePage',
-      source,
-      operation: 'KPI: events & occurrences',
-      result: events.length,
-    });
 
     // In offline-first mode, trigger background selective sync for events when online
     if (!isDirect && typeof navigator !== 'undefined' && navigator.onLine) {
       SelectiveSyncService.refreshEvents()
         .then(async (res) => {
-          if (res.refreshed && res.recordsPulled > 0) {
+          if (res.refreshed && res.recordsPulled > 0 && thisRequestId === dashboardRequestId) {
             const freshEvents = await eventService.getEvents();
             activeEventsCount.value = freshEvents.filter((e) => e.status === 'ACTIVE').length;
             const freshOccs = await eventService.getOccurrences();
@@ -149,43 +171,83 @@ async function loadDashboardData() {
     }
   } catch (evtErr) {
     console.error('Error loading events KPI:', evtErr);
+    if (thisRequestId === dashboardRequestId && activeEventsCount.value !== null) {
+      eventsStale.value = true;
+    }
   }
 
   // 3. Finance KPI
   try {
     const finSummary = await financeService.getFinanceSummary();
-    totalOutstandingCentavos.value = finSummary.totalOutstandingCentavos;
-    logDataSource({
-      page: 'HomePage',
-      source,
-      operation: 'KPI: financeSummary',
-      result: finSummary.totalOutstandingCentavos,
-    });
+    if (thisRequestId === dashboardRequestId) {
+      totalOutstandingCentavos.value = finSummary.totalOutstandingCentavos;
+      financeStale.value = false;
+      logDataSource({
+        page: 'HomePage',
+        source,
+        operation: 'KPI: financeSummary',
+        result: finSummary.totalOutstandingCentavos,
+      });
+    }
   } catch (finErr) {
     console.error('Error loading finance KPI:', finErr);
+    if (thisRequestId === dashboardRequestId && totalOutstandingCentavos.value !== null) {
+      financeStale.value = true;
+    }
   }
 
   // 4. Checkins KPI
   try {
     const allParticipants = await eventService.getParticipants();
-    totalCheckIns.value = allParticipants.filter(
-      (p) => p.attendanceStatus === 'PRESENT' || p.attendanceStatus === 'LATE'
-    ).length;
-    logDataSource({
-      page: 'HomePage',
-      source,
-      operation: 'KPI: checkIns',
-      result: totalCheckIns.value,
-    });
+    if (thisRequestId === dashboardRequestId) {
+      totalCheckIns.value = allParticipants.filter(
+        (p) => p.attendanceStatus === 'PRESENT' || p.attendanceStatus === 'LATE'
+      ).length;
+      checkInsStale.value = false;
+      logDataSource({
+        page: 'HomePage',
+        source,
+        operation: 'KPI: checkIns',
+        result: totalCheckIns.value,
+      });
+    }
   } catch (checkErr) {
     console.error('Error loading checkins KPI:', checkErr);
+    if (thisRequestId === dashboardRequestId && totalCheckIns.value !== null) {
+      checkInsStale.value = true;
+    }
   } finally {
-    isLoading.value = false;
+    if (thisRequestId === dashboardRequestId) {
+      hasLoadedOnce.value = true;
+      isInitialLoading.value = false;
+      isRefreshing.value = false;
+      isLoading.value = false;
+    }
   }
 }
 
-onMounted(loadDashboardData);
-onIonViewWillEnter(loadDashboardData);
+watch(
+  () => isStudent.value,
+  (student) => {
+    if (!student) {
+      loadDashboardData();
+    }
+  }
+);
+
+onMounted(() => {
+  if (refreshRoles) {
+    refreshRoles().catch(() => {});
+  }
+  loadDashboardData();
+});
+
+onIonViewWillEnter(() => {
+  if (refreshRoles) {
+    refreshRoles().catch(() => {});
+  }
+  loadDashboardData();
+});
 </script>
 
 <template>
@@ -201,6 +263,7 @@ onIonViewWillEnter(loadDashboardData);
         variant="root"
       >
       <template #trailing>
+        <UniUpdatingBadge v-if="isRefreshing" style="margin-right: 6px;" />
         <UniGlobalSyncPill style="margin-right: 6px;" />
         <button 
           class="uni-header-action-btn" 
@@ -221,11 +284,15 @@ onIonViewWillEnter(loadDashboardData);
         <section class="metrics-grid">
           <UniStatCard
             label="Students"
-            :value="studentsError ? 'Unavailable' : totalStudents"
+            :value="studentsError && totalStudents === null ? 'Unavailable' : totalStudents"
             :meta="studentsError ? 'Failed to load' : 'Registered'"
-            :value-color="studentsError ? 'danger' : 'default'"
+            :value-color="studentsError && totalStudents === null ? 'danger' : 'default'"
             :icon="peopleOutline"
             icon-color="mint"
+            :loading="isInitialLoading && totalStudents === null"
+            :updating="isRefreshing"
+            :stale="studentsStale"
+            :animated="!studentsError && totalStudents !== null"
             @click="navigateWithHaptic('/tabs/students')"
           />
 
@@ -235,6 +302,10 @@ onIonViewWillEnter(loadDashboardData);
             meta="Ongoing"
             :icon="calendarOutline"
             icon-color="blue"
+            :loading="isInitialLoading && activeEventsCount === null"
+            :updating="isRefreshing"
+            :stale="eventsStale"
+            :animated="activeEventsCount !== null"
             @click="navigateWithHaptic('/tabs/events')"
           />
 
@@ -244,15 +315,25 @@ onIonViewWillEnter(loadDashboardData);
             meta="Verified"
             :icon="scanOutline"
             icon-color="violet"
+            :loading="isInitialLoading && totalCheckIns === null"
+            :updating="isRefreshing"
+            :stale="checkInsStale"
+            :animated="totalCheckIns !== null"
             @click="navigateWithHaptic('/tabs/scan')"
           />
 
           <UniStatCard
             label="Outstanding"
-            :value="formatPeso(totalOutstandingCentavos)"
+            :value="totalOutstandingCentavos"
+            format="currency"
+            :is-centavos="true"
             meta="Unpaid fees"
             :icon="walletOutline"
             icon-color="amber"
+            :loading="isInitialLoading && totalOutstandingCentavos === null"
+            :updating="isRefreshing"
+            :stale="financeStale"
+            :animated="totalOutstandingCentavos !== null"
             @click="navigateWithHaptic('/tabs/finance')"
           />
         </section>
@@ -266,7 +347,21 @@ onIonViewWillEnter(loadDashboardData);
             </span>
           </div>
 
-          <div v-if="activeOccurrence && activeEvent" class="aurora-card session-aurora-card">
+          <!-- Active Session Skeleton during Initial Loading -->
+          <div v-if="isInitialLoading && !activeOccurrence" class="aurora-card session-aurora-card">
+            <div class="session-header-row">
+              <div class="session-title-wrap" style="width: 100%;">
+                <UniSkeleton width="90px" height="12px" border-radius="4px" style="margin-bottom: 8px;" />
+                <UniSkeleton width="210px" height="20px" border-radius="6px" style="margin-bottom: 6px;" />
+                <UniSkeleton width="150px" height="13px" border-radius="4px" />
+              </div>
+            </div>
+            <div class="progress-section" style="margin-top: 14px;">
+              <UniSkeleton width="100%" height="8px" border-radius="9999px" />
+            </div>
+          </div>
+
+          <div v-else-if="activeOccurrence && activeEvent" class="aurora-card session-aurora-card">
             <div class="session-header-row">
               <div class="session-title-wrap">
                 <span class="hero-overline">
@@ -386,7 +481,26 @@ onIonViewWillEnter(loadDashboardData);
             <span v-if="recentActivity.length > 0" class="metadata-text">Last {{ recentActivity.length }} scans</span>
           </div>
 
-          <div v-if="recentActivity.length > 0" class="minimal-card activity-card">
+          <!-- Recent Activity Skeletons during Initial Load -->
+          <div v-if="isInitialLoading && recentActivity.length === 0" class="minimal-card activity-card">
+            <div v-for="i in 3" :key="`skel_act_${i}`" class="activity-row" :class="{ 'row-border': i < 3 }">
+              <div class="activity-icon-wrap" style="background: rgba(255, 255, 255, 0.05); border-color: transparent;">
+                <UniSkeleton width="20px" height="20px" variant="circle" />
+              </div>
+              <div class="activity-details" style="width: 100%;">
+                <div class="activity-primary-line">
+                  <UniSkeleton width="120px" height="14px" border-radius="4px" />
+                  <UniSkeleton width="50px" height="12px" border-radius="4px" />
+                </div>
+                <div class="activity-sub-line" style="margin-top: 4px;">
+                  <UniSkeleton width="80px" height="11px" border-radius="4px" />
+                  <UniSkeleton width="65px" height="16px" border-radius="9999px" />
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div v-else-if="recentActivity.length > 0" class="minimal-card activity-card">
             <div v-for="(item, idx) in recentActivity" :key="item.id" class="activity-row" :class="{ 'row-border': idx < recentActivity.length - 1 }">
               <div class="activity-icon-wrap" :class="'icon-' + item.result.toLowerCase()">
                 <ion-icon :icon="item.result === 'ACCEPTED' ? checkmarkCircle : timeOutline" />

@@ -99,6 +99,7 @@ async function startHydration() {
 
   try {
     if (DataModeService.isDirectSupabase()) {
+      await SupabaseAuthService.waitForInitialization();
       SyncStatusService.setHydration('READY');
       SyncStatusService.setState('SYNCED');
       isValidatingSession.value = false;
@@ -156,6 +157,7 @@ async function proceedToDestination() {
 onMounted(async () => {
   try {
     if (DataModeService.isDirectSupabase()) {
+      await SupabaseAuthService.waitForInitialization();
       SyncStatusService.setHydration('READY');
       SyncStatusService.setState('SYNCED');
       await proceedToDestination();

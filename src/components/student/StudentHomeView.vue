@@ -28,10 +28,11 @@ import { useCurrentStudentPortal } from '@/composables/useCurrentStudentPortal';
 import { formatPeso } from '@/utilities/finance-formatters';
 import { formatDate, formatTime } from '@/utilities/date-formatters';
 import { haptics } from '@/utilities/haptics';
-import { UniPageHeader, UniStatCard, UniButton, UniEmptyState, UniSheet } from '@/components/ui';
+import { UniPageHeader, UniStatCard, UniButton, UniEmptyState, UniSheet, UniSkeleton, UniUpdatingBadge } from '@/components/ui';
 import UniGlobalSyncPill from '@/components/shared/UniGlobalSyncPill.vue';
 import WorkspaceSwitcher from '@/components/shared/WorkspaceSwitcher.vue';
 import { authService } from '@/services/auth.service';
+import { useAuth } from '@/composables/useAuth';
 import { useToast } from '@/composables/useToast';
 import { studentService } from '@/services/student.service';
 import {
@@ -50,7 +51,7 @@ const isUploadingPhoto = ref(false);
 const showPhotoPreviewSheet = ref(false);
 const compressedPhoto = ref<CompressedImageResult | null>(null);
 
-const canSwitchPortal = computed(() => authService.canSwitchWorkspace.value);
+const { canSwitchPortal } = useAuth();
 
 const hasProfilePhoto = computed(() => {
   return Boolean(
@@ -66,6 +67,9 @@ const {
   recentActivity,
   portalEvents,
   isLoading,
+  isInitialLoading,
+  isRefreshing,
+  isStale,
   error,
   outstandingBalanceCentavos,
   totalPaidCentavos,
@@ -158,6 +162,7 @@ onIonViewWillEnter(() => {
       variant="root"
     >
       <template #trailing>
+        <UniUpdatingBadge v-if="isRefreshing" style="margin-right: 6px;" />
         <UniGlobalSyncPill style="margin-right: 6px;" />
         <button
           class="uni-header-action-btn"
@@ -174,11 +179,43 @@ onIonViewWillEnter(() => {
         <!-- Dual-Role Workspace Switcher -->
         <WorkspaceSwitcher v-if="canSwitchPortal" style="margin-bottom: 14px;" />
 
-        <!-- Loading State -->
-        <div v-if="isLoading && !student" class="portal-loading-box">
-          <ion-spinner name="crescent" color="primary" />
-          <p class="portal-loading-text">Loading student profile...</p>
-        </div>
+        <!-- Loading State: polished skeleton pass card & metrics (zero layout shift) -->
+        <template v-if="isInitialLoading && !student">
+          <section class="student-card-section">
+            <div class="aurora-card student-hero-card" style="pointer-events: none;">
+              <div class="card-inner-top">
+                <div class="identity-badge-row">
+                  <UniSkeleton width="130px" height="14px" border-radius="4px" />
+                  <UniSkeleton width="65px" height="18px" border-radius="9999px" />
+                </div>
+                <div class="student-hero-content-row">
+                  <div class="student-hero-avatar-wrap">
+                    <UniSkeleton width="68px" height="68px" variant="circle" />
+                  </div>
+                  <div class="student-hero-details">
+                    <UniSkeleton width="180px" height="22px" border-radius="6px" style="margin-bottom: 8px;" />
+                    <div class="student-id-row">
+                      <UniSkeleton width="90px" height="18px" border-radius="9999px" style="margin-right: 6px;" />
+                      <UniSkeleton width="110px" height="14px" border-radius="4px" />
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <div class="card-inner-bottom">
+                <UniSkeleton width="160px" height="18px" border-radius="6px" />
+                <UniSkeleton width="80px" height="18px" border-radius="6px" />
+              </div>
+            </div>
+          </section>
+
+          <!-- Skeleton Metrics Grid -->
+          <section class="metrics-grid">
+            <UniStatCard label="Attendance Rate" :loading="true" :icon="checkmarkCircle" icon-color="mint" />
+            <UniStatCard label="Balance / Dues" :loading="true" :icon="walletOutline" icon-color="amber" />
+            <UniStatCard label="Total Payments" :loading="true" :icon="receiptOutline" icon-color="blue" />
+            <UniStatCard label="Upcoming Events" :loading="true" :icon="calendarOutline" icon-color="violet" />
+          </section>
+        </template>
 
         <!-- Unlinked Account or Error State -->
         <UniEmptyState
@@ -268,7 +305,11 @@ onIonViewWillEnter(() => {
         <section class="metrics-grid">
           <UniStatCard
             label="Attendance Rate"
-            :value="`${attendanceRate}%`"
+            :value="attendanceRate"
+            format="percent"
+            :animated="true"
+            :updating="isRefreshing"
+            :stale="isStale"
             :meta="`${attendedCount} Sessions Attended`"
             :icon="checkmarkCircle"
             icon-color="mint"
@@ -277,7 +318,12 @@ onIonViewWillEnter(() => {
 
           <UniStatCard
             label="Balance / Dues"
-            :value="formatPeso(outstandingBalanceCentavos)"
+            :value="outstandingBalanceCentavos"
+            format="currency"
+            :is-centavos="true"
+            :animated="true"
+            :updating="isRefreshing"
+            :stale="isStale"
             :meta="outstandingBalanceCentavos === 0 ? 'All Clear • No Dues' : 'Unpaid Obligations'"
             :icon="walletOutline"
             icon-color="amber"
@@ -286,7 +332,12 @@ onIonViewWillEnter(() => {
 
           <UniStatCard
             label="Total Payments"
-            :value="formatPeso(totalPaidCentavos)"
+            :value="totalPaidCentavos"
+            format="currency"
+            :is-centavos="true"
+            :animated="true"
+            :updating="isRefreshing"
+            :stale="isStale"
             meta="Verified Contributions"
             :icon="receiptOutline"
             icon-color="blue"
@@ -296,6 +347,10 @@ onIonViewWillEnter(() => {
           <UniStatCard
             label="Upcoming Events"
             :value="upcomingCount"
+            format="number"
+            :animated="true"
+            :updating="isRefreshing"
+            :stale="isStale"
             meta="Scheduled Activities"
             :icon="calendarOutline"
             icon-color="violet"

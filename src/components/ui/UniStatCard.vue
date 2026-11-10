@@ -1,23 +1,40 @@
 <script setup lang="ts">
 import { IonIcon } from '@ionic/vue';
 import { haptics } from '@/utilities/haptics';
+import UniSkeleton from './UniSkeleton.vue';
+import UniUpdatingBadge from './UniUpdatingBadge.vue';
+import UniAnimatedCounter from './UniAnimatedCounter.vue';
+import type { NumberFormatType } from '@/composables/useAnimatedNumber';
 
 interface Props {
   label: string;
-  value: string | number;
+  value?: string | number | null;
   meta?: string;
   icon?: any;
   iconColor?: 'mint' | 'blue' | 'violet' | 'amber' | 'neutral';
   valueColor?: 'default' | 'mint' | 'danger' | 'success' | 'warning';
   interactive?: boolean;
+  loading?: boolean;
+  updating?: boolean;
+  stale?: boolean;
+  animated?: boolean;
+  format?: NumberFormatType;
+  isCentavos?: boolean;
 }
 
 const props = withDefaults(defineProps<Props>(), {
+  value: '',
   meta: '',
   icon: undefined,
   iconColor: 'mint',
   valueColor: 'default',
-  interactive: true
+  interactive: true,
+  loading: false,
+  updating: false,
+  stale: false,
+  animated: false,
+  format: 'number',
+  isCentavos: false,
 });
 
 const emit = defineEmits<{
@@ -40,15 +57,38 @@ function handleClick(event: MouseEvent) {
   >
     <div class="stat-top-row">
       <span class="stat-label">{{ label }}</span>
-      <div v-if="icon" class="stat-icon-box" :class="[`icon-box-${iconColor}`]">
-        <ion-icon :icon="icon" />
+      <div class="stat-right-wrap">
+        <UniUpdatingBadge v-if="updating" :dot-only="true" />
+        <div v-if="icon" class="stat-icon-box" :class="[`icon-box-${iconColor}`]">
+          <ion-icon :icon="icon" />
+        </div>
+        <slot name="top-right" />
       </div>
-      <slot name="top-right" />
     </div>
 
     <div class="stat-value-row">
-      <span class="stat-num tabular-nums font-mono" :class="[`num-${valueColor}`]">
-        {{ value }}
+      <!-- 1. Skeleton during initial loading (keeps exact height/width, 0 layout shift) -->
+      <UniSkeleton
+        v-if="loading && (value === '' || value === null || value === undefined)"
+        width="80px"
+        height="24px"
+        border-radius="6px"
+      />
+
+      <!-- 2. Loaded Value -->
+      <span v-else class="stat-num tabular-nums font-mono" :class="[`num-${valueColor}`, { 'is-stale': stale }]">
+        <slot name="value">
+          <UniAnimatedCounter
+            v-if="animated && (typeof value === 'number' || (typeof value === 'string' && !isNaN(Number(value))))"
+            :value="value"
+            :format="format"
+            :is-centavos="isCentavos"
+            :stale="stale"
+          />
+          <template v-else>
+            {{ value }}
+          </template>
+        </slot>
       </span>
     </div>
 
@@ -85,6 +125,12 @@ function handleClick(event: MouseEvent) {
   align-items: center;
   justify-content: space-between;
   margin-bottom: 8px;
+}
+
+.stat-right-wrap {
+  display: flex;
+  align-items: center;
+  gap: 6px;
 }
 
 .stat-label {
@@ -140,6 +186,10 @@ function handleClick(event: MouseEvent) {
   font-weight: 700;
   color: var(--uni-text-primary);
   line-height: 1.2;
+}
+
+.stat-num.is-stale {
+  opacity: 0.72;
 }
 
 .num-mint { color: var(--uni-mint); }

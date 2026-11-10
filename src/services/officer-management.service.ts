@@ -817,7 +817,7 @@ export class OfficerManagementService {
           .limit(1)
           .maybeSingle();
 
-        if (!error && appt && appt.status === 'ACTIVE') {
+        if (!error && appt && appt.status === 'ACTIVE' && !appt.revoked_at) {
           if (appt.appointment_start && new Date(appt.appointment_start) > now) return false;
           if (appt.appointment_end && new Date(appt.appointment_end) < now) return false;
           return true;

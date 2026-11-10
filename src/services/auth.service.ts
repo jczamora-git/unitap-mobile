@@ -47,7 +47,10 @@ class AuthService {
   public availablePortals = computed<('DEVADMIN' | 'OFFICER' | 'STUDENT')[]>(() => {
     const portals: ('DEVADMIN' | 'OFFICER' | 'STUDENT')[] = [];
     const r = this.currentRoles.value.filter((x) => !x.revoked_at).map((x) => x.role);
-    if (r.includes('DEVADMIN')) portals.push('DEVADMIN');
+    if (r.includes('DEVADMIN')) {
+      portals.push('DEVADMIN');
+      return portals;
+    }
     if (r.includes('OFFICER')) portals.push('OFFICER');
     if (r.includes('STUDENT') || Boolean(this.currentUser.value?.student_id)) portals.push('STUDENT');
     return portals;
@@ -60,16 +63,29 @@ class AuthService {
   }
 
   public async switchWorkspace(workspace: 'DEVADMIN' | 'OFFICER' | 'STUDENT'): Promise<void> {
-    if (!this.availablePortals.value.includes(workspace)) {
+    let cloudPortals: ('DEVADMIN' | 'OFFICER' | 'STUDENT')[] = [];
+    try {
+      const { SupabaseAuthService } = await import('@/integrations/supabase/auth.service');
+      cloudPortals = SupabaseAuthService.availablePortals.value;
+    } catch {}
+
+    const localPortals = this.availablePortals.value;
+    const isAllowed = localPortals.includes(workspace) || cloudPortals.includes(workspace);
+
+    if (!isAllowed) {
       throw new Error(`Unauthorized portal: account does not have access to ${workspace} portal.`);
     }
 
-    const matchingRole = this.currentRoles.value.find((r) => r.role === workspace && !r.revoked_at) || {
-      id: 'rol_' + (this.currentUser.value?.id || 'temp').substring(0, 8) + '_' + workspace.toLowerCase(),
-      user_id: this.currentUser.value?.id || '',
-      role: workspace,
-      assigned_at: new Date().toISOString(),
-    };
+    let matchingRole = this.currentRoles.value.find((r) => r.role === workspace && !r.revoked_at);
+    if (!matchingRole) {
+      matchingRole = {
+        id: 'rol_' + (this.currentUser.value?.id || 'temp').substring(0, 8) + '_' + workspace.toLowerCase(),
+        user_id: this.currentUser.value?.id || '',
+        role: workspace,
+        assigned_at: new Date().toISOString(),
+      };
+      this.currentRoles.value = [...this.currentRoles.value, matchingRole];
+    }
 
     this.currentWorkspace.value = workspace;
     this.currentRole.value = matchingRole;
@@ -99,12 +115,19 @@ class AuthService {
     if (this.sessionInitialized) return;
     try {
       const { value } = await Preferences.get({ key: SESSION_STORAGE_KEY });
+      let savedWorkspace: string | null = null;
+      try {
+        const { value: ws } = await Preferences.get({ key: 'unitap_active_workspace' });
+        savedWorkspace = ws;
+      } catch {}
+
       if (value) {
         const session: AuthSession = JSON.parse(value);
         this.currentUser.value = session.user;
         this.currentRole.value = session.role;
         this.currentRoles.value = session.roles || (session.role ? [session.role] : []);
-        this.currentWorkspace.value = session.activeWorkspace || session.role?.role || 'STUDENT';
+        const effectiveWorkspace = (savedWorkspace as any) || session.activeWorkspace || session.role?.role || 'STUDENT';
+        this.currentWorkspace.value = effectiveWorkspace;
         this.currentStudent.value = session.student || null;
       }
     } catch {
@@ -220,8 +243,27 @@ class AuthService {
     }
     const hasAdmin = roles.find((r) => r.role === 'DEVADMIN');
     const hasOfficer = roles.find((r) => r.role === 'OFFICER');
-    const primaryRole = hasAdmin || hasOfficer || roles[0];
-    const initialWorkspace = primaryRole.role;
+    let initialWorkspace: 'DEVADMIN' | 'OFFICER' | 'STUDENT' | null = null;
+    try {
+      const { value: saved } = await Preferences.get({ key: 'unitap_active_workspace' });
+      if (saved && (saved === 'STUDENT' || saved === 'OFFICER' || saved === 'DEVADMIN')) {
+        initialWorkspace = saved as any;
+      }
+    } catch {}
+
+    if (!initialWorkspace) {
+      if (hasAdmin) {
+        initialWorkspace = 'DEVADMIN';
+      } else if (user.student_id || roles.some((r) => r.role === 'STUDENT')) {
+        initialWorkspace = 'STUDENT';
+      } else if (hasOfficer) {
+        initialWorkspace = 'OFFICER';
+      } else {
+        initialWorkspace = roles[0].role;
+      }
+    }
+
+    const primaryRole = roles.find((r) => r.role === initialWorkspace) || hasAdmin || hasOfficer || roles[0];
 
     // Reset failed attempts upon successful authentication
     await this.resetFailedAttempts(cleanId);
