@@ -499,7 +499,7 @@ export class OfficerManagementService {
   }): Promise<OfficerListRecord[]> {
     if (DataModeService.isDirectSupabase()) {
       const { supabase } = await import('@/integrations/supabase/client');
-      let query = supabase.from('officer_appointments').select('*').order('created_at', { ascending: false });
+      let query = supabase.from('officer_appointments').select('*').order('appointment_start', { ascending: false });
       if (filter?.status) {
         query = query.eq('status', filter.status);
       }
@@ -778,7 +778,7 @@ export class OfficerManagementService {
           .eq('student_id', studentId)
           .in('status', ['ACTIVE', 'SUSPENDED'])
           .is('revoked_at', null)
-          .order('created_at', { ascending: false })
+          .order('appointment_start', { ascending: false })
           .limit(1)
           .maybeSingle();
 
@@ -813,7 +813,7 @@ export class OfficerManagementService {
         }
 
         const { data: appt, error } = await query
-          .order('created_at', { ascending: false })
+          .order('appointment_start', { ascending: false })
           .limit(1)
           .maybeSingle();
 
@@ -854,7 +854,7 @@ export class OfficerManagementService {
           .select('status, appointment_end, permission_preset, custom_permissions')
           .eq('user_id', userId)
           .in('status', ['ACTIVE', 'SUSPENDED'])
-          .order('created_at', { ascending: false })
+          .order('appointment_start', { ascending: false })
           .limit(1)
           .maybeSingle();
 
@@ -918,7 +918,7 @@ export class OfficerManagementService {
           .select('status, appointment_start, appointment_end, revoked_at, suspended_at, permission_preset, custom_permissions, scope_type, scope_id, semester_id')
           .eq('user_id', userId)
           .in('status', ['ACTIVE', 'SUSPENDED'])
-          .order('created_at', { ascending: false })
+          .order('appointment_start', { ascending: false })
           .limit(1)
           .maybeSingle();
 
@@ -939,7 +939,7 @@ export class OfficerManagementService {
           }
           if (!hasPerm) return false;
 
-          const matchesScope = appt.scope_type === 'ORGANIZATION' || 
+          const matchesScope = appt.scope_type === 'ORGANIZATION' ||
             (appt.scope_type === 'EVENT' && (appt.scope_id === eventId || appt.scope_id === cleanEventUuid));
           if (!matchesScope) return false;
 
@@ -974,7 +974,7 @@ export class OfficerManagementService {
     }
     if (!hasPerm) return false;
 
-    const matchesScope = appt.scope_type === 'ORGANIZATION' || 
+    const matchesScope = appt.scope_type === 'ORGANIZATION' ||
       (appt.scope_type === 'EVENT' && (appt.scope_id === eventId || appt.scope_id === cleanEventUuid));
     if (!matchesScope) return false;
 
@@ -1117,7 +1117,7 @@ export class OfficerManagementService {
                 status: r.status || 'ACTIVE',
                 created_at: new Date().toISOString(),
                 updated_at: new Date().toISOString(),
-              }).catch(() => {});
+              }).catch(() => { });
             }
           }
         }

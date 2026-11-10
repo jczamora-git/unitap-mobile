@@ -43,6 +43,8 @@ export interface SupabaseOccurrencePayload {
   grace_minutes: number;
   status: string;
   updated_at: string;
+  checkpoints_json?: any;
+  active_checkpoint_id?: string | null;
   opened_at?: string | null;
   closed_at?: string | null;
 }
@@ -71,7 +73,7 @@ export function toSupabaseEventInsertPayload(
 }
 
 export function toSupabaseOccurrenceInsertPayload(
-  occurrence: Pick<EventOccurrence, 'id' | 'eventId' | 'title' | 'date' | 'startTime' | 'endTime' | 'gracePeriodMinutes' | 'status' | 'createdAt' | 'openedAt' | 'closedAt'>
+  occurrence: Pick<EventOccurrence, 'id' | 'eventId' | 'title' | 'date' | 'startTime' | 'endTime' | 'gracePeriodMinutes' | 'status' | 'createdAt' | 'openedAt' | 'closedAt' | 'checkpoints' | 'activeCheckpointId'>
 ): SupabaseOccurrencePayload {
   const rawId = occurrence.id.startsWith('occ_') ? occurrence.id.replace(/^occ_/, '') : occurrence.id;
   const rawEventId = occurrence.eventId.startsWith('evt_') ? occurrence.eventId.replace(/^evt_/, '') : occurrence.eventId;
@@ -85,6 +87,8 @@ export function toSupabaseOccurrenceInsertPayload(
     grace_minutes: occurrence.gracePeriodMinutes ?? 15,
     status: occurrence.status || 'SCHEDULED',
     updated_at: occurrence.createdAt || new Date().toISOString(),
+    checkpoints_json: occurrence.checkpoints ?? null,
+    active_checkpoint_id: occurrence.activeCheckpointId ?? occurrence.checkpoints?.[0]?.id ?? null,
     opened_at: occurrence.openedAt || null,
     closed_at: occurrence.closedAt || null,
   };
@@ -146,7 +150,33 @@ export class EventService {
         updatedAt: data.updated_at,
       };
     }
-    return this.repo.getEventById(id);
+    const local = await this.repo.getEventById(id);
+    if (local) return local;
+
+    // Fallback to SQLite EventsRepository
+    const dbEvent = await EventsRepository.getEventById(id);
+    if (dbEvent) {
+      let audience: any = { type: dbEvent.audience_type || 'ALL' };
+      try {
+        audience = typeof dbEvent.audience_json === 'string'
+          ? JSON.parse(dbEvent.audience_json)
+          : (dbEvent.audience_json || audience);
+      } catch {}
+      return {
+        id: dbEvent.id,
+        title: dbEvent.title,
+        description: dbEvent.description || '',
+        type: dbEvent.event_type as any,
+        categoryId: dbEvent.category_id || undefined,
+        semesterId: dbEvent.semester_id,
+        audience,
+        attendanceRequired: Boolean(dbEvent.attendance_required),
+        status: dbEvent.status as any,
+        createdAt: dbEvent.created_at,
+        updatedAt: dbEvent.updated_at,
+      };
+    }
+    return null;
   }
 
   async createEvent(dto: CreateEventDto): Promise<Event> {
@@ -269,6 +299,7 @@ export class EventService {
         endTime,
         opensAt: c.opensAt,
         closesAt: c.closesAt,
+        lateUntil: c.lateUntil,
         orderIndex: c.orderIndex ?? idx,
       };
     });
@@ -304,6 +335,7 @@ export class EventService {
         endTime: closesAt,
         opensAt,
         closesAt,
+        lateUntil: c.type === 'IN' ? (c.lateUntil || undefined) : undefined,
         orderIndex: c.orderIndex ?? idx,
       };
     });
@@ -428,6 +460,36 @@ export class EventService {
       ? dto.eventId.replace(/^evt_/, '')
       : dto.eventId;
 
+    const initialCheckpoints: AttendanceCheckpoint[] = (dto.checkpoints && dto.checkpoints.length > 0)
+      ? dto.checkpoints.map((c, idx) => ({
+          id: c.id || `cp_${idx + 1}`,
+          label: c.label || (c.type === 'OUT' ? 'Check-Out' : 'Check-In'),
+          type: c.type || 'IN',
+          startTime: c.startTime || c.opensAt || dto.startTime,
+          endTime: c.endTime || c.closesAt || dto.endTime,
+          opensAt: c.opensAt || c.startTime || dto.startTime,
+          closesAt: c.closesAt || c.endTime || dto.endTime,
+          lateUntil: c.type === 'IN' ? (c.lateUntil || undefined) : undefined,
+          graceMinutes: c.graceMinutes ?? dto.gracePeriodMinutes ?? 15,
+          orderIndex: c.orderIndex ?? idx,
+        }))
+      : [
+          {
+            id: 'default_in',
+            label: 'General Check-In',
+            type: 'IN' as const,
+            startTime: dto.startTime,
+            endTime: dto.endTime,
+            opensAt: dto.startTime,
+            closesAt: dto.endTime,
+            lateUntil: dto.endTime,
+            graceMinutes: dto.gracePeriodMinutes ?? 15,
+            orderIndex: 0,
+          },
+        ];
+
+    const activeCheckpointId = dto.activeCheckpointId || initialCheckpoints[0]?.id || 'default_in';
+
     const occurrence: EventOccurrence = {
       id: occurrenceId,
       eventId: rawEventId,
@@ -437,6 +499,8 @@ export class EventService {
       endTime: dto.endTime,
       gracePeriodMinutes: dto.gracePeriodMinutes ?? 15,
       status: 'SCHEDULED',
+      checkpoints: initialCheckpoints,
+      activeCheckpointId,
       createdAt: now
     };
 
@@ -445,6 +509,24 @@ export class EventService {
       const { error } = await supabase.from('event_occurrences').insert(payload);
       if (error) throw new Error(`Failed to create occurrence on Supabase: ${error.message}`);
       return occurrence;
+    }
+
+    try {
+      await EventsRepository.createOccurrence({
+        id: occurrenceId,
+        event_id: rawEventId,
+        title: dto.title.trim(),
+        occurs_on: dto.date,
+        starts_at: dto.startTime,
+        ends_at: dto.endTime,
+        grace_minutes: dto.gracePeriodMinutes ?? 15,
+        status: 'SCHEDULED',
+        checkpoints_json: JSON.stringify(initialCheckpoints),
+        active_checkpoint_id: activeCheckpointId,
+        updated_at: now
+      });
+    } catch {
+      // In-memory or legacy fallback
     }
 
     return this.repo.saveOccurrence(occurrence);

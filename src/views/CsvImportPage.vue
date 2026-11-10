@@ -446,6 +446,7 @@ import {
   UniButton,
 } from '@/components/ui';
 import { AcademicRepository } from '@/database/repositories/academic.repository';
+import { exportFile } from '@/utilities/file-export';
 import {
   CsvImportService,
   type CsvParseResult,
@@ -763,19 +764,20 @@ async function executeImport() {
   }
 }
 
-function downloadTemplate() {
+async function downloadTemplate() {
   const csvContent =
     'school_id,first_name,middle_name,last_name,year,section\nMCC2026-0001,Juan,Protacio,Dela Cruz,1,1F4\nMCC2026-0002,Maria,Clara,Santos,1,1F4\n';
-  const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement('a');
-  link.setAttribute('href', url);
-  link.setAttribute('download', 'student_import_template.csv');
-  document.body.appendChild(link);
-  link.click();
-  document.body.removeChild(link);
-  URL.revokeObjectURL(url);
-  haptics.light();
+  try {
+    await exportFile({
+      filename: 'student_import_template.csv',
+      content: csvContent,
+      mimeType: 'text/csv;charset=utf-8;',
+      dialogTitle: 'Download Student Import Template',
+    });
+    haptics.light();
+  } catch (err: any) {
+    console.error('Failed to export CSV template:', err);
+  }
 }
 </script>
 

@@ -11,7 +11,7 @@ import type {
   AttendanceStats,
   ScanResultType 
 } from '@/types/attendance';
-import type { AttendanceStatus, OccurrenceParticipant, CheckpointType } from '@/types/event';
+import type { AttendanceStatus, OccurrenceParticipant, CheckpointType, AttendanceCheckpoint } from '@/types/event';
 import { eventService } from './event.service';
 import { studentService } from './student.service';
 import { localEventRepository, type IEventRepository } from '@/storage/event-storage.service';
@@ -54,6 +54,178 @@ export interface VerificationPromptData {
   revokedAt?: string;
 }
 
+export interface CheckpointWindowEvaluation {
+  isOpen: boolean;
+  isNotOpenYet: boolean;
+  isBeforeOpen: boolean;
+  isClosed: boolean;
+  isLate: boolean;
+  suggestedStatus: AttendanceStatus;
+  status: AttendanceStatus;
+  rejectionType?: 'CHECKPOINT_NOT_OPEN' | 'CHECKPOINT_CLOSED';
+  rejectionMessage?: string;
+  errorMessage?: string;
+  opensAt?: string;
+  onTimeUntil?: string;
+  lateUntil?: string;
+}
+
+/**
+ * Authoritative evaluation of checkpoint timing bounds and attendance status.
+ *
+ * Separates the three checkpoint timing concepts:
+ * 1. Opens At (opensAt / startTime): Earliest allowed attendance scan.
+ * 2. On-Time Until (closesAt / endTime): Last time attendance counts as PRESENT.
+ * 3. Accept Late Until (lateUntil): Final cutoff for accepting LATE attendance (for IN checkpoints).
+ *
+ * Evaluation rules:
+ * - Before Opens At: CHECKPOINT_NOT_OPEN.
+ * - Between Opens At and On-Time Until (inclusive): PRESENT.
+ * - After On-Time Until up to Accept Late Until (inclusive): LATE (for IN checkpoints).
+ * - After Accept Late Until (or after On-Time Until if no late cutoff configured): CHECKPOINT_CLOSED.
+ * - OUT checkpoints preserve checkout semantics: open between Opens At and On-Time Until as PRESENT.
+ */
+export function evaluateCheckpointWindow(
+  dateStr: string,
+  checkpoint: AttendanceCheckpoint,
+  scanTimeInput?: Date | string
+): CheckpointWindowEvaluation {
+  const opensAt = checkpoint.opensAt || checkpoint.startTime;
+  const closesAt = checkpoint.closesAt || checkpoint.endTime;
+
+  if (!dateStr || !opensAt || !closesAt) {
+    return {
+      isOpen: true,
+      isNotOpenYet: false,
+      isBeforeOpen: false,
+      isClosed: false,
+      isLate: false,
+      suggestedStatus: 'PRESENT',
+      status: 'PRESENT',
+      opensAt,
+      onTimeUntil: closesAt,
+      lateUntil: checkpoint.lateUntil || closesAt,
+    };
+  }
+
+  let onTimeEndStr: string;
+  let lateEndStr: string;
+
+  if (checkpoint.type === 'IN') {
+    if (checkpoint.lateUntil) {
+      onTimeEndStr = closesAt;
+      lateEndStr = checkpoint.lateUntil;
+    } else if (checkpoint.graceMinutes && checkpoint.graceMinutes > 0 && opensAt) {
+      // Legacy graceMinutes: opensAt + graceMinutes is on-time limit; closesAt is cutoff
+      const [h, m] = opensAt.split(':').map(Number);
+      const totalMin = h * 60 + m + checkpoint.graceMinutes;
+      const gh = Math.floor(totalMin / 60) % 24;
+      const gm = totalMin % 60;
+      onTimeEndStr = `${String(gh).padStart(2, '0')}:${String(gm).padStart(2, '0')}`;
+      lateEndStr = closesAt;
+    } else {
+      onTimeEndStr = closesAt;
+      lateEndStr = closesAt;
+    }
+  } else {
+    onTimeEndStr = closesAt;
+    lateEndStr = closesAt;
+  }
+
+  let scanDate: Date;
+  if (!scanTimeInput) {
+    scanDate = new Date();
+  } else if (scanTimeInput instanceof Date) {
+    scanDate = scanTimeInput;
+  } else if (typeof scanTimeInput === 'string') {
+    if (!scanTimeInput.includes('+') && !scanTimeInput.includes('Z')) {
+      const clean = scanTimeInput.includes('T') ? scanTimeInput : `${dateStr}T${scanTimeInput}`;
+      scanDate = new Date(`${clean}+08:00`);
+    } else {
+      scanDate = new Date(scanTimeInput);
+    }
+  } else {
+    scanDate = new Date();
+  }
+
+  // Create date objects with explicit Asia/Manila (UTC+8) offset for deterministic evaluation
+  const parseManilaTime = (t: string) => {
+    const clean = t.length === 5 ? `${t}:00` : t;
+    return new Date(`${dateStr}T${clean}+08:00`);
+  };
+
+  const windowStart = parseManilaTime(opensAt);
+  const onTimeEnd = parseManilaTime(onTimeEndStr);
+  const lateEnd = parseManilaTime(lateEndStr);
+
+  if (scanDate.getTime() < windowStart.getTime()) {
+    const msg = `Checkpoint "${checkpoint.label}" is not open for scanning yet. Scanning window opens at ${formatTime(opensAt)}.`;
+    return {
+      isOpen: false,
+      isNotOpenYet: true,
+      isBeforeOpen: true,
+      isClosed: false,
+      isLate: false,
+      suggestedStatus: 'PRESENT',
+      status: 'PRESENT',
+      rejectionType: 'CHECKPOINT_NOT_OPEN',
+      rejectionMessage: msg,
+      errorMessage: msg,
+      opensAt,
+      onTimeUntil: onTimeEndStr,
+      lateUntil: lateEndStr,
+    };
+  }
+
+  if (scanDate.getTime() > lateEnd.getTime()) {
+    const finalCutoff = lateEndStr;
+    const msg = `Checkpoint "${checkpoint.label}" scanning window has closed. Window closed at ${formatTime(finalCutoff)}.`;
+    return {
+      isOpen: false,
+      isNotOpenYet: false,
+      isBeforeOpen: false,
+      isClosed: true,
+      isLate: false,
+      suggestedStatus: 'ABSENT',
+      status: 'ABSENT',
+      rejectionType: 'CHECKPOINT_CLOSED',
+      rejectionMessage: msg,
+      errorMessage: msg,
+      opensAt,
+      onTimeUntil: onTimeEndStr,
+      lateUntil: lateEndStr,
+    };
+  }
+
+  let suggestedStatus: AttendanceStatus = 'PRESENT';
+  let isLate = false;
+  if (checkpoint.type === 'IN') {
+    if (scanDate.getTime() > onTimeEnd.getTime()) {
+      suggestedStatus = 'LATE';
+      isLate = true;
+    } else {
+      suggestedStatus = 'PRESENT';
+      isLate = false;
+    }
+  } else {
+    suggestedStatus = 'PRESENT';
+    isLate = false;
+  }
+
+  return {
+    isOpen: true,
+    isNotOpenYet: false,
+    isBeforeOpen: false,
+    isClosed: false,
+    isLate,
+    suggestedStatus,
+    status: suggestedStatus,
+    opensAt,
+    onTimeUntil: onTimeEndStr,
+    lateUntil: lateEndStr,
+  };
+}
+
 export class AttendanceService {
   constructor(private repo: IEventRepository = localEventRepository) {}
 
@@ -61,7 +233,8 @@ export class AttendanceService {
     occurrenceId: string,
     rawRfidUid: string,
     _actorUserId?: string,
-    checkpointId?: string
+    checkpointId?: string,
+    scannedAt?: string | Date
   ): Promise<VerificationPromptData> {
     const cleanUid = (rawRfidUid || '').trim().toUpperCase().replace(/[^0-9A-F]/g, '');
 
@@ -105,41 +278,33 @@ export class AttendanceService {
     const targetCheckpointType = activeCheckpoint.type;
 
     // Checkpoint scanning window pre-check
-    const opensAtStr = activeCheckpoint.opensAt;
-    const closesAtStr = activeCheckpoint.closesAt;
+    const windowEval = evaluateCheckpointWindow(occurrence.occurs_on, activeCheckpoint, scannedAt);
+    if (windowEval.isNotOpenYet) {
+      return {
+        type: 'CHECKPOINT_NOT_OPEN',
+        message: windowEval.rejectionMessage || `Checkpoint "${targetCheckpointLabel}" is not open for scanning yet.`,
+        occurrenceId,
+        rfidUid: cleanUid,
+        checkpointId: targetCheckpointId,
+        checkpointLabel: targetCheckpointLabel,
+        checkpointType: targetCheckpointType,
+        suggestedStatus: 'PRESENT',
+        eligible: false,
+      };
+    }
 
-    if (occurrence.occurs_on && opensAtStr && closesAtStr) {
-      const now = new Date();
-      const windowStart = new Date(`${occurrence.occurs_on}T${opensAtStr}:00`);
-      const windowEnd = new Date(`${occurrence.occurs_on}T${closesAtStr}:00`);
-
-      if (now < windowStart) {
-        return {
-          type: 'CHECKPOINT_NOT_OPEN',
-          message: `Checkpoint "${targetCheckpointLabel}" is not open for scanning yet. Scanning window opens at ${formatTime(opensAtStr)}.`,
-          occurrenceId,
-          rfidUid: cleanUid,
-          checkpointId: targetCheckpointId,
-          checkpointLabel: targetCheckpointLabel,
-          checkpointType: targetCheckpointType,
-          suggestedStatus: 'PRESENT',
-          eligible: false,
-        };
-      }
-
-      if (now > windowEnd) {
-        return {
-          type: 'CHECKPOINT_CLOSED',
-          message: `Checkpoint "${targetCheckpointLabel}" scanning window has closed. Window closed at ${formatTime(closesAtStr)}.`,
-          occurrenceId,
-          rfidUid: cleanUid,
-          checkpointId: targetCheckpointId,
-          checkpointLabel: targetCheckpointLabel,
-          checkpointType: targetCheckpointType,
-          suggestedStatus: 'PRESENT',
-          eligible: false,
-        };
-      }
+    if (windowEval.isClosed) {
+      return {
+        type: 'CHECKPOINT_CLOSED',
+        message: windowEval.rejectionMessage || `Checkpoint "${targetCheckpointLabel}" scanning window has closed.`,
+        occurrenceId,
+        rfidUid: cleanUid,
+        checkpointId: targetCheckpointId,
+        checkpointLabel: targetCheckpointLabel,
+        checkpointType: targetCheckpointType,
+        suggestedStatus: 'PRESENT',
+        eligible: false,
+      };
     }
 
     // 2. Resolve Card & Student via studentService.lookupCard (reuses unified NFC identification)
@@ -258,14 +423,8 @@ export class AttendanceService {
       }
     }
 
-    // 4. Grace period
-    let suggestedStatus: AttendanceStatus = 'PRESENT';
-    if (occurrence.occurs_on && occurrence.starts_at) {
-      const isLate = isPastTime(occurrence.occurs_on, occurrence.starts_at, occurrence.grace_minutes || 15);
-      if (isLate) {
-        suggestedStatus = 'LATE';
-      }
-    }
+    // 4. Determine suggested status based on checkpoint window (PRESENT vs LATE)
+    const suggestedStatus: AttendanceStatus = windowEval.suggestedStatus;
 
     return {
       type: 'ACCEPTED',
@@ -342,10 +501,11 @@ export class AttendanceService {
     occurrenceId: string,
     rawRfidUid: string,
     actorUserId?: string,
-    checkpointId?: string
+    checkpointId?: string,
+    scannedAt?: string | Date
   ): Promise<VerificationPromptData> {
     if (DataModeService.isDirectSupabase()) {
-      return this.prepareNfcVerificationDirect(occurrenceId, rawRfidUid, actorUserId, checkpointId);
+      return this.prepareNfcVerificationDirect(occurrenceId, rawRfidUid, actorUserId, checkpointId, scannedAt);
     }
 
     const timestamp = new Date().toISOString();
@@ -407,41 +567,33 @@ export class AttendanceService {
     const targetCheckpointType = activeCheckpoint.type;
 
     // Checkpoint scanning window pre-check
-    const opensAtStr = activeCheckpoint.opensAt;
-    const closesAtStr = activeCheckpoint.closesAt;
+    const windowEval = evaluateCheckpointWindow(occurrence.occurs_on, activeCheckpoint, scannedAt);
+    if (windowEval.isNotOpenYet) {
+      return {
+        type: 'CHECKPOINT_NOT_OPEN',
+        message: windowEval.rejectionMessage || `Checkpoint "${targetCheckpointLabel}" is not open for scanning yet.`,
+        occurrenceId,
+        rfidUid: cleanUid,
+        checkpointId: targetCheckpointId,
+        checkpointLabel: targetCheckpointLabel,
+        checkpointType: targetCheckpointType,
+        suggestedStatus: 'PRESENT',
+        eligible: false,
+      };
+    }
 
-    if (occurrence.occurs_on && opensAtStr && closesAtStr) {
-      const now = new Date();
-      const windowStart = new Date(`${occurrence.occurs_on}T${opensAtStr}:00`);
-      const windowEnd = new Date(`${occurrence.occurs_on}T${closesAtStr}:00`);
-
-      if (now < windowStart) {
-        return {
-          type: 'CHECKPOINT_NOT_OPEN',
-          message: `Checkpoint "${targetCheckpointLabel}" is not open for scanning yet. Scanning window opens at ${formatTime(opensAtStr)}.`,
-          occurrenceId,
-          rfidUid: cleanUid,
-          checkpointId: targetCheckpointId,
-          checkpointLabel: targetCheckpointLabel,
-          checkpointType: targetCheckpointType,
-          suggestedStatus: 'PRESENT',
-          eligible: false,
-        };
-      }
-
-      if (now > windowEnd) {
-        return {
-          type: 'CHECKPOINT_CLOSED',
-          message: `Checkpoint "${targetCheckpointLabel}" scanning window has closed. Window closed at ${formatTime(closesAtStr)}.`,
-          occurrenceId,
-          rfidUid: cleanUid,
-          checkpointId: targetCheckpointId,
-          checkpointLabel: targetCheckpointLabel,
-          checkpointType: targetCheckpointType,
-          suggestedStatus: 'PRESENT',
-          eligible: false,
-        };
-      }
+    if (windowEval.isClosed) {
+      return {
+        type: 'CHECKPOINT_CLOSED',
+        message: windowEval.rejectionMessage || `Checkpoint "${targetCheckpointLabel}" scanning window has closed.`,
+        occurrenceId,
+        rfidUid: cleanUid,
+        checkpointId: targetCheckpointId,
+        checkpointLabel: targetCheckpointLabel,
+        checkpointType: targetCheckpointType,
+        suggestedStatus: 'PRESENT',
+        eligible: false,
+      };
     }
 
     // 2. Resolve Card & Student via studentService.lookupCard (unified across Direct and Offline modes)
@@ -618,14 +770,8 @@ export class AttendanceService {
       }
     }
 
-    // 4. Calculate grace period (PRESENT vs LATE)
-    let suggestedStatus: AttendanceStatus = 'PRESENT';
-    if (occurrence.occurs_on && occurrence.starts_at) {
-      const isLate = isPastTime(occurrence.occurs_on, occurrence.starts_at, occurrence.grace_minutes || 15);
-      if (isLate) {
-        suggestedStatus = 'LATE';
-      }
-    }
+    // 4. Determine suggested status based on checkpoint window (PRESENT vs LATE)
+    const suggestedStatus: AttendanceStatus = windowEval.suggestedStatus;
 
     return {
       type: 'ACCEPTED',
@@ -686,35 +832,18 @@ export class AttendanceService {
     const effectiveCheckpoint = checkpointId || occurrence?.active_checkpoint_id || 'default_in';
     const checkpoints = eventService.parseCheckpoints(occurrence?.checkpoints_json);
     const activeCheckpoint = checkpoints.find(c => c.id === effectiveCheckpoint) || checkpoints[0];
-    const opensAtStr = activeCheckpoint?.opensAt;
-    const closesAtStr = activeCheckpoint?.closesAt;
-
-    if (occurrence?.occurs_on && opensAtStr && closesAtStr) {
-      const windowStart = new Date(`${occurrence.occurs_on}T${opensAtStr}:00`);
-      const windowEnd = new Date(`${occurrence.occurs_on}T${closesAtStr}:00`);
-      const nowDate = new Date(now);
-
-      if (nowDate < windowStart) {
-        throw new Error(`Checkpoint "${activeCheckpoint?.label || effectiveCheckpoint}" is not yet open for scanning. Window opens at ${formatTime(opensAtStr)}.`);
+    let windowEval: CheckpointWindowEvaluation | null = null;
+    if (occurrence?.occurs_on && activeCheckpoint) {
+      windowEval = evaluateCheckpointWindow(occurrence.occurs_on, activeCheckpoint, now);
+      if (windowEval.isNotOpenYet) {
+        throw new Error(windowEval.rejectionMessage || `Checkpoint "${activeCheckpoint?.label || effectiveCheckpoint}" is not yet open for scanning.`);
       }
-      if (nowDate > windowEnd) {
-        throw new Error(`Checkpoint "${activeCheckpoint?.label || effectiveCheckpoint}" scanning window has closed. Window closed at ${formatTime(closesAtStr)}.`);
+      if (windowEval.isClosed) {
+        throw new Error(windowEval.rejectionMessage || `Checkpoint "${activeCheckpoint?.label || effectiveCheckpoint}" scanning window has closed.`);
       }
     }
 
-    let status: AttendanceStatus = statusOverride || 'PRESENT';
-
-    if (!statusOverride) {
-      if (activeCheckpoint?.type === 'IN' && occurrence?.occurs_on && opensAtStr) {
-        if (isPastTime(occurrence.occurs_on, opensAtStr, activeCheckpoint?.graceMinutes ?? occurrence?.grace_minutes ?? 15, now)) {
-          status = 'LATE';
-        } else {
-          status = 'PRESENT';
-        }
-      } else {
-        status = 'PRESENT';
-      }
-    }
+    let status: AttendanceStatus = statusOverride || windowEval?.suggestedStatus || 'PRESENT';
 
     const effectiveIdempotencyKey = idempotencyKey || `idem_scan_${occurrenceId}_${studentId}_${effectiveCheckpoint}_${Date.now()}`;
 

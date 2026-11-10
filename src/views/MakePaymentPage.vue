@@ -53,6 +53,7 @@ import {
 } from '@/components/ui';
 import { useOperationPolicy } from '@/composables/useOperationPolicy';
 import { haptics } from '@/utilities/haptics';
+import { exportFile } from '@/utilities/file-export';
 import { useToast } from '@/composables/useToast';
 
 const router = useRouter();
@@ -708,17 +709,14 @@ async function downloadReceiptPdf() {
     const pdfBytes = financeService.generateReceiptPdf(completedReceipt.value);
     const filename = financeService.buildReceiptPdfFilename(completedReceipt.value.referenceNumber);
 
-    const blob = new Blob([pdfBytes as any], { type: 'application/pdf' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = filename;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    await exportFile({
+      filename,
+      content: pdfBytes,
+      mimeType: 'application/pdf',
+      dialogTitle: 'Download Official Payment Receipt',
+    });
 
-    await showToast(`Downloaded ${filename}`, 'success');
+    await showToast(`Saved ${filename}`, 'success');
   } catch (err: any) {
     console.error('Failed to generate receipt PDF:', err);
     await showToast(err?.message || 'Failed to download receipt PDF.', 'error');

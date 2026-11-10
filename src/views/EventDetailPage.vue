@@ -32,6 +32,7 @@ import { AttendanceRepository } from '@/database/repositories/attendance.reposit
 import { eventService } from '@/services/event.service';
 import { studentService } from '@/services/student.service';
 import { ReportService } from '@/services/report.service';
+import { exportFile } from '@/utilities/file-export';
 import {
   CHECKPOINT_PRESETS,
   type Event,
@@ -234,6 +235,7 @@ const newCpLabel = ref('');
 const newCpType = ref<CheckpointType>('IN');
 const newCpOpensAt = ref('08:00');
 const newCpClosesAt = ref('08:30');
+const newCpLateUntil = ref('');
 const isSavingCheckpoints = ref(false);
 
 const checkpointTypeOptions = [
@@ -253,10 +255,11 @@ function validateCheckpointWindow(
   closesAt: string,
   _sessionStart?: string,
   _sessionEnd?: string,
-  label: string = 'Checkpoint'
+  label: string = 'Checkpoint',
+  lateUntil?: string | null
 ): string | null {
   if (!opensAt || !closesAt) {
-    return `${label}: Opens At and Closes At times are required.`;
+    return `${label}: Opens At and On-Time Until times are required.`;
   }
   const openMin = timeToMinutes(opensAt);
   const closeMin = timeToMinutes(closesAt);
@@ -265,7 +268,17 @@ function validateCheckpointWindow(
     return `${label}: Please enter valid time formats (HH:MM).`;
   }
   if (closeMin <= openMin) {
-    return `${label}: Closing time (${formatTime(closesAt)}) must be later than opening time (${formatTime(opensAt)}).`;
+    return `${label}: On-time cutoff (${formatTime(closesAt)}) must be later than opening time (${formatTime(opensAt)}).`;
+  }
+
+  if (lateUntil) {
+    const lateMin = timeToMinutes(lateUntil);
+    if (lateMin < 0) {
+      return `${label}: Please enter a valid late cutoff time format (HH:MM).`;
+    }
+    if (lateMin <= closeMin) {
+      return `${label}: Late cutoff (${formatTime(lateUntil)}) must be later than on-time cutoff (${formatTime(closesAt)}).`;
+    }
   }
 
   // Checkpoints represent independent attendance scanning windows.
@@ -288,11 +301,13 @@ function openCheckpointsModal(occ: EventOccurrence) {
     closesAt: c.closesAt || c.endTime || occ.endTime || '08:30',
     startTime: c.opensAt || c.startTime || occ.startTime || '08:00',
     endTime: c.closesAt || c.endTime || occ.endTime || '08:30',
+    lateUntil: c.type === 'IN' ? (c.lateUntil || undefined) : undefined,
   }));
   newCpLabel.value = '';
   newCpType.value = 'IN';
   newCpOpensAt.value = occ.startTime || '08:00';
   newCpClosesAt.value = occ.endTime || '08:30';
+  newCpLateUntil.value = '';
   showCheckpointsModal.value = true;
 }
 
@@ -301,6 +316,7 @@ function applyCheckpointPreset(preset: CheckpointPreset) {
   newCpType.value = preset.type;
   newCpOpensAt.value = preset.opensAt;
   newCpClosesAt.value = preset.closesAt;
+  newCpLateUntil.value = preset.lateUntil || '';
 }
 
 function isPresetAdded(preset: CheckpointPreset, checkpoints: AttendanceCheckpoint[]): boolean {
@@ -312,7 +328,8 @@ function isPresetSelected(preset: CheckpointPreset): boolean {
     newCpLabel.value.trim() === preset.label &&
     newCpType.value === preset.type &&
     newCpOpensAt.value === preset.opensAt &&
-    newCpClosesAt.value === preset.closesAt
+    newCpClosesAt.value === preset.closesAt &&
+    (newCpLateUntil.value.trim() || undefined) === (preset.lateUntil || undefined)
   );
 }
 
@@ -334,7 +351,8 @@ function addCheckpoint() {
     newCpClosesAt.value,
     editingOccurrence.value?.startTime,
     editingOccurrence.value?.endTime,
-    trimmedLabel
+    trimmedLabel,
+    newCpType.value === 'IN' ? (newCpLateUntil.value.trim() || undefined) : undefined
   );
   if (err) {
     showToast(err, 'warning');
@@ -349,9 +367,11 @@ function addCheckpoint() {
     closesAt: newCpClosesAt.value,
     startTime: newCpOpensAt.value,
     endTime: newCpClosesAt.value,
+    lateUntil: newCpType.value === 'IN' && newCpLateUntil.value.trim() ? newCpLateUntil.value.trim() : undefined,
     orderIndex: editingCheckpoints.value.length,
   });
   newCpLabel.value = '';
+  newCpLateUntil.value = '';
 }
 
 function removeCheckpoint(idx: number) {
@@ -379,7 +399,8 @@ async function saveCheckpoints() {
       cp.closesAt || cp.endTime || '',
       editingOccurrence.value.startTime,
       editingOccurrence.value.endTime,
-      cp.label
+      cp.label,
+      cp.type === 'IN' ? (cp.lateUntil || undefined) : undefined
     );
     if (err) {
       showToast(err, 'warning');
@@ -437,6 +458,7 @@ const editSessionNewCpLabel = ref('');
 const editSessionNewCpType = ref<CheckpointType>('IN');
 const editSessionNewCpOpensAt = ref('08:00');
 const editSessionNewCpClosesAt = ref('08:30');
+const editSessionNewCpLateUntil = ref('');
 const isSavingSession = ref(false);
 const editSessionError = ref<string | null>(null);
 
@@ -460,11 +482,13 @@ function openEditSessionModal(occ: EventOccurrence) {
     closesAt: c.closesAt || c.endTime || occ.endTime || '08:30',
     startTime: c.opensAt || c.startTime || occ.startTime || '08:00',
     endTime: c.closesAt || c.endTime || occ.endTime || '08:30',
+    lateUntil: c.type === 'IN' ? (c.lateUntil || undefined) : undefined,
   }));
   editSessionNewCpLabel.value = '';
   editSessionNewCpType.value = 'IN';
   editSessionNewCpOpensAt.value = occ.startTime || '08:00';
   editSessionNewCpClosesAt.value = occ.endTime || '08:30';
+  editSessionNewCpLateUntil.value = '';
   editSessionError.value = null;
   showEditSessionModal.value = true;
 }
@@ -474,6 +498,7 @@ function applyEditSessionCheckpointPreset(preset: CheckpointPreset) {
   editSessionNewCpType.value = preset.type;
   editSessionNewCpOpensAt.value = preset.opensAt;
   editSessionNewCpClosesAt.value = preset.closesAt;
+  editSessionNewCpLateUntil.value = preset.lateUntil || '';
 }
 
 function isEditSessionPresetSelected(preset: CheckpointPreset): boolean {
@@ -481,7 +506,8 @@ function isEditSessionPresetSelected(preset: CheckpointPreset): boolean {
     editSessionNewCpLabel.value.trim() === preset.label &&
     editSessionNewCpType.value === preset.type &&
     editSessionNewCpOpensAt.value === preset.opensAt &&
-    editSessionNewCpClosesAt.value === preset.closesAt
+    editSessionNewCpClosesAt.value === preset.closesAt &&
+    (editSessionNewCpLateUntil.value.trim() || undefined) === (preset.lateUntil || undefined)
   );
 }
 
@@ -503,7 +529,8 @@ function addEditSessionCheckpoint() {
     editSessionNewCpClosesAt.value,
     editSessionStartTime.value,
     editSessionEndTime.value,
-    trimmedLabel
+    trimmedLabel,
+    editSessionNewCpType.value === 'IN' ? (editSessionNewCpLateUntil.value.trim() || undefined) : undefined
   );
   if (err) {
     showToast(err, 'warning');
@@ -518,9 +545,11 @@ function addEditSessionCheckpoint() {
     closesAt: editSessionNewCpClosesAt.value,
     startTime: editSessionNewCpOpensAt.value,
     endTime: editSessionNewCpClosesAt.value,
+    lateUntil: editSessionNewCpType.value === 'IN' && editSessionNewCpLateUntil.value.trim() ? editSessionNewCpLateUntil.value.trim() : undefined,
     orderIndex: editSessionCheckpoints.value.length,
   });
   editSessionNewCpLabel.value = '';
+  editSessionNewCpLateUntil.value = '';
 }
 
 function removeEditSessionCheckpoint(idx: number) {
@@ -560,7 +589,8 @@ async function handleSaveSessionChanges() {
       cp.closesAt || cp.endTime || '',
       editSessionStartTime.value,
       editSessionEndTime.value,
-      cp.label
+      cp.label,
+      cp.type === 'IN' ? (cp.lateUntil || undefined) : undefined
     );
     if (err) {
       editSessionError.value = err;
@@ -638,7 +668,7 @@ async function handleConfirmDeleteSession() {
   }
 }
 
-function downloadAttendanceCsv() {
+async function downloadAttendanceCsv() {
   if (!selectedOccurrence.value) return;
   const occ = selectedOccurrence.value;
   const cps = occ.checkpoints && occ.checkpoints.length > 0
@@ -666,16 +696,20 @@ function downloadAttendanceCsv() {
     exportParticipants
   );
 
-  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement('a');
-  link.setAttribute('href', url);
-  link.setAttribute('download', `attendance_${occ.title.replace(/\s+/g, '_')}_${occ.date}.csv`);
-  document.body.appendChild(link);
-  link.click();
-  document.body.removeChild(link);
-  URL.revokeObjectURL(url);
-  showToast('Attendance report exported as CSV', 'success');
+  const filename = `attendance_${occ.title.replace(/\s+/g, '_')}_${occ.date}.csv`;
+
+  try {
+    await exportFile({
+      filename,
+      content: csv,
+      mimeType: 'text/csv;charset=utf-8;',
+      dialogTitle: 'Export Attendance CSV',
+    });
+    showToast('Attendance report exported', 'success');
+  } catch (err: any) {
+    console.error('Failed to export attendance CSV:', err);
+    showToast(err?.message || 'Failed to export CSV.', 'error');
+  }
 }
 
 // Confirmation alert
@@ -905,7 +939,7 @@ async function handleAddSession() {
                   </div>
                   <div v-if="occ.checkpoints && occ.checkpoints.length > 0" class="occ-checkpoints-row">
                     <span v-for="cp in occ.checkpoints" :key="cp.id" class="occ-cp-badge" :class="{ 'type-out': cp.type === 'OUT' }">
-                      {{ cp.label }} ({{ cp.type }}): {{ formatTime(cp.opensAt || cp.startTime) }} – {{ formatTime(cp.closesAt || cp.endTime) }}
+                      {{ cp.label }} ({{ cp.type }}): {{ formatTime(cp.opensAt || cp.startTime) }} – {{ formatTime(cp.closesAt || cp.endTime) }}<template v-if="cp.lateUntil"> • Late until {{ formatTime(cp.lateUntil) }}</template>
                     </span>
                   </div>
                 </div>
@@ -1158,7 +1192,10 @@ async function handleAddSession() {
                 <span class="cp-type-tag" :class="{ 'type-out': cp.type === 'OUT' }">{{ cp.type }}</span>
                 <div class="cp-text-group">
                   <span class="cp-label-name">{{ cp.label }}</span>
-                  <span class="cp-time-window font-mono">{{ formatTime(cp.opensAt || cp.startTime) }} – {{ formatTime(cp.closesAt || cp.endTime) }}</span>
+                  <span class="cp-time-window font-mono">
+                    {{ formatTime(cp.opensAt || cp.startTime) }} – {{ formatTime(cp.closesAt || cp.endTime) }}
+                    <template v-if="cp.lateUntil"> (Late until {{ formatTime(cp.lateUntil) }})</template>
+                  </span>
                 </div>
               </div>
               <button
@@ -1201,7 +1238,7 @@ async function handleAddSession() {
                     class="template-added-icon"
                   />
                 </div>
-                <span class="template-chip-time font-mono">{{ preset.opensAt }} – {{ preset.closesAt }}</span>
+                <span class="template-chip-time font-mono">{{ preset.opensAt }} – {{ preset.closesAt }}<template v-if="preset.lateUntil"> (Late: {{ preset.lateUntil }})</template></span>
               </button>
             </div>
           </div>
@@ -1217,12 +1254,15 @@ async function handleAddSession() {
                 <UniSelect v-model="newCpType" :options="checkpointTypeOptions" />
               </UniFormField>
             </div>
-            <div class="time-grid" style="margin-top: 8px; margin-bottom: 12px;">
+            <div class="time-grid" :class="{ 'has-late': newCpType === 'IN' }" style="margin-top: 8px; margin-bottom: 12px;">
               <UniFormField label="Opens At" :required="true">
                 <UniInput v-model="newCpOpensAt" type="time" />
               </UniFormField>
-              <UniFormField label="Closes At" :required="true">
+              <UniFormField label="On-Time Until" :required="true">
                 <UniInput v-model="newCpClosesAt" type="time" />
+              </UniFormField>
+              <UniFormField v-if="newCpType === 'IN'" label="Accept Late Until (Optional)">
+                <UniInput v-model="newCpLateUntil" type="time" />
               </UniFormField>
             </div>
             <UniButton
@@ -1473,7 +1513,10 @@ async function handleAddSession() {
                   <span class="cp-type-tag" :class="{ 'type-out': cp.type === 'OUT' }">{{ cp.type }}</span>
                   <div class="cp-text-group">
                     <span class="cp-label-name">{{ cp.label }}</span>
-                    <span class="cp-time-window font-mono">{{ formatTime(cp.opensAt || cp.startTime) }} – {{ formatTime(cp.closesAt || cp.endTime) }}</span>
+                    <span class="cp-time-window font-mono">
+                      {{ formatTime(cp.opensAt || cp.startTime) }} – {{ formatTime(cp.closesAt || cp.endTime) }}
+                      <template v-if="cp.lateUntil"> (Late until {{ formatTime(cp.lateUntil) }})</template>
+                    </span>
                   </div>
                 </div>
                 <button
@@ -1516,7 +1559,7 @@ async function handleAddSession() {
                       class="template-added-icon"
                     />
                   </div>
-                  <span class="template-chip-time font-mono">{{ preset.opensAt }} – {{ preset.closesAt }}</span>
+                  <span class="template-chip-time font-mono">{{ preset.opensAt }} – {{ preset.closesAt }}<template v-if="preset.lateUntil"> (Late: {{ preset.lateUntil }})</template></span>
                 </button>
               </div>
             </div>
@@ -1531,12 +1574,15 @@ async function handleAddSession() {
                   <UniSelect v-model="editSessionNewCpType" :options="checkpointTypeOptions" />
                 </UniFormField>
               </div>
-              <div class="time-grid" style="margin-top: 8px; margin-bottom: 12px;">
+              <div class="time-grid" :class="{ 'has-late': editSessionNewCpType === 'IN' }" style="margin-top: 8px; margin-bottom: 12px;">
                 <UniFormField label="Opens At" :required="true">
                   <UniInput v-model="editSessionNewCpOpensAt" type="time" />
                 </UniFormField>
-                <UniFormField label="Closes At" :required="true">
+                <UniFormField label="On-Time Until" :required="true">
                   <UniInput v-model="editSessionNewCpClosesAt" type="time" />
+                </UniFormField>
+                <UniFormField v-if="editSessionNewCpType === 'IN'" label="Accept Late Until (Optional)">
+                  <UniInput v-model="editSessionNewCpLateUntil" type="time" />
                 </UniFormField>
               </div>
               <UniButton
@@ -2184,6 +2230,10 @@ async function handleAddSession() {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 10px;
+}
+
+.time-grid.has-late {
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
 }
 
 .primary-submit-btn {

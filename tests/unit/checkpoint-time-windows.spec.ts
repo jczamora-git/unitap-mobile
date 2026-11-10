@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll, beforeEach } from 'vitest';
 import { resetDatabaseForTests, getDatabase } from '@/database/database';
-import { attendanceService } from '@/services/attendance.service';
+import { attendanceService, evaluateCheckpointWindow } from '@/services/attendance.service';
 import { eventService } from '@/services/event.service';
 import { StudentsRepository } from '@/database/repositories/students.repository';
 import { CardsRepository } from '@/database/repositories/cards.repository';
@@ -673,6 +673,302 @@ describe('Configurable Attendance Checkpoints with Individual Scan Windows', () 
       expect(checkDuplicate('  MORNING IN  ')).toBe(true);
       expect(checkDuplicate('Morning OUT')).toBe(false);
       expect(checkDuplicate('Afternoon IN')).toBe(false);
+    });
+  });
+
+  describe('6. Late Attendance Window Enforcement (User Scenarios)', () => {
+    const testDate = '2026-11-10';
+    const lateOccurrenceId = 'occ_late_scenarios';
+
+    const morningInCheckpoint: AttendanceCheckpoint = {
+      id: 'cp_morning_in_late_test',
+      label: 'Morning IN',
+      type: 'IN',
+      opensAt: '07:00',
+      closesAt: '08:30',
+      lateUntil: '11:30',
+      startTime: '07:00',
+      endTime: '08:30',
+      orderIndex: 0,
+    };
+
+    const morningOutCheckpoint: AttendanceCheckpoint = {
+      id: 'cp_morning_out_late_test',
+      label: 'Morning OUT',
+      type: 'OUT',
+      opensAt: '11:30',
+      closesAt: '12:30',
+      startTime: '11:30',
+      endTime: '12:30',
+      orderIndex: 1,
+    };
+
+    describe('A. Pure Checkpoint Window Evaluation Logic', () => {
+      it('evaluates 7:30 AM as PRESENT (within on-time window)', () => {
+        const result = evaluateCheckpointWindow(testDate, morningInCheckpoint, '2026-11-10T07:30:00+08:00');
+        expect(result.status).toBe('PRESENT');
+        expect(result.isBeforeOpen).toBe(false);
+        expect(result.isClosed).toBe(false);
+        expect(result.isLate).toBe(false);
+      });
+
+      it('evaluates 8:30 AM as PRESENT (at on-time boundary)', () => {
+        const result = evaluateCheckpointWindow(testDate, morningInCheckpoint, '2026-11-10T08:30:00+08:00');
+        expect(result.status).toBe('PRESENT');
+        expect(result.isBeforeOpen).toBe(false);
+        expect(result.isClosed).toBe(false);
+        expect(result.isLate).toBe(false);
+      });
+
+      it('evaluates 8:31 AM as LATE (1 minute past on-time boundary)', () => {
+        const result = evaluateCheckpointWindow(testDate, morningInCheckpoint, '2026-11-10T08:31:00+08:00');
+        expect(result.status).toBe('LATE');
+        expect(result.isBeforeOpen).toBe(false);
+        expect(result.isClosed).toBe(false);
+        expect(result.isLate).toBe(true);
+      });
+
+      it('evaluates 10:34 AM as LATE (within late acceptance window)', () => {
+        const result = evaluateCheckpointWindow(testDate, morningInCheckpoint, '2026-11-10T10:34:00+08:00');
+        expect(result.status).toBe('LATE');
+        expect(result.isBeforeOpen).toBe(false);
+        expect(result.isClosed).toBe(false);
+        expect(result.isLate).toBe(true);
+      });
+
+      it('evaluates 11:30 AM as LATE (at exact late window cutoff)', () => {
+        const result = evaluateCheckpointWindow(testDate, morningInCheckpoint, '2026-11-10T11:30:00+08:00');
+        expect(result.status).toBe('LATE');
+        expect(result.isBeforeOpen).toBe(false);
+        expect(result.isClosed).toBe(false);
+        expect(result.isLate).toBe(true);
+      });
+
+      it('evaluates 11:31 AM as CHECKPOINT_CLOSED (after late acceptance window cutoff)', () => {
+        const result = evaluateCheckpointWindow(testDate, morningInCheckpoint, '2026-11-10T11:31:00+08:00');
+        expect(result.isClosed).toBe(true);
+        expect(result.isBeforeOpen).toBe(false);
+        expect(result.status).toBe('ABSENT');
+        expect(result.errorMessage).toContain('scanning window has closed');
+      });
+
+      it('evaluates 6:59 AM as CHECKPOINT_NOT_OPEN (before opening time)', () => {
+        const result = evaluateCheckpointWindow(testDate, morningInCheckpoint, '2026-11-10T06:59:00+08:00');
+        expect(result.isBeforeOpen).toBe(true);
+        expect(result.isClosed).toBe(false);
+        expect(result.errorMessage).toContain('not open for scanning yet');
+      });
+
+      it('evaluates OUT checkpoint without late window: closed past closesAt', () => {
+        // At 12:00 PM -> PRESENT
+        const inside = evaluateCheckpointWindow(testDate, morningOutCheckpoint, '2026-11-10T12:00:00+08:00');
+        expect(inside.status).toBe('PRESENT');
+        expect(inside.isClosed).toBe(false);
+
+        // At 12:31 PM -> CLOSED (OUT checkpoints do not accept late scans)
+        const closed = evaluateCheckpointWindow(testDate, morningOutCheckpoint, '2026-11-10T12:31:00+08:00');
+        expect(closed.isClosed).toBe(true);
+      });
+    });
+
+    describe('B. End-to-End Attendance Service with Late Windows', () => {
+      beforeAll(async () => {
+        await EventsRepository.createOccurrence({
+          id: lateOccurrenceId,
+          event_id: eventId,
+          title: 'Late Window Test Session',
+          occurs_on: testDate,
+          starts_at: '08:00:00',
+          ends_at: '17:00:00',
+          grace_minutes: 0,
+          status: 'OPEN',
+          checkpoints_json: JSON.stringify([morningInCheckpoint, morningOutCheckpoint]),
+          active_checkpoint_id: morningInCheckpoint.id,
+          updated_at: new Date().toISOString(),
+        });
+      });
+
+      beforeEach(async () => {
+        const db = await getDatabase();
+        await db.execute('DELETE FROM attendance_audit WHERE attendance_id IN (SELECT id FROM attendance_records WHERE occurrence_id = ?)', [lateOccurrenceId]);
+        await db.execute('DELETE FROM attendance_records WHERE occurrence_id = ?', [lateOccurrenceId]);
+      });
+
+      it('Scenario 1: 7:30 AM records PRESENT', async () => {
+        const scanTime = `${testDate}T07:30:00`;
+        const res = await attendanceService.confirmStudentAttendance(
+          lateOccurrenceId,
+          testStudent.id,
+          'officer_window_1',
+          undefined,
+          undefined,
+          testStudent.cardUid,
+          'idem_late_scen_1',
+          scanTime,
+          'NFC',
+          morningInCheckpoint.id
+        );
+        expect(res.status).toBe('RECORDED');
+
+        const rec = await AttendanceRepository.getRecord(lateOccurrenceId, testStudent.id, morningInCheckpoint.id);
+        expect(rec).not.toBeNull();
+        expect(rec?.status).toBe('PRESENT');
+      });
+
+      it('Scenario 2: 8:30 AM records PRESENT', async () => {
+        const scanTime = `${testDate}T08:30:00`;
+        const res = await attendanceService.confirmStudentAttendance(
+          lateOccurrenceId,
+          testStudent.id,
+          'officer_window_1',
+          undefined,
+          undefined,
+          testStudent.cardUid,
+          'idem_late_scen_2',
+          scanTime,
+          'NFC',
+          morningInCheckpoint.id
+        );
+        expect(res.status).toBe('RECORDED');
+
+        const rec = await AttendanceRepository.getRecord(lateOccurrenceId, testStudent.id, morningInCheckpoint.id);
+        expect(rec?.status).toBe('PRESENT');
+      });
+
+      it('Scenario 3: 8:31 AM records LATE', async () => {
+        const scanTime = `${testDate}T08:31:00`;
+        const res = await attendanceService.confirmStudentAttendance(
+          lateOccurrenceId,
+          testStudent.id,
+          'officer_window_1',
+          undefined,
+          undefined,
+          testStudent.cardUid,
+          'idem_late_scen_3',
+          scanTime,
+          'NFC',
+          morningInCheckpoint.id
+        );
+        expect(res.status).toBe('RECORDED');
+
+        const rec = await AttendanceRepository.getRecord(lateOccurrenceId, testStudent.id, morningInCheckpoint.id);
+        expect(rec?.status).toBe('LATE');
+      });
+
+      it('Scenario 4: 10:34 AM records LATE', async () => {
+        const scanTime = `${testDate}T10:34:00`;
+        const res = await attendanceService.confirmStudentAttendance(
+          lateOccurrenceId,
+          testStudent.id,
+          'officer_window_1',
+          undefined,
+          undefined,
+          testStudent.cardUid,
+          'idem_late_scen_4',
+          scanTime,
+          'NFC',
+          morningInCheckpoint.id
+        );
+        expect(res.status).toBe('RECORDED');
+
+        const rec = await AttendanceRepository.getRecord(lateOccurrenceId, testStudent.id, morningInCheckpoint.id);
+        expect(rec?.status).toBe('LATE');
+      });
+
+      it('Scenario 5: 11:31 AM is rejected with CHECKPOINT_CLOSED', async () => {
+        const scanTime = `${testDate}T11:31:00`;
+        await expect(
+          attendanceService.confirmStudentAttendance(
+            lateOccurrenceId,
+            testStudent.id,
+            'officer_window_1',
+            undefined,
+            undefined,
+            testStudent.cardUid,
+            'idem_late_scen_5',
+            scanTime,
+            'NFC',
+            morningInCheckpoint.id
+          )
+        ).rejects.toThrow(/scanning window has closed/i);
+
+        const rec = await AttendanceRepository.getRecord(lateOccurrenceId, testStudent.id, morningInCheckpoint.id);
+        expect(rec).toBeNull();
+      });
+
+      it('Scenario 6: Duplicate tap prevention per student and checkpoint', async () => {
+        const scanTime = `${testDate}T08:00:00`;
+        // First tap succeeds
+        const first = await attendanceService.confirmStudentAttendance(
+          lateOccurrenceId,
+          testStudent.id,
+          'officer_window_1',
+          undefined,
+          undefined,
+          testStudent.cardUid,
+          'idem_dupe_1',
+          scanTime,
+          'NFC',
+          morningInCheckpoint.id
+        );
+        expect(first.status).toBe('RECORDED');
+
+        // Second tap on the same checkpoint returns ALREADY_RECORDED
+        const second = await attendanceService.confirmStudentAttendance(
+          lateOccurrenceId,
+          testStudent.id,
+          'officer_window_1',
+          undefined,
+          undefined,
+          testStudent.cardUid,
+          'idem_dupe_2',
+          scanTime,
+          'NFC',
+          morningInCheckpoint.id
+        );
+        expect(second.status).toBe('ALREADY_RECORDED');
+        expect(second.message).toMatch(/already recorded/i);
+      });
+
+      it('Scenario 7: IN and OUT checkpoints remain independent', async () => {
+        // Record Morning IN at 08:00 -> PRESENT
+        await attendanceService.confirmStudentAttendance(
+          lateOccurrenceId,
+          testStudent.id,
+          'officer_window_1',
+          undefined,
+          undefined,
+          testStudent.cardUid,
+          'idem_indep_in',
+          `${testDate}T08:00:00`,
+          'NFC',
+          morningInCheckpoint.id
+        );
+
+        // Switch to Morning OUT
+        await eventService.setActiveCheckpoint(lateOccurrenceId, morningOutCheckpoint.id);
+
+        // Record Morning OUT at 12:00 -> PRESENT (not blocked by Morning IN)
+        const outRes = await attendanceService.confirmStudentAttendance(
+          lateOccurrenceId,
+          testStudent.id,
+          'officer_window_1',
+          undefined,
+          undefined,
+          testStudent.cardUid,
+          'idem_indep_out',
+          `${testDate}T12:00:00`,
+          'NFC',
+          morningOutCheckpoint.id
+        );
+        expect(outRes.status).toBe('RECORDED');
+
+        // Both records exist independently
+        const inRec = await AttendanceRepository.getRecord(lateOccurrenceId, testStudent.id, morningInCheckpoint.id);
+        const outRec = await AttendanceRepository.getRecord(lateOccurrenceId, testStudent.id, morningOutCheckpoint.id);
+        expect(inRec?.status).toBe('PRESENT');
+        expect(outRec?.status).toBe('PRESENT');
+      });
     });
   });
 });

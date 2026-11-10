@@ -268,14 +268,20 @@ export class FinanceService {
 
   async getAbsenteeCandidates(
     occurrenceId: string,
-    ruleId?: string
+    ruleId?: string,
+    checkpointId?: string
   ): Promise<{
     summary: OccurrenceAbsenteeSummary;
     candidates: AbsenteeCandidate[];
   }> {
-    // Ensure authoritative roster is populated from semester enrollments
-    await FinanceRepository.ensureFinalizedRoster(occurrenceId);
-    return FinanceRepository.getAbsenteeCandidates(occurrenceId, ruleId);
+    if (!DataModeService.isDirectSupabase()) {
+      try {
+        await FinanceRepository.ensureFinalizedRoster(occurrenceId);
+      } catch (err) {
+        console.warn('[FinanceService] ensureFinalizedRoster notice:', err);
+      }
+    }
+    return FinanceRepository.getAbsenteeCandidates(occurrenceId, ruleId, checkpointId);
   }
 
   async assessBulkFines(params: BulkFineAssessmentParams): Promise<BulkFineAssessmentResult> {

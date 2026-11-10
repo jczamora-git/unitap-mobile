@@ -1074,26 +1074,257 @@ export class FinanceRepository {
    * Identifies all eligible absentees for an occurrence.
    *
    * Business Rules:
-   * 1. Occurrence must be CLOSED (attendance finalized).
-   * 2. Student is in event_participants with attendance_required = 1.
-   * 3. Student has excused = 0.
-   * 4. Student has NO attendance record with status IN ('PRESENT', 'LATE', 'EXCUSED')
-   *    (Voided attendance does not count as attendance).
-   * 5. Checks whether student is already fined for this occurrence and rule.
+   * 1. Derives expected students from event audience configuration (all, year, section, program) and semester enrollments.
+   * 2. Evaluates attendance across all configured checkpoints.
+   * 3. Whole-Event Mode: absence means 0 qualifying attendance scans across required checkpoints (partial attendance is not whole absence).
+   * 4. Per-Checkpoint Mode: absence means missing that specific checkpoint.
+   * 5. CLOSED sessions remain selectable; open/future checkpoints show provisional status without premature finalization.
+   * 6. Checks whether student is already fined for this occurrence and checkpoint/rule to prevent duplicates.
    */
   public static async getAbsenteeCandidates(
     occurrenceId: string,
     ruleId?: string,
+    checkpointId?: string,
     adapter?: DatabaseAdapter
   ): Promise<{
     summary: OccurrenceAbsenteeSummary;
     candidates: AbsenteeCandidate[];
   }> {
+    const { eventService } = await import('@/services/event.service');
+
+    if (!adapter && DataModeService.isDirectSupabase()) {
+      const rawOccId = occurrenceId.startsWith('occ_') ? occurrenceId.replace(/^occ_/, '') : occurrenceId;
+
+      const { data: occ, error: occErr } = await supabase
+        .from('event_occurrences')
+        .select('*')
+        .eq('id', rawOccId)
+        .maybeSingle();
+
+      if (occErr || !occ) {
+        throw new Error(`Occurrence ${occurrenceId} not found on Supabase.`);
+      }
+
+      const { data: event, error: evtErr } = await supabase
+        .from('events')
+        .select('*')
+        .eq('id', occ.event_id)
+        .maybeSingle();
+
+      if (evtErr || !event) {
+        throw new Error(`Parent event not found on Supabase.`);
+      }
+
+      const checkpoints = eventService.parseCheckpoints(occ);
+
+      let audienceConfig: any = {};
+      try {
+        audienceConfig = typeof event.audience_json === 'string'
+          ? JSON.parse(event.audience_json)
+          : (event.audience_json || {});
+      } catch {
+        audienceConfig = {};
+      }
+
+      // Query semester enrollments joined with students
+      const { data: enrollments } = await supabase
+        .from('student_enrollments')
+        .select('id, student_id, year_level, section, students!inner(id, school_id, first_name, middle_name, last_name, status, program_id)')
+        .eq('semester_id', event.semester_id)
+        .eq('students.status', 'ACTIVE');
+
+      let expectedStudents: Array<{
+        student_id: string;
+        school_id: string;
+        full_name: string;
+        year_level: number;
+        section: string;
+        excused: boolean;
+      }> = [];
+
+      if (enrollments && enrollments.length > 0) {
+        const filtered = enrollments.filter((enr: any) => {
+          const stu = enr.students;
+          if (event.audience_type === 'YEAR' || audienceConfig.type === 'YEAR_LEVEL') {
+            const allowed = audienceConfig.yearLevels || [];
+            return allowed.length === 0 || allowed.includes(enr.year_level);
+          }
+          if (event.audience_type === 'SECTION' || audienceConfig.type === 'SECTION') {
+            const allowed = (audienceConfig.sections || []).map((s: string) => s.toLowerCase());
+            return allowed.length === 0 || allowed.includes(enr.section?.toLowerCase());
+          }
+          if (event.audience_type === 'PROGRAM' || audienceConfig.type === 'PROGRAM') {
+            const allowed = (audienceConfig.programs || audienceConfig.programIds || []).map((p: string) => p.toLowerCase());
+            return allowed.length === 0 || allowed.includes(stu?.program_id?.toLowerCase());
+          }
+          if (audienceConfig.type === 'CUSTOM' && Array.isArray(audienceConfig.studentIds)) {
+            return audienceConfig.studentIds.includes(enr.student_id);
+          }
+          return true;
+        });
+
+        expectedStudents = filtered.map((enr: any) => {
+          const s = enr.students;
+          const mid = s.middle_name ? ` ${s.middle_name}` : '';
+          return {
+            student_id: s.id,
+            school_id: s.school_id,
+            full_name: `${s.last_name}, ${s.first_name}${mid}`,
+            year_level: enr.year_level || 1,
+            section: enr.section || 'N/A',
+            excused: false,
+          };
+        });
+      } else {
+        const { data: stus } = await supabase.from('students').select('*').eq('status', 'ACTIVE');
+        expectedStudents = (stus || []).map((s: any) => {
+          const mid = s.middle_name ? ` ${s.middle_name}` : '';
+          return {
+            student_id: s.id,
+            school_id: s.school_id,
+            full_name: `${s.last_name}, ${s.first_name}${mid}`,
+            year_level: 1,
+            section: 'N/A',
+            excused: false,
+          };
+        });
+      }
+
+      // Query attendance records for occurrence
+      const { data: attendanceData } = await supabase
+        .from('attendance_records')
+        .select('id, student_id, checkpoint_id, status')
+        .eq('occurrence_id', rawOccId);
+
+      const attendanceRecords = attendanceData || [];
+
+      // Query active obligations for occurrence
+      const { data: obligationData } = await supabase
+        .from('student_obligations')
+        .select('id, student_id, rule_id, title, status')
+        .eq('related_occurrence_id', rawOccId)
+        .eq('status', 'ACTIVE');
+
+      const obligations = obligationData || [];
+
+      // Checkpoint statistics
+      const checkpointStats = checkpoints.map((cp) => {
+        const attended = expectedStudents.filter((s) => {
+          return attendanceRecords.some(
+            (ar) => ar.student_id === s.student_id && ar.checkpoint_id === cp.id && ['PRESENT', 'LATE', 'EXCUSED'].includes(ar.status)
+          );
+        }).length;
+
+        let status: 'SCHEDULED' | 'OPEN' | 'CLOSED' | 'CANCELLED' = occ.status as any;
+        return {
+          checkpointId: cp.id,
+          label: cp.label,
+          type: cp.type,
+          status,
+          attendedCount: attended,
+          missingCount: Math.max(0, expectedStudents.length - attended),
+        };
+      });
+
+      let presentCount = 0;
+      let lateCount = 0;
+      let excusedCount = 0;
+      for (const ar of attendanceRecords) {
+        if (ar.status === 'PRESENT') presentCount++;
+        else if (ar.status === 'LATE') lateCount++;
+        else if (ar.status === 'EXCUSED') excusedCount++;
+      }
+
+      const targetCp = checkpointId ? checkpoints.find((c) => c.id === checkpointId) : null;
+      const candidates: AbsenteeCandidate[] = [];
+
+      for (const stu of expectedStudents) {
+        const stuAtts = attendanceRecords.filter((ar) => ar.student_id === stu.student_id && ['PRESENT', 'LATE', 'EXCUSED'].includes(ar.status));
+        const attendedCpIds = stuAtts.map((ar) => ar.checkpoint_id);
+        const missedCps = checkpoints.filter((cp) => !attendedCpIds.includes(cp.id)).map((cp) => cp.label);
+
+        if (targetCp) {
+          if (attendedCpIds.includes(targetCp.id)) continue;
+
+          const alreadyFined = obligations.some((o) => {
+            if (o.student_id !== stu.student_id) return false;
+            return o.title?.toLowerCase().includes(targetCp.label.toLowerCase()) ||
+                   o.title?.includes(targetCp.id) ||
+                   (ruleId && o.rule_id === ruleId);
+          });
+
+          candidates.push({
+            studentId: stu.student_id,
+            schoolId: stu.school_id,
+            fullName: stu.full_name,
+            yearLevel: stu.year_level,
+            section: stu.section,
+            occurrenceId,
+            attendanceRequired: true,
+            excused: stu.excused,
+            alreadyFined,
+            selected: !alreadyFined,
+            attendanceStatus: 'ABSENT',
+            missedCheckpoints: missedCps,
+            attendedCheckpoints: attendedCpIds,
+          });
+        } else {
+          // Whole-Event: 0 qualifying attendance records across all checkpoints
+          if (stuAtts.length > 0) continue;
+
+          const alreadyFined = obligations.some((o) => {
+            if (o.student_id !== stu.student_id) return false;
+            return (!ruleId || o.rule_id === ruleId);
+          });
+
+          candidates.push({
+            studentId: stu.student_id,
+            schoolId: stu.school_id,
+            fullName: stu.full_name,
+            yearLevel: stu.year_level,
+            section: stu.section,
+            occurrenceId,
+            attendanceRequired: true,
+            excused: stu.excused,
+            alreadyFined,
+            selected: !alreadyFined,
+            attendanceStatus: 'ABSENT',
+            missedCheckpoints: missedCps,
+            attendedCheckpoints: [],
+          });
+        }
+      }
+
+      const alreadyFinedCount = candidates.filter((c) => c.alreadyFined).length;
+      const eligibleForFineCount = candidates.filter((c) => !c.alreadyFined).length;
+
+      const summary: OccurrenceAbsenteeSummary = {
+        occurrenceId,
+        occurrenceTitle: occ.title,
+        eventTitle: event.title,
+        occursOn: occ.occurs_on,
+        sessionStatus: occ.status,
+        totalRequired: expectedStudents.length,
+        presentCount,
+        lateCount,
+        excusedCount,
+        absentCount: candidates.length,
+        alreadyFinedCount,
+        eligibleForFineCount,
+        isAuthoritativeRosterFinalized: expectedStudents.length > 0,
+        checkpoints: checkpointStats,
+        activeMode: targetCp ? 'PER_CHECKPOINT' : 'WHOLE_EVENT',
+        selectedCheckpointId: targetCp ? targetCp.id : null,
+      };
+
+      return { summary, candidates };
+    }
+
+    // --- SQLite Engine Branch ---
     const db = await this.getDb(adapter);
 
-    // 1. Fetch occurrence and parent event
-    const occ = await db.queryOne<EventOccurrenceRecord & { event_title: string; semester_id: string }>(
-      `SELECT o.*, e.title as event_title, e.semester_id
+    const occ = await db.queryOne<EventOccurrenceRecord & { event_title: string; semester_id: string; audience_type: string; audience_json?: string }>(
+      `SELECT o.*, e.title as event_title, e.semester_id, e.audience_type, e.audience_json
        FROM event_occurrences o
        JOIN events e ON e.id = o.event_id
        WHERE o.id = ?`,
@@ -1103,112 +1334,237 @@ export class FinanceRepository {
       throw new Error(`Occurrence ${occurrenceId} not found.`);
     }
 
-    // 2. Fetch participant stats
-    const totalRequiredRow = await db.queryOne<{ count: number }>(
-      `SELECT count(*) as count FROM event_participants
-       WHERE occurrence_id = ? AND attendance_required = 1`,
-      [occurrenceId]
-    );
-    const totalRequired = totalRequiredRow?.count || 0;
+    const checkpoints = eventService.parseCheckpoints(occ);
 
-    const excusedRosterRow = await db.queryOne<{ count: number }>(
-      `SELECT count(*) as count FROM event_participants
-       WHERE occurrence_id = ? AND excused = 1`,
-      [occurrenceId]
-    );
-    const excusedRosterCount = excusedRosterRow?.count || 0;
-
-    // 3. Attendance breakdown
-    const attendanceStats = await db.query<{ status: string; count: number }>(
-      `SELECT status, count(*) as count
-       FROM attendance_records
-       WHERE occurrence_id = ?
-       GROUP BY status`,
-      [occurrenceId]
-    );
-
-    let presentCount = 0;
-    let lateCount = 0;
-    let excusedAttendanceCount = 0;
-
-    for (const stat of attendanceStats) {
-      if (stat.status === 'PRESENT') presentCount = stat.count;
-      else if (stat.status === 'LATE') lateCount = stat.count;
-      else if (stat.status === 'EXCUSED') excusedAttendanceCount = stat.count;
-    }
-
-    const totalExcused = excusedRosterCount + excusedAttendanceCount;
-
-    // 4. Query Absentees using authoritative SQL logic
-    // Parameterized and accounts for voided attendance, excuses, and existing fines
-    const sql = `
-      SELECT
-        s.id AS student_id,
-        s.school_id,
-        (s.last_name || ', ' || s.first_name || (CASE WHEN s.middle_name IS NOT NULL AND length(trim(s.middle_name)) > 0 THEN ' ' || s.middle_name ELSE '' END)) AS full_name,
-        COALESCE(se.year_level, 1) AS year_level,
-        COALESCE(se.section, 'N/A') AS section,
-        ep.occurrence_id,
-        ep.attendance_required,
-        ep.excused,
-        (
-          SELECT COUNT(*)
-          FROM student_obligations so
-          WHERE so.student_id = ep.student_id
-            AND so.related_occurrence_id = ep.occurrence_id
-            AND so.status = 'ACTIVE'
-            AND (? IS NULL OR so.rule_id = ?)
-        ) AS already_fined_count
-      FROM event_participants ep
-      JOIN students s ON s.id = ep.student_id
-      JOIN event_occurrences eo ON eo.id = ep.occurrence_id
-      JOIN events ev ON ev.id = eo.event_id
-      LEFT JOIN student_enrollments se ON se.student_id = s.id AND se.semester_id = ev.semester_id
-      WHERE ep.occurrence_id = ?
-        AND ep.attendance_required = 1
-        AND ep.excused = 0
-        AND NOT EXISTS (
-          SELECT 1
-          FROM attendance_records ar
-          WHERE ar.occurrence_id = ep.occurrence_id
-            AND ar.student_id = ep.student_id
-            AND ar.status IN ('PRESENT', 'LATE', 'EXCUSED')
-        )
-      ORDER BY se.year_level ASC, se.section ASC, s.last_name ASC, s.first_name ASC
-    `;
-
-    const rows = await db.query<{
+    // Check if event_participants has records for this occurrence
+    const participants = await db.query<{
       student_id: string;
       school_id: string;
       full_name: string;
       year_level: number;
       section: string;
-      occurrence_id: string;
       attendance_required: number;
       excused: number;
-      already_fined_count: number;
-    }>(sql, [ruleId || null, ruleId || null, occurrenceId]);
+    }>(
+      `SELECT ep.student_id, s.school_id,
+              (s.last_name || ', ' || s.first_name || (CASE WHEN s.middle_name IS NOT NULL AND length(trim(s.middle_name)) > 0 THEN ' ' || s.middle_name ELSE '' END)) AS full_name,
+              COALESCE(se.year_level, 1) AS year_level,
+              COALESCE(se.section, 'N/A') AS section,
+              ep.attendance_required,
+              ep.excused
+       FROM event_participants ep
+       JOIN students s ON s.id = ep.student_id
+       LEFT JOIN student_enrollments se ON se.student_id = s.id AND se.semester_id = ?
+       WHERE ep.occurrence_id = ?`,
+      [occ.semester_id, occurrenceId]
+    );
 
-    const candidates: AbsenteeCandidate[] = rows.map((r) => {
-      const alreadyFined = r.already_fined_count > 0;
+    let expectedStudents: Array<{
+      student_id: string;
+      school_id: string;
+      full_name: string;
+      year_level: number;
+      section: string;
+      attendance_required: boolean;
+      excused: boolean;
+    }> = [];
+
+    if (participants.length > 0) {
+      expectedStudents = participants
+        .filter((p) => p.attendance_required === 1)
+        .map((p) => ({
+          student_id: p.student_id,
+          school_id: p.school_id,
+          full_name: p.full_name,
+          year_level: p.year_level,
+          section: p.section,
+          attendance_required: true,
+          excused: p.excused === 1,
+        }));
+    } else {
+      // Derive dynamically from student_enrollments + audience rules
+      const enrollments = await db.query<{
+        id: string;
+        student_id: string;
+        year_level: number;
+        section: string;
+        school_id: string;
+        first_name: string;
+        middle_name?: string;
+        last_name: string;
+        program_id?: string;
+      }>(
+        `SELECT se.id, se.student_id, se.year_level, se.section,
+                s.school_id, s.first_name, s.middle_name, s.last_name, s.program_id
+         FROM student_enrollments se
+         JOIN students s ON s.id = se.student_id
+         WHERE se.semester_id = ? AND s.status = 'ACTIVE'`,
+        [occ.semester_id]
+      );
+
+      let audienceConfig: any = {};
+      try {
+        audienceConfig = JSON.parse(occ.audience_json || '{}');
+      } catch {
+        audienceConfig = {};
+      }
+
+      const filtered = enrollments.filter((enr) => {
+        if (occ.audience_type === 'YEAR' || audienceConfig.type === 'YEAR_LEVEL') {
+          const allowed = audienceConfig.yearLevels || [];
+          return allowed.length === 0 || allowed.includes(enr.year_level);
+        }
+        if (occ.audience_type === 'SECTION' || audienceConfig.type === 'SECTION') {
+          const allowed = (audienceConfig.sections || []).map((s: string) => s.toLowerCase());
+          return allowed.length === 0 || allowed.includes(enr.section.toLowerCase());
+        }
+        if (occ.audience_type === 'PROGRAM' || audienceConfig.type === 'PROGRAM') {
+          const allowed = (audienceConfig.programs || audienceConfig.programIds || []).map((p: string) => p.toLowerCase());
+          return allowed.length === 0 || allowed.includes(enr.program_id?.toLowerCase());
+        }
+        if (audienceConfig.type === 'CUSTOM' && Array.isArray(audienceConfig.studentIds)) {
+          return audienceConfig.studentIds.includes(enr.student_id);
+        }
+        return true;
+      });
+
+      expectedStudents = filtered.map((enr) => {
+        const mid = enr.middle_name ? ` ${enr.middle_name}` : '';
+        return {
+          student_id: enr.student_id,
+          school_id: enr.school_id,
+          full_name: `${enr.last_name}, ${enr.first_name}${mid}`,
+          year_level: enr.year_level,
+          section: enr.section,
+          attendance_required: true,
+          excused: false,
+        };
+      });
+    }
+
+    // Query attendance records for occurrence
+    const attendanceRecords = await db.query<{
+      id: string;
+      student_id: string;
+      checkpoint_id: string;
+      status: string;
+    }>(
+      `SELECT id, student_id, checkpoint_id, status
+       FROM attendance_records
+       WHERE occurrence_id = ?`,
+      [occurrenceId]
+    );
+
+    // Query active obligations for occurrence
+    const obligations = await db.query<{
+      id: string;
+      student_id: string;
+      rule_id: string | null;
+      title: string;
+      status: string;
+    }>(
+      `SELECT id, student_id, rule_id, title, status
+       FROM student_obligations
+       WHERE related_occurrence_id = ? AND status = 'ACTIVE'`,
+      [occurrenceId]
+    );
+
+    // Build checkpoint statistics
+    const checkpointStats = checkpoints.map((cp) => {
+      const attended = expectedStudents.filter((s) => {
+        return attendanceRecords.some(
+          (ar) => ar.student_id === s.student_id && ar.checkpoint_id === cp.id && ['PRESENT', 'LATE', 'EXCUSED'].includes(ar.status)
+        );
+      }).length;
+
       return {
-        studentId: r.student_id,
-        schoolId: r.school_id,
-        fullName: r.full_name,
-        yearLevel: r.year_level,
-        section: r.section,
-        occurrenceId: r.occurrence_id,
-        attendanceRequired: r.attendance_required === 1,
-        excused: r.excused === 1,
-        alreadyFined,
-        selected: !alreadyFined,
-        attendanceStatus: 'ABSENT',
+        checkpointId: cp.id,
+        label: cp.label,
+        type: cp.type,
+        status: occ.status,
+        attendedCount: attended,
+        missingCount: Math.max(0, expectedStudents.length - attended),
       };
     });
 
+    let presentCount = 0;
+    let lateCount = 0;
+    let excusedAttendanceCount = 0;
+
+    for (const ar of attendanceRecords) {
+      if (ar.status === 'PRESENT') presentCount++;
+      else if (ar.status === 'LATE') lateCount++;
+      else if (ar.status === 'EXCUSED') excusedAttendanceCount++;
+    }
+
+    const excusedRosterCount = expectedStudents.filter((s) => s.excused).length;
+    const totalExcused = excusedRosterCount + excusedAttendanceCount;
+
+    const targetCp = checkpointId ? checkpoints.find((c) => c.id === checkpointId) : null;
+    const candidates: AbsenteeCandidate[] = [];
+
+    for (const stu of expectedStudents) {
+      if (stu.excused) continue;
+
+      const stuAtts = attendanceRecords.filter((ar) => ar.student_id === stu.student_id && ['PRESENT', 'LATE', 'EXCUSED'].includes(ar.status));
+      const attendedCpIds = stuAtts.map((ar) => ar.checkpoint_id);
+      const missedCps = checkpoints.filter((cp) => !attendedCpIds.includes(cp.id)).map((cp) => cp.label);
+
+      if (targetCp) {
+        if (attendedCpIds.includes(targetCp.id)) continue;
+
+        const alreadyFined = obligations.some((o) => {
+          if (o.student_id !== stu.student_id) return false;
+          return o.title?.toLowerCase().includes(targetCp.label.toLowerCase()) ||
+                 o.title?.includes(targetCp.id) ||
+                 (ruleId && o.rule_id === ruleId);
+        });
+
+        candidates.push({
+          studentId: stu.student_id,
+          schoolId: stu.school_id,
+          fullName: stu.full_name,
+          yearLevel: stu.year_level,
+          section: stu.section,
+          occurrenceId,
+          attendanceRequired: true,
+          excused: false,
+          alreadyFined,
+          selected: !alreadyFined,
+          attendanceStatus: 'ABSENT',
+          missedCheckpoints: missedCps,
+          attendedCheckpoints: attendedCpIds,
+        });
+      } else {
+        // Whole-Event: student must have 0 valid attendance records across all checkpoints
+        if (stuAtts.length > 0) continue;
+
+        const alreadyFined = obligations.some((o) => {
+          if (o.student_id !== stu.student_id) return false;
+          return (!ruleId || o.rule_id === ruleId);
+        });
+
+        candidates.push({
+          studentId: stu.student_id,
+          schoolId: stu.school_id,
+          fullName: stu.full_name,
+          yearLevel: stu.year_level,
+          section: stu.section,
+          occurrenceId,
+          attendanceRequired: true,
+          excused: false,
+          alreadyFined,
+          selected: !alreadyFined,
+          attendanceStatus: 'ABSENT',
+          missedCheckpoints: missedCps,
+          attendedCheckpoints: [],
+        });
+      }
+    }
+
     const alreadyFinedCount = candidates.filter((c) => c.alreadyFined).length;
     const eligibleForFineCount = candidates.filter((c) => !c.alreadyFined).length;
-    const absentCount = candidates.length;
+    const totalRequired = expectedStudents.length;
 
     const summary: OccurrenceAbsenteeSummary = {
       occurrenceId,
@@ -1220,10 +1576,13 @@ export class FinanceRepository {
       presentCount,
       lateCount,
       excusedCount: totalExcused,
-      absentCount,
+      absentCount: candidates.length,
       alreadyFinedCount,
       eligibleForFineCount,
       isAuthoritativeRosterFinalized: totalRequired > 0,
+      checkpoints: checkpointStats,
+      activeMode: targetCp ? 'PER_CHECKPOINT' : 'WHOLE_EVENT',
+      selectedCheckpointId: targetCp ? targetCp.id : null,
     };
 
     return { summary, candidates };
@@ -1236,13 +1595,15 @@ export class FinanceRepository {
   public static async assessBulkFines(
     params: {
       occurrenceId: string;
-      ruleId: string;
+      ruleId?: string | null;
       fineTitle: string;
       amountCentavos: number;
       dueDate?: string | null;
       studentIds: string[];
       notes?: string | null;
       actorUserId: string;
+      mode?: 'WHOLE_EVENT' | 'PER_CHECKPOINT';
+      checkpointId?: string | null;
     },
     adapter?: DatabaseAdapter
   ): Promise<BulkFineAssessmentResult> {
@@ -1253,9 +1614,142 @@ export class FinanceRepository {
       throw new Error('Fine amount must be a positive integer in centavos.');
     }
 
+    const now = new Date().toISOString();
+    let assessedCount = 0;
+    let skippedCount = 0;
+    let invalidCount = 0;
+
+    // Direct Supabase mode
+    if (!adapter && DataModeService.isDirectSupabase()) {
+      const rawOccId = params.occurrenceId.startsWith('occ_') ? params.occurrenceId.replace(/^occ_/, '') : params.occurrenceId;
+      const { data: occ, error: occErr } = await supabase
+        .from('event_occurrences')
+        .select('id, event_id, status, events(id, semester_id, title)')
+        .eq('id', rawOccId)
+        .maybeSingle();
+
+      if (occErr || !occ) throw new Error('Occurrence not found on Supabase.');
+      if (occ.status !== 'CLOSED') {
+        throw new Error('Attendance session is still open or scheduled. Fines can only be assessed on closed sessions.');
+      }
+
+      const parentEvent: any = occ.events;
+      const semesterId = parentEvent?.semester_id;
+      const rawEventId = parentEvent?.id || occ.event_id;
+
+      // Existing active obligations
+      const { data: existingObs } = await supabase
+        .from('student_obligations')
+        .select('id, student_id, rule_id, title, status')
+        .eq('related_occurrence_id', rawOccId)
+        .eq('status', 'ACTIVE');
+
+      // Attendance records
+      const { data: attendanceRecs } = await supabase
+        .from('attendance_records')
+        .select('id, student_id, checkpoint_id, status')
+        .eq('occurrence_id', rawOccId)
+        .in('status', ['PRESENT', 'LATE', 'EXCUSED']);
+
+      const attendanceMap = new Map<string, Set<string>>();
+      (attendanceRecs || []).forEach((ar: any) => {
+        if (!attendanceMap.has(ar.student_id)) attendanceMap.set(ar.student_id, new Set());
+        attendanceMap.get(ar.student_id)!.add(ar.checkpoint_id);
+      });
+
+      const batchId = this.generateUuid();
+      const insertRows: any[] = [];
+      const createdItems: StudentObligationItem[] = [];
+
+      for (const studentId of params.studentIds) {
+        const attendedCheckpoints = attendanceMap.get(studentId);
+        if (params.mode === 'PER_CHECKPOINT' && params.checkpointId) {
+          if (attendedCheckpoints && attendedCheckpoints.has(params.checkpointId)) {
+            invalidCount++;
+            continue;
+          }
+        } else {
+          // Whole event: partial attendance does not count as whole absence
+          if (attendedCheckpoints && attendedCheckpoints.size > 0) {
+            invalidCount++;
+            continue;
+          }
+        }
+
+        const isAlreadyFined = (existingObs || []).some((o: any) => {
+          if (o.student_id !== studentId) return false;
+          if (params.mode === 'PER_CHECKPOINT' && params.checkpointId) {
+            return o.title === params.fineTitle || o.title.includes(params.checkpointId);
+          }
+          return (!params.ruleId || o.rule_id === params.ruleId) || o.title === params.fineTitle;
+        });
+
+        if (isAlreadyFined) {
+          skippedCount++;
+          continue;
+        }
+
+        const obligationId = this.generateUuid();
+        insertRows.push({
+          id: obligationId,
+          student_id: studentId,
+          semester_id: semesterId,
+          rule_id: params.ruleId || null,
+          related_event_id: rawEventId,
+          related_occurrence_id: rawOccId,
+          title: params.fineTitle,
+          type: 'FINE',
+          amount_centavos: params.amountCentavos,
+          status: 'ACTIVE',
+          due_date: params.dueDate || null,
+          issued_by_user_id: params.actorUserId || null,
+          batch_id: batchId,
+          issued_at: now,
+          updated_at: now,
+        });
+
+        createdItems.push({
+          id: obligationId,
+          studentId,
+          semesterId,
+          ruleId: params.ruleId || undefined,
+          relatedEventId: rawEventId,
+          relatedOccurrenceId: rawOccId,
+          title: params.fineTitle,
+          type: 'FINE',
+          amountCentavos: params.amountCentavos,
+          paidCentavos: 0,
+          balanceCentavos: params.amountCentavos,
+          status: 'UNPAID',
+          dueDate: params.dueDate || null,
+          batchId,
+          issuedByUserId: params.actorUserId || null,
+          issuedAt: now,
+          updatedAt: now,
+        });
+
+        assessedCount++;
+      }
+
+      if (insertRows.length > 0) {
+        const { error: insertErr } = await supabase.from('student_obligations').insert(insertRows);
+        if (insertErr) throw new Error(`Failed to insert obligations on Supabase: ${insertErr.message}`);
+      }
+
+      return {
+        batchId,
+        totalSelected: params.studentIds.length,
+        assessedCount,
+        skippedCount,
+        invalidCount,
+        totalAssessedCentavos: assessedCount * params.amountCentavos,
+        createdObligations: createdItems,
+      };
+    }
+
+    // --- SQLite Engine Branch ---
     const db = await this.getDb(adapter);
 
-    // 1. Occurrence must exist and be CLOSED
     const occ = await db.queryOne<EventOccurrenceRecord & { semester_id: string }>(
       `SELECT o.*, e.semester_id
        FROM event_occurrences o
@@ -1270,53 +1764,85 @@ export class FinanceRepository {
       throw new Error('Attendance session is still open or scheduled. Fines can only be assessed on closed sessions.');
     }
 
-    // 2. Validate Rule
-    const rule = await db.queryOne<ObligationRule>('SELECT * FROM obligation_rules WHERE id = ?', [params.ruleId]);
-    if (!rule) {
-      throw new Error('Obligation fine rule not found.');
+    let rule: ObligationRule | null = null;
+    if (params.ruleId) {
+      rule = await db.queryOne<ObligationRule>('SELECT * FROM obligation_rules WHERE id = ?', [params.ruleId]);
     }
 
     const batchId = 'batch_' + Math.random().toString(36).substring(2, 10);
-    const now = new Date().toISOString();
-
     const createdObligations: StudentObligationItem[] = [];
-    let assessedCount = 0;
-    let skippedCount = 0;
-    let invalidCount = 0;
 
     await db.transaction(async (tx) => {
       const { deviceId, validActorId } = await this.ensureDeviceAndActor(tx, params.actorUserId, now);
 
       for (const studentId of params.studentIds) {
-        // A. Verify student belongs to required roster
+        // A. Verify student belongs to required roster or enrollments
+        let isRequired = false;
+        let isExcused = false;
+
         const participant = await tx.queryOne<{ attendance_required: number; excused: number }>(
           `SELECT attendance_required, excused FROM event_participants
            WHERE occurrence_id = ? AND student_id = ?`,
           [params.occurrenceId, studentId]
         );
 
-        if (!participant || participant.attendance_required !== 1 || participant.excused === 1) {
+        if (participant) {
+          isRequired = participant.attendance_required === 1;
+          isExcused = participant.excused === 1;
+        } else {
+          const enr = await tx.queryOne<{ id: string }>(
+            `SELECT id FROM student_enrollments WHERE student_id = ? AND semester_id = ?`,
+            [studentId, occ.semester_id]
+          );
+          isRequired = Boolean(enr);
+        }
+
+        if (!isRequired || isExcused) {
           invalidCount++;
           continue;
         }
 
-        // B. Verify student has NO valid attendance
-        const validAttendance = await tx.queryOne<{ id: string }>(
-          `SELECT id FROM attendance_records
-           WHERE occurrence_id = ? AND student_id = ? AND status IN ('PRESENT', 'LATE', 'EXCUSED')`,
-          [params.occurrenceId, studentId]
-        );
-        if (validAttendance) {
-          invalidCount++;
-          continue;
+        // B. Verify attendance based on mode
+        if (params.mode === 'PER_CHECKPOINT' && params.checkpointId) {
+          const checkpointAtt = await tx.queryOne<{ id: string }>(
+            `SELECT id FROM attendance_records
+             WHERE occurrence_id = ? AND student_id = ? AND checkpoint_id = ? AND status IN ('PRESENT', 'LATE', 'EXCUSED')`,
+            [params.occurrenceId, studentId, params.checkpointId]
+          );
+          if (checkpointAtt) {
+            invalidCount++;
+            continue;
+          }
+        } else {
+          // Whole event: student must have 0 valid scans across all checkpoints
+          const validAttendance = await tx.queryOne<{ id: string }>(
+            `SELECT id FROM attendance_records
+             WHERE occurrence_id = ? AND student_id = ? AND status IN ('PRESENT', 'LATE', 'EXCUSED')`,
+            [params.occurrenceId, studentId]
+          );
+          if (validAttendance) {
+            invalidCount++;
+            continue;
+          }
         }
 
-        // C. Check if already fined under same rule and occurrence
-        const alreadyFined = await tx.queryOne<{ id: string }>(
-          `SELECT id FROM student_obligations
-           WHERE student_id = ? AND rule_id = ? AND related_occurrence_id = ? AND status = 'ACTIVE'`,
-          [studentId, params.ruleId, params.occurrenceId]
-        );
+        // C. Duplicate check (idempotency)
+        let alreadyFined;
+        if (params.mode === 'PER_CHECKPOINT' && params.checkpointId) {
+          alreadyFined = await tx.queryOne<{ id: string }>(
+            `SELECT id FROM student_obligations
+             WHERE student_id = ? AND related_occurrence_id = ? AND status = 'ACTIVE'
+               AND (title = ? OR title LIKE ?)`,
+            [studentId, params.occurrenceId, params.fineTitle, `%${params.checkpointId}%`]
+          );
+        } else {
+          alreadyFined = await tx.queryOne<{ id: string }>(
+            `SELECT id FROM student_obligations
+             WHERE student_id = ? AND related_occurrence_id = ? AND status = 'ACTIVE'
+               AND (? IS NULL OR rule_id = ?)`,
+            [studentId, params.occurrenceId, params.ruleId || null, params.ruleId || null]
+          );
+        }
         if (alreadyFined) {
           skippedCount++;
           continue;
@@ -1333,10 +1859,10 @@ export class FinanceRepository {
             obligationId,
             studentId,
             occ.semester_id,
-            params.ruleId,
+            params.ruleId || null,
             occ.event_id,
             params.occurrenceId,
-            params.fineTitle || rule.name,
+            params.fineTitle || (rule ? rule.name : 'Event Absence Fine'),
             params.amountCentavos,
             params.dueDate || null,
             validActorId,
@@ -1360,10 +1886,10 @@ export class FinanceRepository {
               id: obligationId,
               student_id: studentId,
               semester_id: occ.semester_id,
-              rule_id: params.ruleId,
+              rule_id: params.ruleId || null,
               related_event_id: occ.event_id,
               related_occurrence_id: params.occurrenceId,
-              title: params.fineTitle || rule.name,
+              title: params.fineTitle || (rule ? rule.name : 'Event Absence Fine'),
               type: 'FINE',
               amount_centavos: params.amountCentavos,
               status: 'ACTIVE',
@@ -1380,10 +1906,10 @@ export class FinanceRepository {
           id: obligationId,
           studentId,
           semesterId: occ.semester_id,
-          ruleId: params.ruleId,
+          ruleId: params.ruleId || null,
           relatedEventId: occ.event_id,
           relatedOccurrenceId: params.occurrenceId,
-          title: params.fineTitle || rule.name,
+          title: params.fineTitle || (rule ? rule.name : 'Event Absence Fine'),
           type: 'FINE',
           amountCentavos: params.amountCentavos,
           paidCentavos: 0,
@@ -1411,7 +1937,7 @@ export class FinanceRepository {
           batchId,
           JSON.stringify({
             occurrence_id: params.occurrenceId,
-            rule_id: params.ruleId,
+            rule_id: params.ruleId || null,
             assessed_count: assessedCount,
             skipped_count: skippedCount,
             invalid_count: invalidCount,

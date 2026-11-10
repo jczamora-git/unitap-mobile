@@ -14,7 +14,12 @@ import {
   cashOutline,
   closeCircleOutline,
   calendarOutline,
+  downloadOutline,
+  layersOutline,
+  timerOutline,
+  informationCircleOutline,
 } from 'ionicons/icons';
+import { exportFile } from '@/utilities/file-export';
 import { financeService } from '@/services/finance.service';
 import { AcademicRepository } from '@/database/repositories/academic.repository';
 import { EventsRepository } from '@/database/repositories/events.repository';
@@ -64,10 +69,13 @@ const selectedSemesterId = ref<string>('');
 const selectedEventId = ref<string>('');
 const selectedOccurrenceId = ref<string>('');
 
-// Absentee Data
+// Absentee Data & Mode
 const isLoading = ref<boolean>(false);
 const summary = ref<OccurrenceAbsenteeSummary | null>(null);
 const candidates = ref<AbsenteeCandidate[]>([]);
+const assessmentMode = ref<'WHOLE_EVENT' | 'PER_CHECKPOINT'>('WHOLE_EVENT');
+const selectedCheckpointId = ref<string>('');
+const isExportingCsv = ref<boolean>(false);
 
 // Filters
 const searchQuery = ref<string>('');
@@ -318,22 +326,96 @@ async function loadOccurrenceAbsentees() {
   assessmentError.value = null;
 
   try {
+    const cpId = assessmentMode.value === 'PER_CHECKPOINT' ? (selectedCheckpointId.value || undefined) : undefined;
     const result = await financeService.getAbsenteeCandidates(
       selectedOccurrenceId.value,
-      selectedRuleId.value || undefined
+      selectedRuleId.value || undefined,
+      cpId
     );
     summary.value = result.summary;
     candidates.value = result.candidates;
 
+    // Automatically select first checkpoint if in PER_CHECKPOINT mode and none selected yet
+    if (assessmentMode.value === 'PER_CHECKPOINT' && !selectedCheckpointId.value && summary.value.checkpoints && summary.value.checkpoints.length > 0) {
+      selectedCheckpointId.value = summary.value.checkpoints[0].checkpointId;
+      const cpResult = await financeService.getAbsenteeCandidates(
+        selectedOccurrenceId.value,
+        selectedRuleId.value || undefined,
+        selectedCheckpointId.value
+      );
+      summary.value = cpResult.summary;
+      candidates.value = cpResult.candidates;
+    }
+
     // Set default fine title
-    if (!customFineTitle.value && summary.value) {
-      customFineTitle.value = `Absence: ${summary.value.eventTitle}`;
+    if (summary.value) {
+      if (assessmentMode.value === 'PER_CHECKPOINT') {
+        const cp = summary.value.checkpoints?.find((c) => c.checkpointId === selectedCheckpointId.value);
+        customFineTitle.value = cp ? `Absence Fine: ${cp.label}` : `Absence Fine: ${summary.value.eventTitle}`;
+      } else {
+        customFineTitle.value = `Absence Fine: ${summary.value.eventTitle}`;
+      }
     }
   } catch (err: any) {
     console.error('Failed to load occurrence absentees:', err);
     assessmentError.value = err.message || 'Error detecting absentees.';
   } finally {
     isLoading.value = false;
+  }
+}
+
+function switchAssessmentMode(mode: 'WHOLE_EVENT' | 'PER_CHECKPOINT') {
+  if (assessmentMode.value === mode) return;
+  haptics.light();
+  assessmentMode.value = mode;
+  if (mode === 'PER_CHECKPOINT' && summary.value?.checkpoints && summary.value.checkpoints.length > 0) {
+    if (!selectedCheckpointId.value) {
+      selectedCheckpointId.value = summary.value.checkpoints[0].checkpointId;
+    }
+  } else {
+    selectedCheckpointId.value = '';
+  }
+  loadOccurrenceAbsentees();
+}
+
+function selectCheckpoint(cpId: string) {
+  if (selectedCheckpointId.value === cpId) return;
+  haptics.light();
+  selectedCheckpointId.value = cpId;
+  loadOccurrenceAbsentees();
+}
+
+async function exportAbsenteesCsv() {
+  if (candidates.value.length === 0) {
+    await showToast('No absentee candidates to export.', 'warning');
+    return;
+  }
+
+  isExportingCsv.value = true;
+  try {
+    const header = 'School ID,Full Name,Year Level,Section,Status,Missed Checkpoints,Already Fined\n';
+    const rows = candidates.value.map((c) => {
+      const missed = c.missedCheckpoints && c.missedCheckpoints.length > 0 ? c.missedCheckpoints.join('; ') : 'All Checkpoints';
+      const fined = c.alreadyFined ? 'YES' : 'NO';
+      return `"${c.schoolId}","${c.fullName}",${c.yearLevel},"${c.section}","${c.attendanceStatus}","${missed}","${fined}"`;
+    }).join('\n');
+
+    const modeStr = assessmentMode.value === 'PER_CHECKPOINT' ? (selectedCheckpointId.value || 'checkpoint') : 'whole_event';
+    const filename = `absentees_${(summary.value?.eventTitle || 'event').replace(/\s+/g, '_')}_${modeStr}.csv`;
+
+    await exportFile({
+      filename,
+      content: header + rows,
+      mimeType: 'text/csv;charset=utf-8;',
+      dialogTitle: 'Export Absentees CSV',
+    });
+
+    await showToast(`Exported ${filename}`, 'success');
+  } catch (err: any) {
+    console.error('Failed to export absentees CSV:', err);
+    await showToast(err?.message || 'Failed to export CSV.', 'error');
+  } finally {
+    isExportingCsv.value = false;
   }
 }
 
@@ -398,13 +480,15 @@ async function confirmBulkAssessment() {
     const studentIds = selectedCandidates.value.map((c) => c.studentId);
     const result = await financeService.assessBulkFines({
       occurrenceId: selectedOccurrenceId.value,
-      ruleId: selectedRuleId.value,
-      fineTitle: customFineTitle.value.trim() || 'Event Absence Fine',
+      ruleId: selectedRuleId.value || undefined,
+      fineTitle: customFineTitle.value.trim() || (assessmentMode.value === 'PER_CHECKPOINT' ? 'Checkpoint Absence Fine' : 'Event Absence Fine'),
       amountCentavos: pesoToCentavos(fineAmountPesos.value),
       dueDate: dueDate.value || null,
       studentIds,
       notes: assessmentNotes.value.trim() || null,
       actorUserId: 'officer_local',
+      mode: assessmentMode.value,
+      checkpointId: assessmentMode.value === 'PER_CHECKPOINT' ? (selectedCheckpointId.value || undefined) : undefined,
     });
 
     haptics.success();
@@ -491,11 +575,11 @@ onIonViewWillEnter(initializeData);
         <template v-else-if="summary">
           <!-- Session Finalization Warning if Not CLOSED -->
           <div v-if="!isSessionClosed" class="alert-box warning-box">
-            <ion-icon :icon="alertCircleOutline" class="alert-icon" />
+            <ion-icon :icon="informationCircleOutline" class="alert-icon text-warning" />
             <div class="alert-text">
-              <strong>Attendance Session is {{ summary.sessionStatus }}</strong>
+              <strong>Provisional Attendance (Session {{ summary.sessionStatus }})</strong>
               <p>
-                Absence fines can only be assessed on officially CLOSED sessions. Please finalize attendance in the Event Manager first.
+                Showing live/provisional absentee projections. Fines can be assessed once the attendance session is officially finalized and CLOSED.
               </p>
             </div>
           </div>
@@ -508,6 +592,62 @@ onIonViewWillEnter(initializeData);
               <p>{{ assessmentError }}</p>
             </div>
           </div>
+
+          <!-- Mode & Checkpoint Selector Card -->
+          <UniCard class="mode-selector-card" padding="sm">
+            <div class="mode-header">
+              <span class="mode-title font-bold">Assessment Mode</span>
+              <div class="mode-toggle-group">
+                <button
+                  type="button"
+                  class="mode-btn"
+                  :class="{ active: assessmentMode === 'WHOLE_EVENT' }"
+                  @click="switchAssessmentMode('WHOLE_EVENT')"
+                >
+                  <ion-icon :icon="layersOutline" />
+                  <span>Whole Event Fine</span>
+                </button>
+                <button
+                  type="button"
+                  class="mode-btn"
+                  :class="{ active: assessmentMode === 'PER_CHECKPOINT' }"
+                  @click="switchAssessmentMode('PER_CHECKPOINT')"
+                >
+                  <ion-icon :icon="timerOutline" />
+                  <span>Per-Checkpoint Fine</span>
+                </button>
+              </div>
+            </div>
+
+            <!-- Checkpoint Selector Pills when in PER_CHECKPOINT mode -->
+            <div
+              v-if="assessmentMode === 'PER_CHECKPOINT' && summary.checkpoints && summary.checkpoints.length > 0"
+              class="checkpoint-pills-row"
+            >
+              <button
+                v-for="cp in summary.checkpoints"
+                :key="cp.checkpointId"
+                type="button"
+                class="cp-pill"
+                :class="{ selected: selectedCheckpointId === cp.checkpointId }"
+                @click="selectCheckpoint(cp.checkpointId)"
+              >
+                <div class="cp-pill-top">
+                  <span class="cp-pill-label font-bold">{{ cp.label }}</span>
+                  <span
+                    class="badge-mini"
+                    :class="cp.type === 'IN' ? 'badge-in' : 'badge-out'"
+                  >
+                    {{ cp.type }}
+                  </span>
+                </div>
+                <div class="cp-pill-meta">
+                  <span class="text-danger font-mono font-bold">{{ cp.missingCount }} missing</span>
+                  <span class="badge-mini badge-neutral">{{ cp.status }}</span>
+                </div>
+              </button>
+            </div>
+          </UniCard>
 
           <!-- 2. Attendance & Absentee Summary Grid -->
           <div class="summary-stats-grid">
@@ -599,6 +739,15 @@ onIonViewWillEnter(initializeData);
               <div class="btn-group">
                 <button
                   type="button"
+                  class="action-pill-btn export-btn"
+                  :disabled="filteredCandidates.length === 0 || isExportingCsv"
+                  @click="exportAbsenteesCsv"
+                >
+                  <ion-icon :icon="downloadOutline" />
+                  <span>{{ isExportingCsv ? 'Exporting...' : 'Export CSV' }}</span>
+                </button>
+                <button
+                  type="button"
                   class="action-pill-btn"
                   @click="selectAllEligible"
                 >
@@ -658,6 +807,10 @@ onIonViewWillEnter(initializeData);
                     <div class="detail-item">
                       <span class="detail-label">Attendance Record</span>
                       <span class="detail-val text-danger font-bold">Unexcused Absence</span>
+                    </div>
+                    <div class="detail-item" v-if="c.missedCheckpoints && c.missedCheckpoints.length > 0">
+                      <span class="detail-label">Missed Checkpoints</span>
+                      <span class="detail-val text-warning">{{ c.missedCheckpoints.join(', ') }}</span>
                     </div>
                     <div class="detail-item">
                       <span class="detail-label">Fine Status</span>
@@ -777,6 +930,10 @@ onIonViewWillEnter(initializeData);
             <div class="preview-row">
               <span>Event:</span>
               <strong>{{ summary?.eventTitle }}</strong>
+            </div>
+            <div class="preview-row">
+              <span>Assessment Scope:</span>
+              <strong class="text-primary">{{ assessmentMode === 'PER_CHECKPOINT' ? 'Per-Checkpoint Fine' : 'Whole-Event Fine' }}</strong>
             </div>
             <div class="preview-row">
               <span>Selected Students:</span>
@@ -1229,6 +1386,134 @@ onIonViewWillEnter(initializeData);
   justify-content: flex-end;
   gap: 10px;
   margin-top: 8px;
+}
+
+.mode-selector-card {
+  border: 1px solid var(--uni-border);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.mode-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.mode-title {
+  font-size: 13px;
+  color: var(--uni-text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.mode-toggle-group {
+  display: flex;
+  background: var(--uni-surface-secondary);
+  border: 1px solid var(--uni-border);
+  border-radius: var(--uni-radius-input, 12px);
+  padding: 3px;
+  gap: 4px;
+}
+
+.mode-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 14px;
+  border-radius: 9px;
+  border: none;
+  background: transparent;
+  color: var(--uni-text-secondary);
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.mode-btn ion-icon {
+  font-size: 16px;
+}
+
+.mode-btn.active {
+  background: var(--uni-primary);
+  color: #ffffff;
+  font-weight: 700;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+}
+
+.checkpoint-pills-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 10px;
+  padding-top: 4px;
+  border-top: 1px dashed var(--uni-border);
+}
+
+.cp-pill {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  border-radius: var(--uni-radius-card, 12px);
+  border: 1px solid var(--uni-border);
+  background: var(--uni-surface);
+  text-align: left;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.cp-pill:hover {
+  border-color: var(--uni-primary);
+}
+
+.cp-pill.selected {
+  border-color: var(--uni-primary);
+  background: rgba(15, 118, 110, 0.08);
+  box-shadow: 0 0 0 2px rgba(15, 118, 110, 0.2);
+}
+
+.cp-pill-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 6px;
+}
+
+.cp-pill-label {
+  font-size: 13px;
+  color: var(--uni-text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.cp-pill-meta {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 11px;
+}
+
+.badge-in {
+  background: rgba(16, 185, 129, 0.15);
+  color: #10b981;
+}
+
+.badge-out {
+  background: rgba(245, 158, 11, 0.15);
+  color: #f59e0b;
+}
+
+.export-btn {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  border-color: var(--uni-primary);
+  color: var(--uni-primary);
 }
 
 .offline-warning-box {

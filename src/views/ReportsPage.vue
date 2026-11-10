@@ -263,6 +263,7 @@ import { downloadOutline, printOutline, filterOutline, documentTextOutline } fro
 
 import { AcademicRepository } from '@/database/repositories/academic.repository';
 import { ReportService } from '@/services/report.service';
+import { exportFile } from '@/utilities/file-export';
 import { authService } from '@/services/auth.service';
 import { useToast } from '@/composables/useToast';
 import { formatCentavosToPesos } from '@/utilities/finance-formatters';
@@ -468,17 +469,14 @@ async function downloadPdf() {
     const pdfBytes = ReportService.generateObligationsPdf(studentReport.value, semLabel, user);
     const filename = ReportService.buildObligationsPdfFilename(currentSem);
 
-    const blob = new Blob([pdfBytes as any], { type: 'application/pdf' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = filename;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    await exportFile({
+      filename,
+      content: pdfBytes,
+      mimeType: 'application/pdf',
+      dialogTitle: 'Download Financial Obligations PDF',
+    });
 
-    await showToast(`Downloaded ${filename}`, 'success');
+    await showToast(`Saved ${filename}`, 'success');
   } catch (err: any) {
     console.error('PDF generation error:', err);
     await showToast(err?.message || 'Failed to generate PDF report.', 'error');
@@ -487,20 +485,26 @@ async function downloadPdf() {
   }
 }
 
-function exportCsv() {
+async function exportCsv() {
   const currentSem = semesters.value.find((s) => s.id === selectedSemesterId.value);
   const semLabel = currentSem ? formatAcademicPeriod(currentSem.term, currentSem.academic_year_id) : 'Semester';
   const user = authService.user.value?.username || 'Officer';
 
   const csv = ReportService.generateObligationsCsv(studentReport.value, semLabel, user);
-  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement('a');
-  link.setAttribute('href', url);
-  link.setAttribute('download', `unitap_report_${selectedSemesterId.value}.csv`);
-  document.body.appendChild(link);
-  link.click();
-  document.body.removeChild(link);
+  const filename = `unitap_report_${selectedSemesterId.value}.csv`;
+
+  try {
+    await exportFile({
+      filename,
+      content: csv,
+      mimeType: 'text/csv;charset=utf-8;',
+      dialogTitle: 'Export Financial Report CSV',
+    });
+    await showToast(`Saved ${filename}`, 'success');
+  } catch (err: any) {
+    console.error('CSV export error:', err);
+    await showToast(err?.message || 'Failed to export CSV.', 'error');
+  }
 }
 
 function openPrintPreview() {

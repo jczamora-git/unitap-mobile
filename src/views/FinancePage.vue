@@ -36,6 +36,7 @@ import type {
   PaymentReceipt,
 } from '@/types/finance';
 import { formatPeso } from '@/utilities/finance-formatters';
+import { exportFile } from '@/utilities/file-export';
 import {
   formatAcademicPeriod,
   formatObligationStatus,
@@ -289,17 +290,14 @@ async function downloadReceiptPdf() {
     const pdfBytes = financeService.generateReceiptPdf(paymentReceipt.value);
     const filename = financeService.buildReceiptPdfFilename(paymentReceipt.value.referenceNumber);
 
-    const blob = new Blob([pdfBytes as any], { type: 'application/pdf' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = filename;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    await exportFile({
+      filename,
+      content: pdfBytes,
+      mimeType: 'application/pdf',
+      dialogTitle: 'Download Official Payment Receipt',
+    });
 
-    await showToast(`Downloaded ${filename}`, 'success');
+    await showToast(`Saved ${filename}`, 'success');
   } catch (err: any) {
     console.error('Failed to generate receipt PDF:', err);
     await showToast(err?.message || 'Failed to download receipt PDF.', 'error');

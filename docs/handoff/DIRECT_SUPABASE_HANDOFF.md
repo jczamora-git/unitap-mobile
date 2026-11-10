@@ -2053,6 +2053,103 @@ The following items should be exercised during live user acceptance testing:
 | TypeScript Compiler Check | `npx vue-tsc --noEmit` | **0 errors** (Exit code 0) |
 | Production Build | `npm run build` | **SUCCESSFUL** in 27.59s (Exit code 0) |
 
+---
+
+## 28. Attendance Checkpoint Late Attendance Windows & 3-Concept Separation (2026-11-10)
+
+### 28.1. Problem & Root Cause Analysis
+
+1. **Premature Rejection of Late Attendance Scans (`CHECKPOINT_CLOSED`)**:
+   - **Symptom**: Attendance Scanner reported `CHECKPOINT_CLOSED` when an officer scanned a card for a Morning IN checkpoint (7:00 AM – 8:30 AM) at 10:34 AM, even when late attendance was intentionally intended to be accepted until noon.
+   - **Root Cause**: The scanner treated `checkpoint.closesAt` as an absolute cutoff for scanning rejection rather than separating the on-time deadline from the late acceptance cutoff.
+   - **Architectural Solution**:
+     Separated attendance timing into three distinct, first-class concepts:
+     1. **Opens At (`opensAt`)**: Earliest allowed attendance scan time. Scans before this window are rejected with `CHECKPOINT_NOT_OPEN`.
+     2. **On-Time Until (`closesAt`)**: The boundary for on-time check-in. Scans up to and including this cutoff record as `PRESENT`.
+     3. **Accept Late Until (`lateUntil`)**: The absolute final cutoff for accepting late check-ins for `IN` checkpoints. Scans between On-Time Until and Accept Late Until record as `LATE`. Scans after this cutoff reject with `CHECKPOINT_CLOSED`.
+
+### 28.2. Implementation Details
+
+1. **Domain Interfaces & Presets (`src/types/event.ts`)**:
+   - Added `lateUntil?: string` to `AttendanceCheckpoint` and `CheckpointPreset`.
+   - Updated standard `CHECKPOINT_PRESETS`:
+     - Morning IN: Opens at `07:00`, On-Time Until `08:30`, Late Until `11:30`.
+     - Morning OUT: Opens at `11:30`, Closes at `12:30` (OUT checkpoints do not use late windows).
+     - Afternoon IN: Opens at `12:30`, On-Time Until `13:30`, Late Until `16:30`.
+     - Afternoon OUT: Opens at `16:30`, Closes at `17:30`.
+
+2. **Event Service (`src/services/event.service.ts`)**:
+   - Updated `parseCheckpoints()` and `updateOccurrenceCheckpoints()` to persist and sanitize `lateUntil` for `IN` checkpoints.
+
+3. **Authoritative Evaluation Logic (`src/services/attendance.service.ts`)**:
+   - Exported `CheckpointWindowEvaluation` interface and `evaluateCheckpointWindow()` helper.
+   - Enforces timezone comparisons with explicit `Asia/Manila` (`+08:00`) epoch timestamps.
+   - Integrated evaluation directly into `prepareNfcVerificationDirect()`, `prepareNfcVerification()`, and `confirmStudentAttendance()`.
+   - Seamlessly supports backward compatibility: if `lateUntil` is not set but legacy `graceMinutes` is specified, `opensAt + graceMinutes` acts as the on-time cutoff and `closesAt` acts as the late cutoff.
+
+4. **Event Detail UI & Checkpoint Modals (`src/views/EventDetailPage.vue`)**:
+   - Updated Configure Checkpoints sheet and Edit Session sheet:
+     - Relabeled "Closes At" to "On-Time Until".
+     - Added conditional input for "Accept Late Until (Optional)" when checkpoint type is `IN`.
+     - Enhanced Quick Template chips to display `(Late: HH:MM)` when presets have late acceptance windows.
+     - Updated checkpoint display rows and session cards to render `• Late until {formatTime(lateUntil)}`.
+     - Validated that `lateUntil > closesAt` and `closesAt > opensAt`.
+
+5. **Forward-Only Database Migration (`supabase/migrations/20261110020000_checkpoint_late_attendance_windows.sql`)**:
+   - Authoritative RPC `public.record_attendance_scan` updated to parse `v_chk_late_str`, compute `v_window_late_cutoff`, enforce `CHECKPOINT_NOT_OPEN` (< windowStart) and `CHECKPOINT_CLOSED` (> late_cutoff), and mark `LATE` when `now > ontime_end && now <= late_cutoff`.
+   - SQLite migration `src/database/migrations/010_attendance_checkpoints.ts` updated with table constraint `UNIQUE(occurrence_id, student_id, checkpoint_id)`.
+
+### 28.3. Verification Results
+
+| Verification Step | Command | Result |
+| :--- | :--- | :--- |
+| Targeted Checkpoint Window & Late Scenarios Suite | `npx vitest run tests/unit/checkpoint-time-windows.spec.ts` | **37 of 37 PASSED** (Exit code 0) |
+| TypeScript Compiler Validation | `npx vue-tsc --noEmit` | **0 errors** (Exit code 0) |
+| Production Build | `npm run build` | **SUCCESSFUL** in 30.21s (Exit code 0) |
+
+---
+
+## 29. Event Absentees Detection, Configurable Absentee Fines, Canonical Checkpoints, Portal Switching & Centralized Cross-Platform File Export
+
+### 29.1. Root Causes & Fixes Implemented
+
+1. **Centralized Cross-Platform File Export (`src/utilities/file-export.ts`)**:
+   - Web downloads previously used standard anchor elements (`<a download>`) with `URL.createObjectURL(blob)`, which silently failed in Android Capacitor WebViews.
+   - Implemented `exportFile()` supporting both Web browsers (Blob URL click) and Native Android platforms (`@capacitor/filesystem` writing base64 to `Directory.Cache`, retrieving native URI, and calling `@capacitor/share` for the system download/save/share sheet).
+   - Upgraded all export touchpoints across `src/views/MakePaymentPage.vue`, `src/views/FinancePage.vue`, `src/views/ReportsPage.vue`, `src/views/EventDetailPage.vue`, `src/views/CsvImportPage.vue`, and `src/views/EventAbsenteesPage.vue`.
+
+2. **Officer Appointment Resolution & Portal Switcher Visibility (`src/services/officer-management.service.ts`)**:
+   - `OfficerManagementService` previously used `.order('created_at', { ascending: false })` on queries against `public.officer_appointments`. In Supabase, the primary timestamp column is `appointment_start` (not `created_at`). This query failed, stripping `OFFICER` from `verifiedActiveRoles`, leaving only `STUDENT` in `availablePortals`, which hid the `WorkspaceSwitcher` on Home, Student Home, and Settings.
+   - Updated all 5 `officer_appointments` query ordering clauses in `src/services/officer-management.service.ts` to order by `appointment_start`.
+
+3. **Canonical Checkpoint Initialization (`src/services/event.service.ts`)**:
+   - `createOccurrence()` now always initializes and persists a canonical `default_in` (`General Check-In`, `type: 'IN'`, `orderIndex: 0`) if custom checkpoints are omitted, and sets `active_checkpoint_id: 'default_in'`.
+   - If custom checkpoints are supplied, they are persisted directly and `parseCheckpoints()` never injects a phantom `default_in`.
+
+4. **Event Absentees Detection (`src/database/repositories/finance.repository.ts` & `src/services/finance.service.ts`)**:
+   - Replaced fragile dependence on `event_participants` table with dynamic audience derivation from `student_enrollments` + `students` filtered by audience criteria (`ALL`, `YEAR_LEVEL`, `SECTION`, `PROGRAM`, `CUSTOM`).
+   - Supports both Whole-Event Mode (0 qualifying scans across all required checkpoints; partial attendance does not count as whole absence) and Per-Checkpoint Mode (missing qualifying scan for a specific checkpoint).
+   - In-progress / OPEN sessions are selectable and show clear provisional projections without premature fine finalization.
+
+5. **Configurable Absentee Fines & Idempotence (`src/database/repositories/finance.repository.ts`)**:
+   - Supports both Direct Supabase mode and local SQLite mode with sync outbox and audit events.
+   - Enforces strict idempotence: skips students who already hold an active fine for the occurrence and rule/checkpoint.
+   - Added mode toggle between `Whole Event Fine` and `Per-Checkpoint Fine` in `src/views/EventAbsenteesPage.vue`, complete with per-checkpoint statistics, missing counts, and review sheets.
+
+### 29.2. Verification Results
+
+| Verification Step | Command | Result |
+| :--- | :--- | :--- |
+| Event Absentees & Bulk Fines Suite | `npx vitest run tests/unit/event-absentees-bulk-fines.spec.ts` | **15 of 15 PASSED** (Exit code 0) |
+| File Export Utility Suite | `npx vitest run tests/unit/file-export.spec.ts` | **3 of 3 PASSED** (Exit code 0) |
+| Portal Switching & Officer Appointments Suite | `npx vitest run tests/unit/portal-switching-and-absentee-detection.spec.ts` | **2 of 2 PASSED** (Exit code 0) |
+| Supabase Direct Diagnostic Suite | `npx vitest run tests/unit/supabase-direct-diagnostic.spec.ts` | **25 of 25 PASSED** (Exit code 0) |
+| TypeScript Compiler Validation | `npx vue-tsc --noEmit` | **0 errors** (Exit code 0) |
+| Production Build | `npm run build` | **SUCCESSFUL** in 34.85s (Exit code 0) |
+| Capacitor Android Sync | `npx cap sync android` | **SUCCESSFUL** (9 plugins synced, assets copied) |
+
+
+
 
 
 

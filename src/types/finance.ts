@@ -134,6 +134,15 @@ export interface Payment {
   allocations: PaymentAllocation[];
 }
 
+export interface CheckpointAbsenteeStat {
+  checkpointId: string;
+  label: string;
+  type: 'IN' | 'OUT';
+  status: 'SCHEDULED' | 'OPEN' | 'CLOSED' | 'CANCELLED';
+  attendedCount: number;
+  missingCount: number;
+}
+
 export interface AbsenteeCandidate {
   studentId: string;
   schoolId: string;
@@ -146,6 +155,8 @@ export interface AbsenteeCandidate {
   alreadyFined: boolean;
   selected: boolean;
   attendanceStatus: 'ABSENT' | 'NOT_ATTENDED';
+  missedCheckpoints?: string[];
+  attendedCheckpoints?: string[];
 }
 
 export interface OccurrenceAbsenteeSummary {
@@ -162,17 +173,22 @@ export interface OccurrenceAbsenteeSummary {
   alreadyFinedCount: number;
   eligibleForFineCount: number;
   isAuthoritativeRosterFinalized: boolean;
+  checkpoints?: CheckpointAbsenteeStat[];
+  activeMode?: 'WHOLE_EVENT' | 'PER_CHECKPOINT';
+  selectedCheckpointId?: string | null;
 }
 
 export interface BulkFineAssessmentParams {
   occurrenceId: string;
-  ruleId: string;
+  ruleId?: string | null;
   fineTitle: string;
   amountCentavos: number;
   dueDate?: string | null;
   studentIds: string[];
   notes?: string | null;
   actorUserId: string;
+  mode?: 'WHOLE_EVENT' | 'PER_CHECKPOINT';
+  checkpointId?: string | null;
 }
 
 export interface BulkFineAssessmentResult {

@@ -42,8 +42,9 @@ export interface AttendanceCheckpoint {
   type: CheckpointType; // 'IN' | 'OUT'
   startTime?: string; // "08:00"
   endTime?: string; // "10:00"
-  opensAt?: string; // "08:00" (Scan window opening time)
-  closesAt?: string; // "08:30" (Scan window closing time)
+  opensAt?: string; // "07:00" (Scan window opening time)
+  closesAt?: string; // "08:30" (On-Time Until / on-time cutoff)
+  lateUntil?: string; // "11:30" (Accept Late Until - final cutoff for LATE attendance)
   graceMinutes?: number;
   orderIndex?: number;
 }
@@ -53,13 +54,14 @@ export interface CheckpointPreset {
   type: CheckpointType;
   opensAt: string;
   closesAt: string;
+  lateUntil?: string;
   displayTime?: string;
 }
 
 export const CHECKPOINT_PRESETS: readonly CheckpointPreset[] = [
-  { label: 'Morning IN', type: 'IN', opensAt: '07:00', closesAt: '08:30', displayTime: '7:00 AM – 8:30 AM' },
+  { label: 'Morning IN', type: 'IN', opensAt: '07:00', closesAt: '08:30', lateUntil: '11:30', displayTime: '7:00 AM – 8:30 AM' },
   { label: 'Morning OUT', type: 'OUT', opensAt: '11:30', closesAt: '12:30', displayTime: '11:30 AM – 12:30 PM' },
-  { label: 'Afternoon IN', type: 'IN', opensAt: '12:30', closesAt: '13:30', displayTime: '12:30 PM – 1:30 PM' },
+  { label: 'Afternoon IN', type: 'IN', opensAt: '12:30', closesAt: '13:30', lateUntil: '16:30', displayTime: '12:30 PM – 1:30 PM' },
   { label: 'Afternoon OUT', type: 'OUT', opensAt: '16:30', closesAt: '17:30', displayTime: '4:30 PM – 5:30 PM' },
 ] as const;
 
@@ -113,6 +115,8 @@ export interface CreateOccurrenceDto {
   startTime: string;
   endTime: string;
   gracePeriodMinutes?: number;
+  checkpoints?: AttendanceCheckpoint[];
+  activeCheckpointId?: string | null;
 }
 
 export interface UpdateOccurrenceDto {

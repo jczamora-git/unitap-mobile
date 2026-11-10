@@ -376,5 +376,108 @@ describe('UniTap 2.0 Event-Based Absentee Detection & Bulk Fine Assessment', () 
     const ob = await FinanceRepository.getStudentObligations(stuPresent, semesterId);
     expect(ob.length).toBe(0);
   });
+
+  it('supports per-checkpoint absentee detection and fine assessment', async () => {
+    const { eventService } = await import('@/services/event.service');
+
+    // Configure 2 checkpoints: Morning IN and Morning OUT
+    const checkpoints = [
+      { id: 'cp_in', label: 'Morning IN', type: 'IN' as const, orderIndex: 0 },
+      { id: 'cp_out', label: 'Morning OUT', type: 'OUT' as const, orderIndex: 1 },
+    ];
+    await eventService.updateOccurrenceCheckpoints(occurrenceId, checkpoints);
+
+    // stuAbsent scanned Morning IN only (partial attendance)
+    await AttendanceRepository.recordAttendance(
+      {
+        id: 'att_stu_absent_cp_in',
+        occurrence_id: occurrenceId,
+        student_id: stuAbsent,
+        status: 'PRESENT',
+        checked_in_at: '2026-09-15T08:05:00Z',
+        method: 'NFC',
+        checkpoint_id: 'cp_in',
+        photo_checked: 0,
+        updated_at: '2026-09-15T08:05:00Z',
+      },
+      'officer_test'
+    );
+
+    // 1. Checkpoint IN absentee detection: stuAbsent should NOT be absent
+    const inResult = await FinanceRepository.getAbsenteeCandidates(occurrenceId, ruleId, 'cp_in');
+    expect(inResult.candidates.some((c) => c.studentId === stuAbsent)).toBe(false);
+
+    // 2. Checkpoint OUT absentee detection: stuAbsent SHOULD be absent
+    const outResult = await FinanceRepository.getAbsenteeCandidates(occurrenceId, ruleId, 'cp_out');
+    expect(outResult.candidates.some((c) => c.studentId === stuAbsent)).toBe(true);
+
+    // 3. Whole-Event mode: stuAbsent has partial attendance, so NOT a whole-event absentee
+    const wholeResult = await FinanceRepository.getAbsenteeCandidates(occurrenceId, ruleId);
+    expect(wholeResult.candidates.some((c) => c.studentId === stuAbsent)).toBe(false);
+
+    // 4. Assess bulk fine for Checkpoint OUT
+    const assessResult = await FinanceRepository.assessBulkFines({
+      occurrenceId,
+      ruleId,
+      fineTitle: 'Absence Fine: Morning OUT',
+      amountCentavos: 3000,
+      studentIds: [stuAbsent],
+      actorUserId: 'officer_test',
+      mode: 'PER_CHECKPOINT',
+      checkpointId: 'cp_out',
+    });
+    expect(assessResult.assessedCount).toBe(1);
+
+    // 5. Duplicate assessment check (idempotency)
+    const duplicateResult = await FinanceRepository.assessBulkFines({
+      occurrenceId,
+      ruleId,
+      fineTitle: 'Absence Fine: Morning OUT',
+      amountCentavos: 3000,
+      studentIds: [stuAbsent],
+      actorUserId: 'officer_test',
+      mode: 'PER_CHECKPOINT',
+      checkpointId: 'cp_out',
+    });
+    expect(duplicateResult.skippedCount).toBe(1);
+    expect(duplicateResult.assessedCount).toBe(0);
+  });
+
+  it('initializes canonical checkpoints with default_in when checkpoints omitted', async () => {
+    const { eventService } = await import('@/services/event.service');
+    const occ = await eventService.createOccurrence({
+      eventId,
+      title: 'Canonical Session',
+      date: '2026-10-15',
+      startTime: '08:00',
+      endTime: '12:00',
+    });
+
+    expect(occ.checkpoints).toBeDefined();
+    expect(occ.checkpoints!.length).toBe(1);
+    expect(occ.checkpoints![0].id).toBe('default_in');
+    expect(occ.activeCheckpointId).toBe('default_in');
+  });
+
+  it('preserves custom checkpoints without injecting phantom default_in', async () => {
+    const { eventService } = await import('@/services/event.service');
+    const customCps = [
+      { id: 'cp_morning_in', label: 'Morning IN', type: 'IN' as const, orderIndex: 0 },
+      { id: 'cp_morning_out', label: 'Morning OUT', type: 'OUT' as const, orderIndex: 1 },
+    ];
+    const occ = await eventService.createOccurrence({
+      eventId,
+      title: 'Custom Multi-Checkpoint Session',
+      date: '2026-10-16',
+      startTime: '08:00',
+      endTime: '17:00',
+      checkpoints: customCps,
+    });
+
+    expect(occ.checkpoints).toBeDefined();
+    expect(occ.checkpoints!.length).toBe(2);
+    expect(occ.checkpoints!.some((c) => c.id === 'default_in')).toBe(false);
+    expect(occ.checkpoints![0].id).toBe('cp_morning_in');
+  });
 });
 
